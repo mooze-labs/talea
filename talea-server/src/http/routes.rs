@@ -14,6 +14,8 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use tower::ServiceBuilder;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::config::Config;
 use crate::http::auth::{self, AuthConfig};
@@ -87,6 +89,9 @@ pub fn router(service: Arc<LedgerService>, auth: AuthConfig, max_inflight: usize
     Router::new()
         .nest("/v1", api)
         .route("/health", get(|| async { "ok" }))
+        .merge(
+            SwaggerUi::new("/docs").url("/openapi.json", crate::http::openapi::ApiDoc::openapi()),
+        )
         .layer(
             ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(handle_middleware_error))

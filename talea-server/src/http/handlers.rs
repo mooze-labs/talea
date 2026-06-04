@@ -10,17 +10,23 @@ use talea_core::api::*;
 use crate::http::error::ApiFailure;
 use crate::http::routes::AppState;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct AsOfQuery {
     pub as_of: Option<DateTime<Utc>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct HistoryQuery {
     pub after_seq: Option<i64>,
     pub limit: Option<u32>,
 }
 
+#[utoipa::path(post, path = "/v1/assets", request_body = AssetDraft,
+    responses(
+        (status = 204, description = "registered (idempotent on id)"),
+        (status = 400, body = ApiError), (status = 401, body = ApiError),
+        (status = 409, description = "same id, different definition", body = ApiError),
+    ), security(("bearer" = [])), tag = "registry")]
 pub async fn register_asset(
     State(state): State<AppState>,
     Json(draft): Json<AssetDraft>,
@@ -33,6 +39,13 @@ pub async fn register_asset(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(post, path = "/v1/accounts", request_body = AccountDraft,
+    responses(
+        (status = 204, description = "opened (idempotent on book+path)"),
+        (status = 400, body = ApiError), (status = 401, body = ApiError),
+        (status = 404, description = "unknown asset", body = ApiError),
+        (status = 409, body = ApiError),
+    ), security(("bearer" = [])), tag = "registry")]
 pub async fn open_account(
     State(state): State<AppState>,
     Json(draft): Json<AccountDraft>,
@@ -45,6 +58,14 @@ pub async fn open_account(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(post, path = "/v1/transactions", request_body = TransactionDraft,
+    responses(
+        (status = 200, description = "committed or deduplicated replay", body = Posted),
+        (status = 400, description = "unbalanced / invalid amount / malformed draft", body = ApiError),
+        (status = 401, body = ApiError),
+        (status = 404, description = "unknown account", body = ApiError),
+        (status = 409, description = "min_balance violation", body = ApiError),
+    ), security(("bearer" = [])), tag = "ledger")]
 pub async fn post_transaction(
     State(state): State<AppState>,
     Json(draft): Json<TransactionDraft>,
@@ -52,6 +73,16 @@ pub async fn post_transaction(
     Ok(Json(state.service.post(draft).await.map_err(ApiFailure)?))
 }
 
+#[utoipa::path(get, path = "/v1/books/{book}/accounts/{path}/balance",
+    params(
+        ("book" = String, Path, description = "book name"),
+        ("path" = String, Path, description = "account path within the book (may contain ':')"),
+        AsOfQuery,
+    ),
+    responses(
+        (status = 200, description = "effective balance, decimal string per asset precision", body = BalanceView),
+        (status = 401, body = ApiError), (status = 404, body = ApiError),
+    ), security(("bearer" = [])), tag = "reads")]
 pub async fn get_balance(
     State(state): State<AppState>,
     Path((book, path)): Path<(String, String)>,
@@ -66,6 +97,15 @@ pub async fn get_balance(
     ))
 }
 
+#[utoipa::path(get, path = "/v1/books/{book}/accounts/{path}/history",
+    params(
+        ("book" = String, Path), ("path" = String, Path),
+        HistoryQuery,
+    ),
+    responses(
+        (status = 200, description = "seq-ascending postings; after_seq exclusive; one transaction never splits across pages", body = inline(Paged<PostingView>)),
+        (status = 401, body = ApiError), (status = 404, body = ApiError),
+    ), security(("bearer" = [])), tag = "reads")]
 pub async fn get_history(
     State(state): State<AppState>,
     Path((book, path)): Path<(String, String)>,
@@ -84,6 +124,12 @@ pub async fn get_history(
     ))
 }
 
+#[utoipa::path(get, path = "/v1/transactions/{tx_id}",
+    params(("tx_id" = String, Path, description = "transaction id (uuid)")),
+    responses(
+        (status = 200, body = TransactionView),
+        (status = 401, body = ApiError), (status = 404, body = ApiError),
+    ), security(("bearer" = [])), tag = "ledger")]
 pub async fn get_transaction(
     State(state): State<AppState>,
     Path(tx_id): Path<String>,
@@ -97,6 +143,12 @@ pub async fn get_transaction(
     ))
 }
 
+#[utoipa::path(get, path = "/v1/books/{book}/trial-balance",
+    params(("book" = String, Path), AsOfQuery),
+    responses(
+        (status = 200, body = TrialBalance),
+        (status = 401, body = ApiError),
+    ), security(("bearer" = [])), tag = "reads")]
 pub async fn get_trial_balance(
     State(state): State<AppState>,
     Path(book): Path<String>,

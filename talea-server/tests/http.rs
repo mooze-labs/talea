@@ -291,6 +291,66 @@ async fn overload_maps_to_503_with_retry_after() {
     assert!(resp.headers().contains_key(header::RETRY_AFTER));
 }
 
+#[tokio::test]
+async fn openapi_spec_is_complete_and_open() {
+    let app = app(Some("sekrit")).await; // token set: docs must STILL be open
+
+    let (s, spec) = send(&app, "GET", "/openapi.json", None, None).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // every /v1 route the router serves must be documented
+    let paths = spec["paths"].as_object().expect("paths object");
+    let expected = [
+        "/v1/assets",
+        "/v1/accounts",
+        "/v1/transactions",
+        "/v1/transactions/{tx_id}",
+        "/v1/books/{book}/accounts/{path}/balance",
+        "/v1/books/{book}/accounts/{path}/history",
+        "/v1/books/{book}/trial-balance",
+        "/v1/books/{book}/events",
+    ];
+    for route in expected {
+        assert!(paths.contains_key(route), "spec missing {route}");
+    }
+    // drift guard: nothing extra, nothing missing
+    assert_eq!(paths.len(), expected.len(), "spec/router drift: {paths:?}");
+
+    let schemas = spec["components"]["schemas"].as_object().expect("schemas");
+    for schema in [
+        "ApiError",
+        "EventEnvelope",
+        "Posted",
+        "TransactionDraft",
+        "BalanceView",
+    ] {
+        assert!(schemas.contains_key(schema), "missing schema {schema}");
+    }
+    // bearer security scheme present
+    assert!(spec["components"]["securitySchemes"].is_object());
+}
+
+#[tokio::test]
+async fn swagger_ui_serves_without_token() {
+    let app = app(Some("sekrit")).await;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/docs/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // SwaggerUi serves HTML at /docs/ (a bare /docs may 303-redirect there)
+    assert!(
+        res.status() == StatusCode::OK || res.status().is_redirection(),
+        "got {}",
+        res.status()
+    );
+}
+
 /// Exercises the exact middleware stack routes.rs installs, around a slow
 /// service: with one in-flight slot taken, the concurrent request sheds.
 #[tokio::test]
