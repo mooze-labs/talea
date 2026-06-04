@@ -2,6 +2,7 @@
 //! tests can drive scenarios directly; the `talea-bench` binary is a
 //! thin clap wrapper.
 
+pub mod runner;
 pub mod workload;
 
 use std::time::Duration;
