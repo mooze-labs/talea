@@ -143,3 +143,40 @@ async fn concurrent_commits_across_instances_stay_gapless() {
     // dense, no gaps, no duplicates, regardless of which instance won which.
     assert_eq!(seqs, (3..=18).collect::<Vec<_>>());
 }
+
+#[tokio::test]
+async fn idempotency_dedups_across_instances() {
+    let Some((a, b, book, asset_id)) = two_instances().await else {
+        return;
+    };
+
+    // sequential: same key via A then B returns the identical commit
+    let first = a
+        .post(transfer(&book, &asset_id, "dup", 500))
+        .await
+        .unwrap();
+    let second = b
+        .post(transfer(&book, &asset_id, "dup", 500))
+        .await
+        .unwrap();
+    assert!(!first.deduplicated);
+    assert!(second.deduplicated);
+    assert_eq!(first.tx_id, second.tx_id);
+    assert_eq!(first.seq, second.seq);
+    assert_eq!(first.at, second.at); // µs round-trip: byte-identical timestamps
+
+    // concurrent: same key racing through BOTH instances — a true
+    // multi-connection race on the (book, idempotency_key) unique index,
+    // exercising the unique-violation recovery path across pools.
+    let (x, y) = tokio::join!(
+        a.post(transfer(&book, &asset_id, "race", 250)),
+        b.post(transfer(&book, &asset_id, "race", 250)),
+    );
+    let (x, y) = (x.unwrap(), y.unwrap());
+    assert_eq!(x.tx_id, y.tx_id);
+    assert_eq!(x.seq, y.seq);
+
+    // posted exactly once each: 500 + 250 minor at precision 2
+    let bal = a.balance(&book, "cash", None).await.unwrap();
+    assert_eq!(bal.balance, "7.50");
+}
