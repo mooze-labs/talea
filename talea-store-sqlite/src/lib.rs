@@ -325,7 +325,156 @@ impl Store for SqliteTaleaStore {
     }
 
     async fn commit(&self, transaction: &Transaction) -> Result<Committed, StoreError> {
-        todo!()
+        if transaction.book.is_reserved() {
+            return Err(StoreError::InvalidBook(transaction.book.clone()));
+        }
+        let mut db = self.pool.begin().await.map_err(io_err)?;
+
+        // 1. idempotency fast path: a duplicate returns the prior result
+        if let Some(prior) =
+            find_committed(&mut db, &transaction.book, &transaction.idempotency_key).await?
+        {
+            return Ok(prior);
+        }
+
+        // 2. claim the per-book seq (serializes writers on this book => gapless)
+        let seq = next_seq(&mut db, &transaction.book.0).await?;
+        let at = Utc::now();
+
+        // 3. load + validate accounts, accumulating one raw delta per account
+        struct Pending {
+            account: AccountId,
+            asset: AssetId,
+            normal_side: Option<Direction>,
+            min_balance: Option<i64>,
+            delta: i64,
+        }
+        let mut pending: HashMap<String, Pending> = HashMap::new();
+        for posting in &transaction.postings {
+            let key = posting.account.to_key();
+            if !pending.contains_key(&key) {
+                let row = load_account(&mut *db, &key)
+                    .await?
+                    .ok_or_else(|| StoreError::UnknownAccount(posting.account.clone()))?;
+                pending.insert(
+                    key.clone(),
+                    Pending {
+                        account: posting.account.clone(),
+                        asset: row.asset,
+                        normal_side: row.normal_side,
+                        min_balance: row.min_balance,
+                        delta: 0,
+                    },
+                );
+            }
+            let entry = pending.get_mut(&key).unwrap();
+            if entry.asset != *posting.amount.asset() {
+                return Err(StoreError::AssetMismatch {
+                    account: posting.account.clone(),
+                    account_asset: entry.asset.clone(),
+                    asset: posting.amount.asset().clone(),
+                });
+            }
+            entry.delta += posting_delta(posting);
+        }
+
+        // 4. apply to the balances projection, enforcing min_balance on the
+        //    effective (normal-side-adjusted) balance. An Err return drops
+        //    `db`, rolling the whole transaction back.
+        for p in pending.values() {
+            let row = sqlx::query(
+                "INSERT INTO balances (account_key, asset, balance, updated_seq)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (account_key) DO UPDATE
+                     SET balance = balances.balance + ?3, updated_seq = ?4
+                 RETURNING balance",
+            )
+            .bind(p.account.to_key())
+            .bind(p.asset.as_str())
+            .bind(p.delta)
+            .bind(seq)
+            .fetch_one(&mut *db)
+            .await
+            .map_err(io_err)?;
+            let new_raw: i64 = row.get("balance");
+            if let Some(min) = p.min_balance {
+                let would_be = effective(new_raw, &p.normal_side);
+                if would_be < min {
+                    return Err(StoreError::ConstraintViolation {
+                        account: p.account.clone(),
+                        min_balance: min,
+                        would_be,
+                    });
+                }
+            }
+        }
+
+        // 5. write the transaction row; a lost idempotency race surfaces here
+        //    as a unique violation on (book, idempotency_key)
+        let insert_tx = sqlx::query(
+            "INSERT INTO transactions
+                 (tx_id, book, seq, idempotency_key, occurred_at, committed_at, metadata, external_refs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind(transaction.id.0.to_string())
+        .bind(&transaction.book.0)
+        .bind(seq)
+        .bind(&transaction.idempotency_key.0)
+        .bind(transaction.occurred_at)
+        .bind(at)
+        .bind(serde_json::to_string(&transaction.metadata).map_err(io_err)?)
+        .bind(serde_json::to_string(&transaction.external_refs).map_err(io_err)?)
+        .execute(&mut *db)
+        .await;
+        if let Err(e) = insert_tx {
+            let unique = e
+                .as_database_error()
+                .map(|d| d.is_unique_violation())
+                .unwrap_or(false);
+            if unique {
+                drop(db); // roll back our attempt, then return the winner's result
+                let mut db = self.pool.begin().await.map_err(io_err)?;
+                if let Some(prior) =
+                    find_committed(&mut db, &transaction.book, &transaction.idempotency_key).await?
+                {
+                    return Ok(prior);
+                }
+            }
+            return Err(io_err(e));
+        }
+
+        // 6. postings projection + the event-log row (the source of truth)
+        for (idx, posting) in transaction.postings.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO postings
+                     (tx_id, idx, account_key, asset, minor, direction, book, seq, committed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )
+            .bind(transaction.id.0.to_string())
+            .bind(idx as i64)
+            .bind(posting.account.to_key())
+            .bind(posting.amount.asset().as_str())
+            .bind(posting.amount.minor())
+            .bind(posting.direction.as_str())
+            .bind(&transaction.book.0)
+            .bind(seq)
+            .bind(at)
+            .execute(&mut *db)
+            .await
+            .map_err(io_err)?;
+        }
+        insert_event(
+            &mut db,
+            &transaction.book.0,
+            seq,
+            at,
+            &LedgerEvent::TransactionPosted(transaction.clone()),
+        )
+        .await?;
+
+        db.commit().await.map_err(io_err)?;
+        self.publish(transaction.book.clone());
+        Ok(Committed { txid: transaction.id.clone(), seq, at })
     }
 
     async fn balance(

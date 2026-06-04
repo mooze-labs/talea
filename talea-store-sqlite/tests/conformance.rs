@@ -27,3 +27,7 @@ macro_rules! sqlite_test {
 sqlite_test!(registry_is_idempotent);
 sqlite_test!(crypto_asset_round_trips);
 sqlite_test!(unknown_asset_rejected);
+sqlite_test!(commit_happy_path);
+sqlite_test!(unknown_account_rejected);
+sqlite_test!(asset_mismatch_rejected);
+sqlite_test!(seq_is_per_book_and_gapless);
