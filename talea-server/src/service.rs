@@ -309,7 +309,7 @@ impl LedgerApi for LedgerService {
     async fn subscribe(&self, book: &str, from: Seq) -> ApiResult<EventStream> {
         let b = parse_book_lax(book)?;
         let stream = self.store.subscribe(&b, from);
-        Ok(Box::pin(stream.map(|item| {
+        let mapped = stream.map(|item| {
             let s = item.map_err(map_store_err)?;
             let kind = s.event.kind().to_string();
             let payload = serde_json::to_value(&s.event).map_err(|e| {
@@ -317,6 +317,17 @@ impl LedgerApi for LedgerService {
                 ApiError::Internal { message: "event serialization failed".into() }
             })?;
             Ok(EventEnvelope { seq: s.seq, at: s.at, kind, payload })
-        })))
+        });
+        // Both store streams self-terminate after yielding an Err, but that
+        // is their implementation detail — fuse here so a future backend
+        // cannot leak post-error items through the API contract.
+        let fused = mapped.scan(false, |errored, item| {
+            if *errored {
+                return futures::future::ready(None);
+            }
+            *errored = item.is_err();
+            futures::future::ready(Some(item))
+        });
+        Ok(Box::pin(fused))
     }
 }
