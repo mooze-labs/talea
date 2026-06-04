@@ -4,12 +4,14 @@ use serde::{Deserialize, Serialize};
 use crate::types::{Direction, ExternalRef, Seq};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct WireAmount {
     pub minor: i64,
     pub asset: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AssetDraft {
     pub id: String,
     pub class: String,
@@ -20,6 +22,7 @@ pub struct AssetDraft {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AccountDraft {
     pub book: String,
     pub path: String,
@@ -30,6 +33,7 @@ pub struct AccountDraft {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PostingDraft {
     pub account: String,
     pub amount: WireAmount,
@@ -37,6 +41,7 @@ pub struct PostingDraft {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TransactionDraft {
     pub book: String,
     pub idempotency_key: String,

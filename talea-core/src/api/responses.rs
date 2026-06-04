@@ -7,6 +7,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Posted {
     pub tx_id: String,
     pub seq: Seq,
@@ -15,6 +16,7 @@ pub struct Posted {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BalanceView {
     pub account: String,
     pub asset: String,
@@ -24,6 +26,7 @@ pub struct BalanceView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PostingView {
     pub seq: Seq,
     pub tx_id: String,
@@ -34,6 +37,7 @@ pub struct PostingView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TransactionView {
     pub tx_id: String,
     pub book: String,
@@ -45,6 +49,7 @@ pub struct TransactionView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TrialBalanceLine {
     pub asset: String,
     pub debits: i64,
@@ -52,6 +57,7 @@ pub struct TrialBalanceLine {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TrialBalance {
     pub book: String,
     pub as_of: Option<DateTime<Utc>>,
@@ -59,12 +65,14 @@ pub struct TrialBalance {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Paged<T> {
     pub items: Vec<T>,
     pub next: Option<Seq>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct EventEnvelope {
     pub seq: Seq,
     pub at: DateTime<Utc>,
