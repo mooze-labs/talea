@@ -23,6 +23,8 @@ pub async fn spawn_server(token: Option<&str>) -> String {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
+    // deliberately not joined/aborted: each #[tokio::test] runtime drops its
+    // spawned tasks on teardown, taking the server and its port with it
     tokio::spawn(async move {
         axum::serve(listener, app).await.ok();
     });
