@@ -29,6 +29,14 @@ impl PgTaleaStore {
 
 #[async_trait]
 impl Store for PgTaleaStore {
+    async fn register_asset(&self, asset: &AssetDef) -> Result<(), StoreError> {
+        todo!()
+    }
+
+    async fn open_account(&self, def: &AccountDef, cfg: &AccountCfg) -> Result<(), StoreError> {
+        todo!()
+    }
+
     async fn commit(&self, transaction: &Transaction) -> Result<Committed, StoreError> {
         todo!()
     }
