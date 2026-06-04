@@ -17,8 +17,14 @@ pub fn system_book() -> Book {
     Book(SYSTEM_BOOK.to_string())
 }
 
-/// Now, truncated to whole microseconds — the timestamp stores must use
-/// for everything they persist.
+/// Now, truncated to whole microseconds — the timestamp embedded stores
+/// must use for everything they persist.
+///
+/// This is the time source for backends where the process clock IS the
+/// only clock (embedded SQLite). The Postgres store instead sources commit
+/// timestamps from the database's `clock_timestamp()`, captured under the
+/// per-book counter lock, so multi-instance deployments share one time
+/// source and `committed_at` stays monotonic vs seq within a book.
 ///
 /// Ledger timestamps must round-trip identically through every backend.
 /// Postgres TIMESTAMPTZ holds microseconds, while Linux clocks produce
