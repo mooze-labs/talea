@@ -161,6 +161,10 @@ async fn auth_gate() {
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"], "unauthorized");
 
+    // GET routes are gated too
+    let (s, _) = send(&app, "GET", "/v1/books/onramp/trial-balance", None, None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
     // wrong token → 401
     let (s, _) = send(&app, "POST", "/v1/assets", Some("nope"), Some(usd())).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);

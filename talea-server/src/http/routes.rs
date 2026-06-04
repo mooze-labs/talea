@@ -16,6 +16,8 @@ pub struct AppState {
 
 pub fn router(service: Arc<LedgerService>, auth: AuthConfig, max_inflight: usize) -> Router {
     let _ = max_inflight; // consumed by the admission-control task
+    // NOTE: the auth layer wraps REGISTERED routes only — an unmatched path
+    // under /v1 404s without hitting auth (reveals nothing token-gated).
     let api = Router::new()
         .route("/assets", post(handlers::register_asset))
         .route("/accounts", post(handlers::open_account))
