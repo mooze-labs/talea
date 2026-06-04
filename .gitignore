@@ -3,3 +3,5 @@
 talea.db
 talea.db-shm
 talea.db-wal
+
+.DS_Store
