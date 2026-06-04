@@ -86,6 +86,261 @@ where
     }))
 }
 
+/// One account's folded contribution to a transaction.
+struct Pending {
+    account: AccountId,
+    asset: AssetId,
+    normal_side: Option<Direction>,
+    min_balance: Option<i64>,
+    delta: i64,
+}
+
+/// True when a StoreError::Io wraps a sqlx unique-constraint violation.
+fn is_unique_violation(e: &StoreError) -> bool {
+    let StoreError::Io(inner) = e else {
+        return false;
+    };
+    inner
+        .downcast_ref::<sqlx::Error>()
+        .and_then(|e| e.as_database_error())
+        .map(|d| d.is_unique_violation())
+        .unwrap_or(false)
+}
+
+/// Load + validate the accounts a transaction touches and fold its postings
+/// into one signed delta per account, sorted by account key. Read-only: runs
+/// BEFORE the book-counter lock is claimed, keeping validation round trips
+/// outside the per-book critical section. One ANY($1) query loads all
+/// accounts.
+async fn load_pending(
+    db: &mut DbTx<'_, Postgres>,
+    transaction: &Transaction,
+) -> Result<Vec<Pending>, StoreError> {
+    let mut keys: Vec<String> = transaction
+        .postings
+        .iter()
+        .map(|p| p.account.to_key())
+        .collect();
+    keys.sort();
+    keys.dedup();
+
+    let rows = sqlx::query(
+        "SELECT key, asset, normal_side, min_balance FROM accounts WHERE key = ANY($1)",
+    )
+    .bind(&keys)
+    .fetch_all(&mut **db)
+    .await
+    .map_err(io_err)?;
+    let mut loaded: HashMap<String, AccountRow> = rows
+        .into_iter()
+        .map(|r| {
+            let key: String = r.get("key");
+            let row = AccountRow {
+                asset: AssetId::new(r.get::<String, _>("asset")),
+                normal_side: r
+                    .get::<Option<String>, _>("normal_side")
+                    .as_deref()
+                    .and_then(Direction::from_db),
+                min_balance: r.get("min_balance"),
+            };
+            (key, row)
+        })
+        .collect();
+
+    let mut pending: HashMap<String, Pending> = HashMap::new();
+    for posting in &transaction.postings {
+        let key = posting.account.to_key();
+        if !pending.contains_key(&key) {
+            let row = loaded
+                .remove(&key)
+                .ok_or_else(|| StoreError::UnknownAccount(posting.account.clone()))?;
+            pending.insert(
+                key.clone(),
+                Pending {
+                    account: posting.account.clone(),
+                    asset: row.asset,
+                    normal_side: row.normal_side,
+                    min_balance: row.min_balance,
+                    delta: 0,
+                },
+            );
+        }
+        let entry = pending.get_mut(&key).unwrap();
+        if entry.asset != *posting.amount.asset() {
+            return Err(StoreError::AssetMismatch {
+                account: posting.account.clone(),
+                account_asset: entry.asset.clone(),
+                asset: posting.amount.asset().clone(),
+            });
+        }
+        // checked: a silent i64 wrap would corrupt the balance projection
+        entry.delta = entry
+            .delta
+            .checked_add(posting_delta(posting))
+            .ok_or_else(|| {
+                StoreError::Io(format!("posting delta overflow for account {key}").into())
+            })?;
+    }
+    // sorted key order => UNNEST applies upserts in deterministic order,
+    // preserving the lock-order guarantee against deadlocks between commits
+    // touching overlapping account sets
+    let mut out: Vec<Pending> = pending.into_values().collect();
+    out.sort_by_key(|p| p.account.to_key());
+    Ok(out)
+}
+
+/// Write phase: claim the per-book seq, apply balances (one UNNEST upsert in
+/// sorted key order), then the transaction row, postings (one UNNEST
+/// insert), the event row, and the notify. Every statement here runs while
+/// the book-counter lock is held. Runs entirely inside the caller's
+/// transaction or savepoint.
+async fn write_transaction(
+    db: &mut DbTx<'_, Postgres>,
+    transaction: &Transaction,
+    pending: &[Pending],
+) -> Result<Committed, StoreError> {
+    let seq = next_seq(db, &transaction.book.0).await?;
+    let at = ledger_now();
+
+    let b_keys: Vec<String> = pending.iter().map(|p| p.account.to_key()).collect();
+    let b_assets: Vec<String> = pending
+        .iter()
+        .map(|p| p.asset.as_str().to_string())
+        .collect();
+    let b_deltas: Vec<i64> = pending.iter().map(|p| p.delta).collect();
+    // RETURNING rows are matched by key, not position, for robustness
+    let rows = sqlx::query(
+        "INSERT INTO balances (account_key, asset, balance, updated_seq)
+         SELECT t.account_key, t.asset, t.delta, $4
+         FROM UNNEST($1::text[], $2::text[], $3::int8[]) AS t(account_key, asset, delta)
+         ON CONFLICT (account_key) DO UPDATE
+             SET balance = balances.balance + EXCLUDED.balance,
+                 updated_seq = EXCLUDED.updated_seq
+         RETURNING account_key, balance",
+    )
+    .bind(&b_keys)
+    .bind(&b_assets)
+    .bind(&b_deltas)
+    .bind(seq)
+    .fetch_all(&mut **db)
+    .await
+    .map_err(io_err)?;
+    let new_raw: HashMap<String, i64> = rows
+        .into_iter()
+        .map(|r| {
+            (
+                r.get::<String, _>("account_key"),
+                r.get::<i64, _>("balance"),
+            )
+        })
+        .collect();
+    for p in pending {
+        if let Some(min) = p.min_balance {
+            let raw = *new_raw.get(&p.account.to_key()).ok_or_else(|| {
+                StoreError::Io("balance upsert returned no row for account".into())
+            })?;
+            let would_be = effective(raw, &p.normal_side);
+            if would_be < min {
+                return Err(StoreError::ConstraintViolation {
+                    account: p.account.clone(),
+                    min_balance: min,
+                    would_be,
+                });
+            }
+        }
+    }
+
+    // transaction row; a lost idempotency race surfaces here as a unique
+    // violation on (book, idempotency_key) — the caller handles it
+    sqlx::query(
+        "INSERT INTO transactions
+             (tx_id, book, seq, idempotency_key, occurred_at, committed_at, metadata, external_refs)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(transaction.id.0)
+    .bind(&transaction.book.0)
+    .bind(seq)
+    .bind(&transaction.idempotency_key.0)
+    .bind(transaction.occurred_at)
+    .bind(at)
+    .bind(&transaction.metadata)
+    .bind(serde_json::to_value(&transaction.external_refs).map_err(io_err)?)
+    .execute(&mut **db)
+    .await
+    .map_err(io_err)?;
+
+    // postings projection: one UNNEST insert
+    let p_idxs: Vec<i32> = (0..transaction.postings.len() as i32).collect();
+    let p_accounts: Vec<String> = transaction
+        .postings
+        .iter()
+        .map(|p| p.account.to_key())
+        .collect();
+    let p_assets: Vec<String> = transaction
+        .postings
+        .iter()
+        .map(|p| p.amount.asset().as_str().to_string())
+        .collect();
+    let p_minors: Vec<i64> = transaction
+        .postings
+        .iter()
+        .map(|p| p.amount.minor())
+        .collect();
+    let p_directions: Vec<String> = transaction
+        .postings
+        .iter()
+        .map(|p| p.direction.as_str().to_string())
+        .collect();
+    sqlx::query(
+        "INSERT INTO postings
+             (tx_id, idx, account_key, asset, minor, direction, book, seq, committed_at)
+         SELECT $1, t.idx, t.account_key, t.asset, t.minor, t.direction, $2, $3, $4
+         FROM UNNEST($5::int4[], $6::text[], $7::text[], $8::int8[], $9::text[])
+              AS t(idx, account_key, asset, minor, direction)",
+    )
+    .bind(transaction.id.0)
+    .bind(&transaction.book.0)
+    .bind(seq)
+    .bind(at)
+    .bind(&p_idxs)
+    .bind(&p_accounts)
+    .bind(&p_assets)
+    .bind(&p_minors)
+    .bind(&p_directions)
+    .execute(&mut **db)
+    .await
+    .map_err(io_err)?;
+
+    insert_event(
+        db,
+        &transaction.book.0,
+        seq,
+        at,
+        &LedgerEvent::TransactionPosted(transaction.clone()),
+    )
+    .await?;
+    notify(db, &transaction.book, seq).await?;
+    Ok(Committed {
+        txid: transaction.id.clone(),
+        seq,
+        at,
+    })
+}
+
+/// Idempotency check -> validate -> write: the shared body of commit() and
+/// the batch path. Assumes the reserved-book check already ran.
+async fn commit_draft(
+    db: &mut DbTx<'_, Postgres>,
+    transaction: &Transaction,
+) -> Result<Committed, StoreError> {
+    if let Some(prior) = find_committed(db, &transaction.book, &transaction.idempotency_key).await?
+    {
+        return Ok(prior);
+    }
+    let pending = load_pending(db, transaction).await?;
+    write_transaction(db, transaction, &pending).await
+}
+
 /// Claim the next per-book sequence number. The upsert's row lock on the
 /// counter is held until the surrounding transaction commits or rolls back,
 /// so concurrent same-book writers serialize here and an aborted commit
@@ -337,120 +592,15 @@ impl Store for PgTaleaStore {
             return Err(StoreError::InvalidBook(transaction.book.clone()));
         }
         let mut db = self.pool.begin().await.map_err(io_err)?;
-
-        // 1. idempotency fast path: a duplicate returns the prior result
-        if let Some(prior) =
-            find_committed(&mut db, &transaction.book, &transaction.idempotency_key).await?
-        {
-            return Ok(prior);
-        }
-
-        // 2. claim the per-book seq (row-locks the counter => gapless, serialized per book)
-        let seq = next_seq(&mut db, &transaction.book.0).await?;
-        let at = ledger_now();
-
-        // 3. load + validate accounts, accumulating one raw delta per account
-        struct Pending {
-            account: AccountId,
-            asset: AssetId,
-            normal_side: Option<Direction>,
-            min_balance: Option<i64>,
-            delta: i64,
-        }
-        let mut pending: HashMap<String, Pending> = HashMap::new();
-        for posting in &transaction.postings {
-            let key = posting.account.to_key();
-            if !pending.contains_key(&key) {
-                let row = load_account(&mut *db, &key)
-                    .await?
-                    .ok_or_else(|| StoreError::UnknownAccount(posting.account.clone()))?;
-                pending.insert(
-                    key.clone(),
-                    Pending {
-                        account: posting.account.clone(),
-                        asset: row.asset,
-                        normal_side: row.normal_side,
-                        min_balance: row.min_balance,
-                        delta: 0,
-                    },
-                );
+        match commit_draft(&mut db, transaction).await {
+            Ok(committed) => {
+                db.commit().await.map_err(io_err)?;
+                Ok(committed)
             }
-            let entry = pending.get_mut(&key).unwrap();
-            if entry.asset != *posting.amount.asset() {
-                return Err(StoreError::AssetMismatch {
-                    account: posting.account.clone(),
-                    account_asset: entry.asset.clone(),
-                    asset: posting.amount.asset().clone(),
-                });
-            }
-            // checked: a silent i64 wrap would corrupt the balance projection
-            entry.delta = entry
-                .delta
-                .checked_add(posting_delta(posting))
-                .ok_or_else(|| {
-                    StoreError::Io(format!("posting delta overflow for account {key}").into())
-                })?;
-        }
-
-        // 4. apply to the balances projection, enforcing min_balance on the
-        //    effective (normal-side-adjusted) balance. An Err return drops
-        //    `db`, rolling the whole transaction back. Sorted key order keeps
-        //    row-lock acquisition deterministic, preventing lock-order
-        //    deadlocks between commits touching overlapping account sets.
-        let mut ordered: Vec<_> = pending.iter().collect();
-        ordered.sort_by(|a, b| a.0.cmp(b.0));
-        for (_, p) in ordered {
-            let row = sqlx::query(
-                "INSERT INTO balances (account_key, asset, balance, updated_seq)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (account_key) DO UPDATE
-                     SET balance = balances.balance + $3, updated_seq = $4
-                 RETURNING balance",
-            )
-            .bind(p.account.to_key())
-            .bind(p.asset.as_str())
-            .bind(p.delta)
-            .bind(seq)
-            .fetch_one(&mut *db)
-            .await
-            .map_err(io_err)?;
-            let new_raw: i64 = row.get("balance");
-            if let Some(min) = p.min_balance {
-                let would_be = effective(new_raw, &p.normal_side);
-                if would_be < min {
-                    return Err(StoreError::ConstraintViolation {
-                        account: p.account.clone(),
-                        min_balance: min,
-                        would_be,
-                    });
-                }
-            }
-        }
-
-        // 5. write the transaction row; a lost idempotency race surfaces here
-        //    as a unique violation on (book, idempotency_key)
-        let insert_tx = sqlx::query(
-            "INSERT INTO transactions
-                 (tx_id, book, seq, idempotency_key, occurred_at, committed_at, metadata, external_refs)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        )
-        .bind(transaction.id.0)
-        .bind(&transaction.book.0)
-        .bind(seq)
-        .bind(&transaction.idempotency_key.0)
-        .bind(transaction.occurred_at)
-        .bind(at)
-        .bind(&transaction.metadata)
-        .bind(serde_json::to_value(&transaction.external_refs).map_err(io_err)?)
-        .execute(&mut *db)
-        .await;
-        if let Err(e) = insert_tx {
-            let unique = e
-                .as_database_error()
-                .map(|d| d.is_unique_violation())
-                .unwrap_or(false);
-            if unique {
-                drop(db); // roll back our attempt, then return the winner's result
+            // a lost idempotency race: roll back our attempt, then return
+            // the winner's result
+            Err(e) if is_unique_violation(&e) => {
+                drop(db);
                 let mut db = self.pool.begin().await.map_err(io_err)?;
                 if let Some(prior) =
                     find_committed(&mut db, &transaction.book, &transaction.idempotency_key).await?
@@ -459,46 +609,10 @@ impl Store for PgTaleaStore {
                 }
                 // the winner vanished => it rolled back its own commit;
                 // surface the original conflict rather than silently retrying
+                Err(e)
             }
-            return Err(io_err(e));
+            Err(e) => Err(e),
         }
-
-        // 6. postings projection + the event-log row (the source of truth)
-        for (idx, posting) in transaction.postings.iter().enumerate() {
-            sqlx::query(
-                "INSERT INTO postings
-                     (tx_id, idx, account_key, asset, minor, direction, book, seq, committed_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-            )
-            .bind(transaction.id.0)
-            .bind(idx as i32)
-            .bind(posting.account.to_key())
-            .bind(posting.amount.asset().as_str())
-            .bind(posting.amount.minor())
-            .bind(posting.direction.as_str())
-            .bind(&transaction.book.0)
-            .bind(seq)
-            .bind(at)
-            .execute(&mut *db)
-            .await
-            .map_err(io_err)?;
-        }
-        insert_event(
-            &mut db,
-            &transaction.book.0,
-            seq,
-            at,
-            &LedgerEvent::TransactionPosted(transaction.clone()),
-        )
-        .await?;
-        notify(&mut db, &transaction.book, seq).await?;
-
-        db.commit().await.map_err(io_err)?;
-        Ok(Committed {
-            txid: transaction.id.clone(),
-            seq,
-            at,
-        })
     }
 
     async fn balance(
