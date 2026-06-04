@@ -251,7 +251,9 @@ pub async fn execute(cli: Cli) -> ApiResult<Option<serde_json::Value>> {
             let tb = client.trial_balance(&book, as_of).await?;
             Ok(Some(serde_json::to_value(tb).expect("TrialBalance serializes")))
         }
-        Command::Tail { .. } => unreachable!("run() handles Tail before execute()"),
+        // run() handles Tail before calling execute(); a typed error (not a
+        // panic) for library callers that reach this directly
+        Command::Tail { .. } => Err(invalid("tail is a streaming command; call run()".into())),
     }
 }
 
