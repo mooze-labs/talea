@@ -22,7 +22,9 @@ pub(crate) struct Http {
 
 impl Http {
     /// /v1/<segments...> with each segment percent-encoded (account paths
-    /// legally contain ':').
+    /// legally contain ':'). A path prefix on the base URL is preserved
+    /// (http://h/api -> /api/v1/...), so the base must NOT already include
+    /// a version segment.
     pub(crate) fn url(&self, segments: &[&str]) -> ApiResult<reqwest::Url> {
         let mut url = self.base.clone();
         {
