@@ -426,6 +426,59 @@ async fn commit_draft(
     write_transaction(db, transaction, &pending).await
 }
 
+/// One draft inside a shared batch transaction. SAVEPOINT scoping makes a
+/// failed draft roll back alone — including its claimed seq, so a later
+/// draft in the same batch reclaims the freed number and the per-book
+/// sequence stays gapless. Savepoint names come from the loop index, never
+/// from user input.
+async fn commit_in_savepoint(
+    db: &mut DbTx<'_, Sqlite>,
+    i: usize,
+    transaction: &Transaction,
+) -> Result<Committed, StoreError> {
+    if transaction.book.is_reserved() {
+        // nothing written yet: no savepoint needed
+        return Err(StoreError::InvalidBook(transaction.book.clone()));
+    }
+    // SAFETY: savepoint names are "sp_{i}" where i is a loop index (usize),
+    // never derived from user input — no injection risk.
+    sqlx::query(sqlx::AssertSqlSafe(format!("SAVEPOINT sp_{i}")))
+        .execute(&mut **db)
+        .await
+        .map_err(io_err)?;
+    match commit_draft(db, transaction).await {
+        Ok(committed) => {
+            sqlx::query(sqlx::AssertSqlSafe(format!("RELEASE SAVEPOINT sp_{i}")))
+                .execute(&mut **db)
+                .await
+                .map_err(io_err)?;
+            Ok(committed)
+        }
+        Err(e) => {
+            // ROLLBACK TO leaves the savepoint defined; RELEASE discards it
+            sqlx::query(sqlx::AssertSqlSafe(format!("ROLLBACK TO SAVEPOINT sp_{i}")))
+                .execute(&mut **db)
+                .await
+                .map_err(io_err)?;
+            sqlx::query(sqlx::AssertSqlSafe(format!("RELEASE SAVEPOINT sp_{i}")))
+                .execute(&mut **db)
+                .await
+                .map_err(io_err)?;
+            // a unique violation here means another writer owns this
+            // idempotency key; after the rollback a re-read may see it
+            // (Postgres read-committed does; SQLite snapshots usually
+            // surface this as a busy error instead — harmless either way)
+            if is_unique_violation(&e)
+                && let Some(prior) =
+                    find_committed(db, &transaction.book, &transaction.idempotency_key).await?
+            {
+                return Ok(prior);
+            }
+            Err(e)
+        }
+    }
+}
+
 async fn find_committed(
     db: &mut DbTx<'_, Sqlite>,
     book: &Book,
@@ -610,6 +663,45 @@ impl Store for SqliteTaleaStore {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Group commit: the whole batch shares one storage transaction (one
+    /// fsync), each draft isolated by a savepoint. See commit_in_savepoint.
+    async fn commit_batch(&self, txs: &[Transaction]) -> Vec<Result<Committed, StoreError>> {
+        if txs.is_empty() {
+            return Vec::new();
+        }
+        let mut db = match self.pool.begin().await {
+            Ok(db) => db,
+            Err(e) => {
+                let msg = format!("failed to begin batch transaction: {e}");
+                return txs
+                    .iter()
+                    .map(|_| Err(StoreError::Io(msg.clone().into())))
+                    .collect();
+            }
+        };
+        let mut results = Vec::with_capacity(txs.len());
+        for (i, tx) in txs.iter().enumerate() {
+            results.push(commit_in_savepoint(&mut db, i, tx).await);
+        }
+        if let Err(e) = db.commit().await {
+            // nothing became durable: every recorded success is void
+            let msg = format!("batch commit failed: {e}");
+            return txs
+                .iter()
+                .map(|_| Err(StoreError::Io(msg.clone().into())))
+                .collect();
+        }
+        // one wake-up per distinct book with at least one committed draft
+        let mut published: Vec<&str> = Vec::new();
+        for (tx, result) in txs.iter().zip(&results) {
+            if result.is_ok() && !published.contains(&tx.book.0.as_str()) {
+                published.push(&tx.book.0);
+                self.publish(tx.book.clone());
+            }
+        }
+        results
     }
 
     async fn balance(
