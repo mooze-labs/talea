@@ -3,7 +3,10 @@ name = "talea-store-conformance"
 version = "0.1.0"
 edition = "2024"
 publish = false
-license = "MIT"
+description = "Backend-agnostic conformance suite that every talea Store implementation must pass"
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
 
 [dependencies]
 chrono = "0.4.44"

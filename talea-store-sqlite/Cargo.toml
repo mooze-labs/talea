@@ -2,7 +2,10 @@
 name = "talea-store-sqlite"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+description = "SQLite (WAL) storage backend for the talea ledger, with in-process event subscriptions"
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
 
 [dependencies]
 async-stream = "0.3"

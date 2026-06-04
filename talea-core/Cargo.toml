@@ -2,7 +2,10 @@
 name = "talea_core"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+description = "Core contracts for the talea ledger: domain types, the Store persistence trait, and the LedgerApi service trait"
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
 
 [dependencies]
 async-trait = "0.1.89"

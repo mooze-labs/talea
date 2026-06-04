@@ -2,7 +2,10 @@
 name = "talea-server"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+description = "Ledger service and axum REST/SSE transport for the talea ledger, with bearer auth and admission control"
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
 
 [dependencies]
 async-stream = "0.3"
