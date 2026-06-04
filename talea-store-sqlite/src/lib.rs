@@ -191,11 +191,137 @@ async fn find_committed(
 #[async_trait]
 impl Store for SqliteTaleaStore {
     async fn register_asset(&self, asset: &AssetDef) -> Result<(), StoreError> {
-        todo!()
+        let mut db = self.pool.begin().await.map_err(io_err)?;
+
+        if let Some(row) = sqlx::query(
+            "SELECT class, network, native_id, precision, name FROM assets WHERE id = ?1",
+        )
+        .bind(asset.id.as_str())
+        .fetch_optional(&mut *db)
+        .await
+        .map_err(io_err)?
+        {
+            let class: String = row.get("class");
+            let existing = AssetDef {
+                id: asset.id.clone(),
+                class: match class.as_str() {
+                    "fiat" => AssetClass::Fiat,
+                    _ => AssetClass::Crypto {
+                        network: Network::new(
+                            row.get::<Option<String>, _>("network").unwrap_or_default(),
+                        ),
+                        native_id: row.get("native_id"),
+                    },
+                },
+                precision: row.get::<i64, _>("precision") as u8,
+                name: row.get("name"),
+            };
+            return if existing == *asset {
+                Ok(())
+            } else {
+                Err(StoreError::AlreadyExists {
+                    what: format!("asset {}", asset.id.as_str()),
+                })
+            };
+        }
+
+        let (class, network, native_id) = match &asset.class {
+            AssetClass::Fiat => ("fiat", None, None),
+            AssetClass::Crypto { network, native_id } => {
+                ("crypto", Some(network.as_str().to_string()), native_id.clone())
+            }
+        };
+        sqlx::query(
+            "INSERT INTO assets (id, class, network, native_id, precision, name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(asset.id.as_str())
+        .bind(class)
+        .bind(network)
+        .bind(native_id)
+        .bind(asset.precision as i64)
+        .bind(&asset.name)
+        .execute(&mut *db)
+        .await
+        .map_err(io_err)?;
+
+        let seq = next_seq(&mut db, SYSTEM_BOOK).await?;
+        let at = Utc::now();
+        insert_event(&mut db, SYSTEM_BOOK, seq, at, &LedgerEvent::AssetRegistered(asset.clone())).await?;
+        db.commit().await.map_err(io_err)?;
+        self.publish(system_book());
+        Ok(())
     }
 
     async fn open_account(&self, def: &AccountDef, cfg: &AccountCfg) -> Result<(), StoreError> {
-        todo!()
+        if def.id.book.is_reserved() {
+            return Err(StoreError::InvalidBook(def.id.book.clone()));
+        }
+        let key = def.id.to_key();
+        let mut db = self.pool.begin().await.map_err(io_err)?;
+
+        let asset_exists = sqlx::query("SELECT 1 FROM assets WHERE id = ?1")
+            .bind(def.asset.as_str())
+            .fetch_optional(&mut *db)
+            .await
+            .map_err(io_err)?;
+        if asset_exists.is_none() {
+            return Err(StoreError::UnknownAsset(def.asset.clone()));
+        }
+
+        if let Some(row) = sqlx::query(
+            "SELECT asset, kind, normal_side, min_balance FROM accounts WHERE key = ?1",
+        )
+        .bind(&key)
+        .fetch_optional(&mut *db)
+        .await
+        .map_err(io_err)?
+        {
+            let same_def = row.get::<String, _>("asset") == def.asset.as_str()
+                && AccountKind::from_db(&row.get::<String, _>("kind")).as_ref() == Some(&def.kind);
+            let same_cfg = row
+                .get::<Option<String>, _>("normal_side")
+                .as_deref()
+                .and_then(Direction::from_db)
+                == cfg.normal_side
+                && row.get::<Option<i64>, _>("min_balance") == cfg.min_balance;
+            return if same_def && same_cfg {
+                Ok(())
+            } else {
+                Err(StoreError::AlreadyExists {
+                    what: format!("account {key}"),
+                })
+            };
+        }
+
+        sqlx::query(
+            "INSERT INTO accounts (key, book, path, asset, kind, normal_side, min_balance)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .bind(&key)
+        .bind(&def.id.book.0)
+        .bind(&def.id.path)
+        .bind(def.asset.as_str())
+        .bind(def.kind.as_str())
+        .bind(cfg.normal_side.as_ref().map(|d| d.as_str().to_string()))
+        .bind(cfg.min_balance)
+        .execute(&mut *db)
+        .await
+        .map_err(io_err)?;
+
+        let seq = next_seq(&mut db, &def.id.book.0).await?;
+        let at = Utc::now();
+        insert_event(
+            &mut db,
+            &def.id.book.0,
+            seq,
+            at,
+            &LedgerEvent::AccountOpened { def: def.clone(), cfg: cfg.clone() },
+        )
+        .await?;
+        db.commit().await.map_err(io_err)?;
+        self.publish(def.id.book.clone());
+        Ok(())
     }
 
     async fn commit(&self, transaction: &Transaction) -> Result<Committed, StoreError> {
