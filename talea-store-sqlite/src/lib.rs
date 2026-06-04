@@ -494,6 +494,9 @@ impl Store for SqliteTaleaStore {
         as_of: Option<DateTime<Utc>>,
     ) -> Result<Amount, StoreError> {
         let key = account.to_key();
+        // Two pool reads without a transaction: safe because account metadata
+        // (asset, normal_side) is immutable after open_account and the balance
+        // read is a single atomic statement. Revisit if accounts become editable.
         let acct = load_account(&self.pool, &key)
             .await?
             .ok_or_else(|| StoreError::UnknownAccount(account.clone()))?;

@@ -23,6 +23,12 @@ CREATE TABLE books (
     next_seq INTEGER NOT NULL DEFAULT 0
 );
 
+-- Timestamp columns (at, occurred_at, committed_at) hold RFC3339 UTC with a
+-- "+00:00" offset, as encoded by sqlx for chrono DateTime<Utc>. Lexical TEXT
+-- order == time order for this exact encoding (variable fractional digits
+-- included); never store "Z"-suffixed or non-UTC values, or `<=` comparisons
+-- in as_of queries break silently.
+
 -- the append-only source of truth
 CREATE TABLE events (
     book    TEXT NOT NULL,
