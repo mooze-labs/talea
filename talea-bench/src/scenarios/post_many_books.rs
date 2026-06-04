@@ -9,6 +9,7 @@ use talea_client::LedgerApi;
 
 use crate::report::{self, StepJson};
 use crate::runner::{OpOutcome, StepConfig, classify, run_step};
+use crate::scenarios::validate_sweep;
 use crate::{Ctx, seed, verify, workload};
 
 #[derive(Debug, Clone, Serialize)]
@@ -19,6 +20,10 @@ pub struct Opts {
 }
 
 pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
+    validate_sweep(&opts.book_counts, "books")?;
+    if opts.per_book_concurrency == 0 {
+        return Err("per-book-concurrency must be > 0".into());
+    }
     let client = Arc::new(ctx.client()?);
     let max_books = *opts
         .book_counts

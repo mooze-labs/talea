@@ -12,6 +12,7 @@ use talea_core::api::Page;
 
 use crate::report::{self, StepJson};
 use crate::runner::{OpOutcome, StepConfig, classify, run_step};
+use crate::scenarios::validate_sweep;
 use crate::seed::READ_BOOK;
 use crate::{Ctx, seed, verify, workload};
 
@@ -25,6 +26,7 @@ pub struct Opts {
 const ENDPOINTS: [&str; 3] = ["balance", "history", "trial-balance"];
 
 pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
+    validate_sweep(&opts.concurrencies, "concurrency")?;
     let client = Arc::new(ctx.client()?);
     seed::seed_read_book(client.as_ref()).await?;
     seed_depth(&client, opts.depth, opts.seed_workers).await?;

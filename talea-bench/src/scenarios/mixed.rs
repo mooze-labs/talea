@@ -15,6 +15,7 @@ use talea_core::types::Seq;
 
 use crate::report::{self, StepJson, latency_json};
 use crate::runner::{OpOutcome, StepConfig, classify, run_step};
+use crate::scenarios::validate_sweep;
 use crate::workload::{MixOp, MixWeights};
 use crate::{Ctx, seed, verify, workload};
 
@@ -27,6 +28,10 @@ pub struct Opts {
 }
 
 pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
+    validate_sweep(&opts.concurrencies, "concurrency")?;
+    if opts.books == 0 {
+        return Err("books must be > 0".into());
+    }
     let client = Arc::new(ctx.client()?);
     seed::seed_books(client.as_ref(), opts.books).await?;
     let mut probes: Vec<(String, Seq)> = Vec::with_capacity(opts.books);

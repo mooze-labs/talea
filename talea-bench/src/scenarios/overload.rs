@@ -29,6 +29,9 @@ struct ProbeResult {
 }
 
 pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
+    if opts.concurrency == 0 {
+        return Err("concurrency must be > 0".into());
+    }
     let raw = Arc::new(ctx.client_with(RetryPolicy::none())?);
     let retrying = Arc::new(ctx.client()?);
     seed::seed_books(raw.as_ref(), 1).await?;

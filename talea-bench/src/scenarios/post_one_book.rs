@@ -10,6 +10,7 @@ use talea_client::LedgerApi;
 
 use crate::report::{self, StepJson};
 use crate::runner::{OpOutcome, StepConfig, classify, run_step};
+use crate::scenarios::validate_sweep;
 use crate::{Ctx, seed, verify, workload};
 
 #[derive(Debug, Clone, Serialize)]
@@ -19,6 +20,7 @@ pub struct Opts {
 }
 
 pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
+    validate_sweep(&opts.concurrencies, "concurrency")?;
     let client = Arc::new(ctx.client()?);
     seed::seed_books(client.as_ref(), 1).await?;
     let book = workload::book_name(0);
