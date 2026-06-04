@@ -344,7 +344,13 @@ async fn write_transaction(
     for p in pending {
         if let Some(min) = p.min_balance {
             let raw = *new_raw.get(&p.account.to_key()).ok_or_else(|| {
-                StoreError::Io("balance upsert returned no row for account".into())
+                StoreError::Io(
+                    format!(
+                        "balance upsert returned no row for account {}",
+                        p.account.to_key()
+                    )
+                    .into(),
+                )
             })?;
             let would_be = effective(raw, &p.normal_side);
             if would_be < min {

@@ -181,19 +181,20 @@ async fn load_pending(
                 StoreError::Io(format!("posting delta overflow for account {key}").into())
             })?;
     }
-    // sorted key order => UNNEST applies upserts in deterministic order,
-    // preserving the lock-order guarantee against deadlocks between commits
-    // touching overlapping account sets
+    // Sorted key order is best-effort defense-in-depth: a single multi-row
+    // upsert's lock order is plan-dependent, but balance-row deadlocks are
+    // already structurally prevented — same-book writers serialize on the
+    // books counter row before touching balances, and cross-book writers
+    // touch disjoint account_key sets.
     let mut out: Vec<Pending> = pending.into_values().collect();
     out.sort_by_key(|p| p.account.to_key());
     Ok(out)
 }
 
-/// Write phase: claim the per-book seq, apply balances (one UNNEST upsert in
-/// sorted key order), then the transaction row, postings (one UNNEST
-/// insert), the event row, and the notify. Every statement here runs while
-/// the book-counter lock is held. Runs entirely inside the caller's
-/// transaction or savepoint.
+/// Write phase: claim the per-book seq, apply balances (one UNNEST upsert),
+/// then the transaction row, postings (one UNNEST insert), the event row,
+/// and the notify. Every statement here runs while the book-counter lock is
+/// held. Runs entirely inside the caller's transaction or savepoint.
 async fn write_transaction(
     db: &mut DbTx<'_, Postgres>,
     transaction: &Transaction,
@@ -237,7 +238,13 @@ async fn write_transaction(
     for p in pending {
         if let Some(min) = p.min_balance {
             let raw = *new_raw.get(&p.account.to_key()).ok_or_else(|| {
-                StoreError::Io("balance upsert returned no row for account".into())
+                StoreError::Io(
+                    format!(
+                        "balance upsert returned no row for account {}",
+                        p.account.to_key()
+                    )
+                    .into(),
+                )
             })?;
             let would_be = effective(raw, &p.normal_side);
             if would_be < min {
