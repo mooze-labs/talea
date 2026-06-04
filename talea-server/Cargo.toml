@@ -16,9 +16,9 @@ futures = "0.3.32"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sqlx = { version = "0.9.0", features = ["postgres", "sqlite", "chrono", "uuid", "json", "runtime-tokio"] }
-talea_core = { path = "../talea-core/" }
-talea_store_postgres = { path = "../talea-store-postgres/" }
-talea-store-sqlite = { path = "../talea-store-sqlite/" }
+talea_core = { path = "../talea-core/", version = "0.1.0" }
+talea_store_postgres = { path = "../talea-store-postgres/", version = "0.1.0" }
+talea-store-sqlite = { path = "../talea-store-sqlite/", version = "0.1.0" }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
 tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] }

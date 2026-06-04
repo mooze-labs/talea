@@ -13,10 +13,10 @@ dotenvy = "0.15"
 hex = "0.4"
 rand = "0.9"
 serde = { version = "1.0.228", features = ["derive"] }
-talea_core = { path = "../talea-core/" }
-talea-server = { path = "../talea-server/" }
-talea_store_postgres = { path = "../talea-store-postgres/" }
-talea-store-sqlite = { path = "../talea-store-sqlite/" }
+talea_core = { path = "../talea-core/", version = "0.1.0" }
+talea-server = { path = "../talea-server/", version = "0.1.0" }
+talea_store_postgres = { path = "../talea-store-postgres/", version = "0.1.0" }
+talea-store-sqlite = { path = "../talea-store-sqlite/", version = "0.1.0" }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread"] }
 toml = "0.9"
