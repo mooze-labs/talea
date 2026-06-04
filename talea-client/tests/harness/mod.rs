@@ -31,6 +31,8 @@ pub async fn spawn_pg_server(pg_url: &str) -> String {
     format!("http://{addr}")
 }
 
+// Not every test binary that compiles this harness calls spawn_server.
+#[allow(dead_code)]
 pub async fn spawn_server(token: Option<&str>) -> String {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
