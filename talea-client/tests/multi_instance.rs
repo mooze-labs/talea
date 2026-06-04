@@ -114,15 +114,15 @@ async fn next_event(stream: &mut EventStream) -> EventEnvelope {
         .unwrap()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_commits_across_instances_stay_gapless() {
     let Some((a, b, book, asset_id)) = two_instances().await else {
         return;
     };
     let (a, b) = (Arc::new(a), Arc::new(b));
 
-    // 16 commits to ONE book, 8 per instance, all in flight at once —
-    // true multi-connection contention on the counter-row lock.
+    // 16 commits to ONE book, 8 per instance, all in flight at once on a
+    // multi-thread runtime — real cross-pool contention on the counter-row lock.
     let mut joins = Vec::new();
     for i in 0..16 {
         let client = if i % 2 == 0 { a.clone() } else { b.clone() };
@@ -143,7 +143,7 @@ async fn concurrent_commits_across_instances_stay_gapless() {
     assert_eq!(seqs, (3..=18).collect::<Vec<_>>());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idempotency_dedups_across_instances() {
     let Some((a, b, book, asset_id)) = two_instances().await else {
         return;
@@ -164,9 +164,9 @@ async fn idempotency_dedups_across_instances() {
     assert_eq!(first.seq, second.seq);
     assert_eq!(first.at, second.at); // µs round-trip: byte-identical timestamps
 
-    // concurrent: same key racing through BOTH instances — a true
-    // multi-connection race on the (book, idempotency_key) unique index,
-    // exercising the unique-violation recovery path across pools.
+    // concurrent: same key through both instances on a multi-thread runtime
+    // — a real cross-pool race on the (book, idempotency_key) unique index;
+    // whichever instance loses must recover the winner's result.
     let (x, y) = tokio::join!(
         a.post(transfer(&book, &asset_id, "race", 250)),
         b.post(transfer(&book, &asset_id, "race", 250)),
@@ -174,6 +174,8 @@ async fn idempotency_dedups_across_instances() {
     let (x, y) = (x.unwrap(), y.unwrap());
     assert_eq!(x.tx_id, y.tx_id);
     assert_eq!(x.seq, y.seq);
+    // exactly one instance actually inserted; the other deduplicated
+    assert!(x.deduplicated ^ y.deduplicated);
 
     // posted exactly once each: 500 + 250 minor at precision 2
     let bal = a.balance(&book, "cash", None).await.unwrap();
@@ -185,12 +187,25 @@ async fn subscriber_on_a_sees_commits_via_b() {
     let Some((a, b, book, asset_id)) = two_instances().await else {
         return;
     };
-    // from=3 skips the two setup events. Race-free by design: if the commit
-    // lands before the subscription is established, catch-up reads it from
-    // the log; if after, LISTEN/NOTIFY delivers the wake-up across pools.
+    // The client stream is lazy (no I/O until first poll), so step 1 may be
+    // served by the server's catch-up read rather than LISTEN/NOTIFY:
     let mut stream = a.subscribe(&book, 3).await.unwrap();
     let posted = b
-        .post(transfer(&book, &asset_id, "via-b", 100))
+        .post(transfer(&book, &asset_id, "via-b-1", 100))
+        .await
+        .unwrap();
+    let env = next_event(&mut stream).await;
+    assert_eq!(env.seq, posted.seq);
+    assert_eq!(env.kind, "transaction_posted");
+
+    // Step 2 pins cross-instance push delivery: after yielding seq 3 the
+    // server's subscription drains one empty catch-up fetch and parks in
+    // LISTEN. This commit via B can then only arrive through the NOTIFY
+    // wake-up — if notify were broken, the stream would hang and the 10s
+    // timeout would fail the test. (Benign ~ms window: if the commit lands
+    // before the stream parks, catch-up still delivers it.)
+    let posted = b
+        .post(transfer(&book, &asset_id, "via-b-2", 100))
         .await
         .unwrap();
     let env = next_event(&mut stream).await;
@@ -216,7 +231,10 @@ async fn client_resumes_cursor_across_instances() {
         cursor = next_event(&mut stream_a).await.seq;
     }
     assert_eq!(cursor, 5);
-    drop(stream_a); // "instance A goes away"
+    // "Instance A goes away." Teardown of the SSE connection (and A's pinned
+    // pool conn) is async and lazy — nothing below depends on it being prompt;
+    // B has its own pool.
+    drop(stream_a);
 
     // more commits land via B while we are disconnected
     for i in 0..3 {
