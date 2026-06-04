@@ -1,6 +1,7 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{AssetClass, Direction, ExternalRef, Seq};
+use crate::types::{Direction, ExternalRef, Seq};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireAmount {
@@ -44,6 +45,9 @@ pub struct TransactionDraft {
     pub external_refs: Vec<ExternalRef>,
     #[serde(default)]
     pub metadata: serde_json::Value,
+    /// Business/event time; the server defaults it to now when absent.
+    #[serde(default)]
+    pub occurred_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

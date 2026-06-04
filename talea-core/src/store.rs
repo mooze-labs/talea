@@ -33,13 +33,38 @@ pub trait Store: Send + Sync {
     async fn commit(&self, transaction: &Transaction) -> Result<Committed, StoreError>;
 
     /// Current balance (projection) or point-in-time (replay from log).
-    /// `as_of` filters on commit time. Returns the normal-side-adjusted
-    /// effective balance.
+    /// `as_of` filters on commit time. The amount is the normal-side-adjusted
+    /// effective balance; `updated_seq` is the last seq that touched the
+    /// account (0 if never posted to).
     async fn balance(
         &self,
         account: &AccountId,
         as_of: Option<DateTime<Utc>>,
-    ) -> Result<Amount, StoreError>;
+    ) -> Result<BalanceSnapshot, StoreError>;
+
+    /// Registry read; Ok(None) for unregistered ids.
+    async fn asset(&self, id: &AssetId) -> Result<Option<AssetDef>, StoreError>;
+
+    /// Postings for one account, seq-ascending. `after_seq` is EXCLUSIVE
+    /// (None = from the beginning); resume by passing the last seen seq.
+    /// `limit` counts distinct seqs (transactions), so postings of one
+    /// transaction are never split across pages.
+    async fn account_history(
+        &self,
+        account: &AccountId,
+        after_seq: Option<Seq>,
+        limit: usize,
+    ) -> Result<Vec<PostingRecord>, StoreError>;
+
+    /// Committed transaction by id; Ok(None) if unknown.
+    async fn transaction(&self, txid: &TxId) -> Result<Option<StoredTransaction>, StoreError>;
+
+    /// Per-asset debit/credit sums for a book, optionally as of commit time.
+    async fn trial_balance(
+        &self,
+        book: &Book,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<Vec<TrialBalanceRow>, StoreError>;
 
     /// Ordered, paginated log read - rebuilds, reconciliation, stream catch-up.
     /// `from` is inclusive: resume by passing last_seen + 1.
@@ -64,6 +89,36 @@ pub struct Committed {
     pub txid: TxId,
     pub seq: Seq,
     pub at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BalanceSnapshot {
+    pub amount: Amount,
+    pub updated_seq: Seq,
+}
+
+#[derive(Debug, Clone)]
+pub struct PostingRecord {
+    pub seq: Seq,
+    pub txid: TxId,
+    pub account: AccountId,
+    pub amount: Amount,
+    pub direction: Direction,
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredTransaction {
+    pub transaction: Transaction,
+    pub seq: Seq,
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrialBalanceRow {
+    pub asset: AssetId,
+    pub debits: i64,
+    pub credits: i64,
 }
 
 #[derive(Debug, Clone)]

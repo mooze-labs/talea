@@ -166,6 +166,22 @@ async fn fetch_events(
         .collect()
 }
 
+fn decode_asset(id: AssetId, r: &sqlx::sqlite::SqliteRow) -> AssetDef {
+    let class: String = r.get("class");
+    AssetDef {
+        id,
+        class: match class.as_str() {
+            "fiat" => AssetClass::Fiat,
+            _ => AssetClass::Crypto {
+                network: Network::new(r.get::<Option<String>, _>("network").unwrap_or_default()),
+                native_id: r.get("native_id"),
+            },
+        },
+        precision: r.get::<i64, _>("precision") as u8,
+        name: r.get("name"),
+    }
+}
+
 async fn find_committed(
     db: &mut DbTx<'_, Sqlite>,
     book: &Book,
@@ -203,21 +219,7 @@ impl Store for SqliteTaleaStore {
         .await
         .map_err(io_err)?
         {
-            let class: String = row.get("class");
-            let existing = AssetDef {
-                id: asset.id.clone(),
-                class: match class.as_str() {
-                    "fiat" => AssetClass::Fiat,
-                    _ => AssetClass::Crypto {
-                        network: Network::new(
-                            row.get::<Option<String>, _>("network").unwrap_or_default(),
-                        ),
-                        native_id: row.get("native_id"),
-                    },
-                },
-                precision: row.get::<i64, _>("precision") as u8,
-                name: row.get("name"),
-            };
+            let existing = decode_asset(asset.id.clone(), &row);
             return if existing == *asset {
                 Ok(())
             } else {
@@ -492,7 +494,7 @@ impl Store for SqliteTaleaStore {
         &self,
         account: &AccountId,
         as_of: Option<DateTime<Utc>>,
-    ) -> Result<Amount, StoreError> {
+    ) -> Result<BalanceSnapshot, StoreError> {
         let key = account.to_key();
         // Two pool reads without a transaction: safe because account metadata
         // (asset, normal_side) is immutable after open_account and the balance
@@ -501,29 +503,149 @@ impl Store for SqliteTaleaStore {
             .await?
             .ok_or_else(|| StoreError::UnknownAccount(account.clone()))?;
 
-        let raw: i64 = match as_of {
+        let (raw, updated_seq): (i64, i64) = match as_of {
             // current balance: the projection row (0 if never posted to)
-            None => sqlx::query("SELECT balance FROM balances WHERE account_key = ?1")
-                .bind(&key)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(io_err)?
-                .map(|r| r.get("balance"))
-                .unwrap_or(0),
-            // point-in-time: aggregate the postings projection by commit time
-            Some(t) => sqlx::query(
-                "SELECT COALESCE(SUM(CASE WHEN direction = 'D' THEN minor ELSE -minor END), 0) AS raw
-                 FROM postings WHERE account_key = ?1 AND committed_at <= ?2",
+            None => sqlx::query(
+                "SELECT balance, updated_seq FROM balances WHERE account_key = ?1",
             )
             .bind(&key)
-            .bind(t)
-            .fetch_one(&self.pool)
+            .fetch_optional(&self.pool)
             .await
             .map_err(io_err)?
-            .get("raw"),
+            .map(|r| (r.get("balance"), r.get("updated_seq")))
+            .unwrap_or((0, 0)),
+            // point-in-time: aggregate the postings projection by commit time
+            Some(t) => {
+                let r = sqlx::query(
+                    "SELECT COALESCE(SUM(CASE WHEN direction = 'D' THEN minor ELSE -minor END), 0) AS raw,
+                            COALESCE(MAX(seq), 0) AS updated_seq
+                     FROM postings WHERE account_key = ?1 AND committed_at <= ?2",
+                )
+                .bind(&key)
+                .bind(t)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(io_err)?;
+                (r.get("raw"), r.get("updated_seq"))
+            }
         };
 
-        Ok(Amount::new(effective(raw, &acct.normal_side), acct.asset))
+        Ok(BalanceSnapshot {
+            amount: Amount::new(effective(raw, &acct.normal_side), acct.asset),
+            updated_seq,
+        })
+    }
+
+    async fn asset(&self, id: &AssetId) -> Result<Option<AssetDef>, StoreError> {
+        let row = sqlx::query(
+            "SELECT class, network, native_id, precision, name FROM assets WHERE id = ?1",
+        )
+        .bind(id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(io_err)?;
+        Ok(row.map(|r| decode_asset(id.clone(), &r)))
+    }
+
+    async fn account_history(
+        &self,
+        account: &AccountId,
+        after_seq: Option<Seq>,
+        limit: usize,
+    ) -> Result<Vec<PostingRecord>, StoreError> {
+        let key = account.to_key();
+        if load_account(&self.pool, &key).await?.is_none() {
+            return Err(StoreError::UnknownAccount(account.clone()));
+        }
+        // limit counts distinct seqs so one transaction's postings are never
+        // split across pages (multiple postings to one account share a seq)
+        let rows = sqlx::query(
+            "SELECT seq, tx_id, asset, minor, direction, committed_at
+             FROM postings
+             WHERE account_key = ?1 AND seq > ?2
+               AND seq <= (SELECT COALESCE(MAX(seq), 0) FROM (
+                     SELECT DISTINCT seq FROM postings
+                     WHERE account_key = ?1 AND seq > ?2
+                     ORDER BY seq LIMIT ?3) AS s)
+             ORDER BY seq, idx",
+        )
+        .bind(&key)
+        .bind(after_seq.unwrap_or(0))
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(io_err)?;
+        rows.into_iter()
+            .map(|r| {
+                let txid = uuid::Uuid::parse_str(&r.get::<String, _>("tx_id")).map_err(io_err)?;
+                let direction = Direction::from_db(&r.get::<String, _>("direction"))
+                    .ok_or_else(|| StoreError::Io("corrupt direction column".into()))?;
+                Ok(PostingRecord {
+                    seq: r.get("seq"),
+                    txid: TxId(txid),
+                    account: account.clone(),
+                    amount: Amount::new(r.get("minor"), AssetId::new(r.get::<String, _>("asset"))),
+                    direction,
+                    at: r.get("committed_at"),
+                })
+            })
+            .collect()
+    }
+
+    async fn transaction(&self, txid: &TxId) -> Result<Option<StoredTransaction>, StoreError> {
+        let Some(row) = sqlx::query(
+            "SELECT book, seq, committed_at FROM transactions WHERE tx_id = ?1",
+        )
+        .bind(txid.0.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(io_err)?
+        else {
+            return Ok(None);
+        };
+        let book: String = row.get("book");
+        let seq: Seq = row.get("seq");
+        let at: DateTime<Utc> = row.get("committed_at");
+
+        // the log is the truth: the full Transaction lives in the event payload
+        let events = fetch_events(&self.pool, &Book(book), seq, 1).await?;
+        match events.into_iter().next() {
+            Some(Sequenced {
+                event: LedgerEvent::TransactionPosted(transaction),
+                ..
+            }) if transaction.id == *txid => Ok(Some(StoredTransaction { transaction, seq, at })),
+            _ => Err(StoreError::Io(
+                format!("event log missing transaction_posted for tx {}", txid.0).into(),
+            )),
+        }
+    }
+
+    async fn trial_balance(
+        &self,
+        book: &Book,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<Vec<TrialBalanceRow>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT asset,
+                    COALESCE(SUM(CASE WHEN direction = 'D' THEN minor ELSE 0 END), 0) AS debits,
+                    COALESCE(SUM(CASE WHEN direction = 'C' THEN minor ELSE 0 END), 0) AS credits
+             FROM postings
+             WHERE book = ?1 AND (?2 IS NULL OR committed_at <= ?2)
+             GROUP BY asset ORDER BY asset",
+        )
+        .bind(&book.0)
+        .bind(as_of)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(io_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| TrialBalanceRow {
+                asset: AssetId::new(r.get::<String, _>("asset")),
+                debits: r.get("debits"),
+                credits: r.get("credits"),
+            })
+            .collect())
     }
 
     async fn read_events(
