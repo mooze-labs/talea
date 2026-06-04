@@ -692,6 +692,15 @@ impl Store for PgTaleaStore {
     /// fsync), each draft isolated by a savepoint. Each draft's pg_notify is
     /// queued within its savepoint, so a rolled-back draft (or an aborted
     /// outer commit) never emits a wake-up. See commit_in_savepoint.
+    ///
+    /// Operational notes: a draft blocked on a foreign row lock (e.g. the
+    /// book counter held by another instance) head-of-line-blocks its
+    /// batchmates and pins this connection until the lock resolves — no
+    /// lock_timeout or idle_in_transaction_session_timeout is set, on the
+    /// assumption that drafts commit quickly. If sustained cross-instance
+    /// book contention shows up, a lock_timeout on this transaction is the
+    /// hardening knob: it would turn an indefinite stall into a bounded
+    /// per-draft failure that the savepoint already isolates.
     async fn commit_batch(&self, txs: &[Transaction]) -> Vec<Result<Committed, StoreError>> {
         if txs.is_empty() {
             return Vec::new();
