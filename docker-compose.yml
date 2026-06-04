@@ -1,6 +1,11 @@
 # Local Postgres for Talea development:
 #   docker compose up -d
 #   talead init --db-url postgres://talea:talea@localhost:5432/talea
+#
+# Optional Prometheus scraping the server's metrics (see README "Metrics"):
+#   TALEA_METRICS_BIND=0.0.0.0:9100 talead serve
+#   docker compose --profile metrics up -d
+#   open http://localhost:9090
 services:
   postgres:
     image: postgres:17
@@ -17,6 +22,18 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  prometheus:
+    image: prom/prometheus:v3.4.0
+    profiles: ["metrics"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      # makes host.docker.internal resolve on Linux too (built-in on
+      # Docker Desktop); the talea server runs on the HOST, not in compose
+      - "host.docker.internal:host-gateway"
 
 volumes:
   talea-pg:
