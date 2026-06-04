@@ -5,7 +5,7 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use talea_bench::Ctx;
 use talea_bench::report::{self, RunJson, StepJson};
-use talea_bench::scenarios::{post_many_books, post_one_book};
+use talea_bench::scenarios::{post_many_books, post_one_book, reads};
 
 #[derive(Parser)]
 #[command(name = "talea-bench", about = "Capacity benchmark suite for talea-server")]
@@ -47,6 +47,16 @@ enum Cmd {
         #[arg(long, default_value_t = 2)]
         postings_per_tx: usize,
     },
+    /// Read QPS (balance/history/trial-balance) against a deep book
+    Reads {
+        #[arg(long, value_delimiter = ',', default_value = "1,4,16,64")]
+        concurrency: Vec<usize>,
+        /// Transactions pre-seeded into the read book (idempotent)
+        #[arg(long, default_value_t = 20_000)]
+        depth: usize,
+        #[arg(long, default_value_t = 8)]
+        seed_workers: usize,
+    },
 }
 
 #[tokio::main]
@@ -77,6 +87,11 @@ async fn main() {
                 };
                 let config = run_config(&ctx, &opts);
                 ("post-many-books", config, post_many_books::run(&ctx, opts).await)
+            }
+            Cmd::Reads { concurrency, depth, seed_workers } => {
+                let opts = reads::Opts { concurrencies: concurrency, depth, seed_workers };
+                let config = run_config(&ctx, &opts);
+                ("reads", config, reads::run(&ctx, opts).await)
             }
         };
 
