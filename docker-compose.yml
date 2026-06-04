@@ -1,0 +1,22 @@
+# Local Postgres for Talea development:
+#   docker compose up -d
+#   talead init --db-url postgres://talea:talea@localhost:5432/talea
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: talea
+      POSTGRES_PASSWORD: talea
+      POSTGRES_DB: talea
+    ports:
+      - "5432:5432"
+    volumes:
+      - talea-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U talea -d talea"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  talea-pg:

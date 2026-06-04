@@ -1,1 +1,5 @@
 /target
+.env
+talea.db
+talea.db-shm
+talea.db-wal
