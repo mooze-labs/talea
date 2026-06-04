@@ -66,10 +66,13 @@ fn transfer(book: &str, asset_id: &str, idem: &str, minor: i64) -> TransactionDr
 /// Returns (client_a, client_b, book, asset_id); None = skip (no PG).
 async fn two_instances() -> Option<(TaleaClient, TaleaClient, String, String)> {
     let url = pg_url()?;
+    // No retries: a 503/transport failure under contention is a finding, not noise to absorb.
     let a = TaleaClient::builder(harness::spawn_pg_server(&url).await)
+        .retry(RetryPolicy::none())
         .build()
         .unwrap();
     let b = TaleaClient::builder(harness::spawn_pg_server(&url).await)
+        .retry(RetryPolicy::none())
         .build()
         .unwrap();
 

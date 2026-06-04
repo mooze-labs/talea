@@ -1,6 +1,9 @@
 //! Spawns the REAL talea-server router over in-memory SQLite on an
 //! ephemeral port. No mocks: every client test exercises the full loop.
 
+// Each integration-test binary compiles this module but uses only some helpers.
+#![allow(dead_code)]
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -12,14 +15,19 @@ use talea_store_sqlite::SqliteTaleaStore;
 
 /// Spawns the REAL talea-server router over Postgres on an ephemeral port,
 /// with its own connection pool — one call per "instance"; two calls give
-/// two instances sharing one database. `PgTaleaStore::connect` runs
-/// migrations. Same teardown model as `spawn_server`.
-// Not every test binary that compiles this harness uses the PG variant.
-#[allow(dead_code)]
+/// two instances sharing one database. Migrations run before the server
+/// starts. Same teardown model as `spawn_server`.
+///
+/// The pool rides the same teardown: when the test runtime drops the serve
+/// task, the service and its PgPool drop, closing the PG connections.
 pub async fn spawn_pg_server(pg_url: &str) -> String {
-    let store = talea_store_postgres::PgTaleaStore::connect(pg_url)
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(pg_url)
         .await
         .unwrap();
+    let store = talea_store_postgres::PgTaleaStore::new(pool);
+    store.migrate().await.unwrap();
     let service = Arc::new(LedgerService::new(Arc::new(store)));
     let app = router(service, AuthConfig { token: None }, 256);
 
@@ -31,8 +39,6 @@ pub async fn spawn_pg_server(pg_url: &str) -> String {
     format!("http://{addr}")
 }
 
-// Not every test binary that compiles this harness calls spawn_server.
-#[allow(dead_code)]
 pub async fn spawn_server(token: Option<&str>) -> String {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
