@@ -44,7 +44,10 @@ pub(crate) fn subscribe(http: &Http, book: &str, from: Seq) -> ApiResult<EventSt
                         });
                         return;
                     }
-                    tokio::time::sleep(retry.delay_for(failures - 1, None)).await;
+                    tracing::warn!(failures, "subscribe connect failed; backing off");
+                    tracing::warn!(failures, "subscribe rejected; backing off");
+                tracing::warn!(failures, "subscribe stream closed; reconnecting");
+            tokio::time::sleep(retry.delay_for(failures - 1, None)).await;
                     continue 'reconnect;
                 }
             };
@@ -99,6 +102,7 @@ pub(crate) fn subscribe(http: &Http, book: &str, from: Seq) -> ApiResult<EventSt
                             });
                             return;
                         }
+                        tracing::warn!(failures, "subscribe stream dropped; reconnecting");
                         tokio::time::sleep(retry.delay_for(failures - 1, None)).await;
                         continue 'reconnect;
                     }

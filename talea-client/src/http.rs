@@ -113,6 +113,7 @@ impl Http {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
                 .map(Duration::from_secs);
+            tracing::debug!(attempt, "retrying request after backoff");
             tokio::time::sleep(self.retry.delay_for(attempt - 1, retry_after)).await;
         }
     }
