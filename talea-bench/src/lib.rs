@@ -2,6 +2,8 @@
 //! tests can drive scenarios directly; the `talea-bench` binary is a
 //! thin clap wrapper.
 
+pub mod workload;
+
 use std::time::Duration;
 
 use talea_client::{RetryPolicy, TaleaClient};
