@@ -14,7 +14,7 @@ chrono = "0.4.44"
 futures = "0.3.32"
 serde_json = "1.0.150"
 sqlx = { version = "0.9.0", features = ["sqlite", "chrono", "uuid", "runtime-tokio"] }
-talea_core = { path = "../talea-core/", version = "0.1.0" }
+talea-core = { path = "../talea-core/", version = "0.1.0" }
 tokio = { version = "1.52.3", features = ["sync", "rt"] }
 uuid = { version = "1.23.2", features = ["v7"] }
 

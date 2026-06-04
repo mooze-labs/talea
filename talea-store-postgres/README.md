@@ -20,7 +20,7 @@ This is the backend to use when subscribers and writers are separate processes (
 This crate passes the shared [`talea-store-conformance`](../talea-store-conformance/README.md) suite — the `Store` contract in executable form. The tests need a live database:
 
 ```bash
-TALEA_TEST_PG_URL=postgres://postgres:dev@localhost:5432 cargo test -p talea_store_postgres
+TALEA_TEST_PG_URL=postgres://postgres:dev@localhost:5432 cargo test -p talea-store-postgres
 ```
 
 Without `TALEA_TEST_PG_URL` the suite skips. See the [workspace README](../README.md) for the full picture.

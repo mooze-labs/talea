@@ -2569,9 +2569,9 @@ dependencies = [
  "serde_json",
  "sqlx",
  "talea-client",
+ "talea-core",
  "talea-server",
  "talea-store-sqlite",
- "talea_core",
  "tempfile",
  "tokio",
 ]
@@ -2591,11 +2591,28 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "talea-core",
  "talea-server",
  "talea-store-sqlite",
- "talea_core",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "talea-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "utoipa",
+ "uuid",
 ]
 
 [[package]]
@@ -2613,9 +2630,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "talea-core",
+ "talea-store-postgres",
  "talea-store-sqlite",
- "talea_core",
- "talea_store_postgres",
  "thiserror 2.0.18",
  "tokio",
  "tower",
@@ -2633,7 +2650,23 @@ dependencies = [
  "chrono",
  "futures",
  "serde_json",
- "talea_core",
+ "talea-core",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "talea-store-postgres"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "chrono",
+ "futures",
+ "serde_json",
+ "sqlx",
+ "talea-core",
+ "talea-store-conformance",
  "tokio",
  "uuid",
 ]
@@ -2648,41 +2681,8 @@ dependencies = [
  "futures",
  "serde_json",
  "sqlx",
+ "talea-core",
  "talea-store-conformance",
- "talea_core",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "talea_core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "chrono",
- "futures",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "utoipa",
- "uuid",
-]
-
-[[package]]
-name = "talea_store_postgres"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "async-trait",
- "chrono",
- "futures",
- "serde_json",
- "sqlx",
- "talea-store-conformance",
- "talea_core",
  "tokio",
  "uuid",
 ]
@@ -2696,10 +2696,10 @@ dependencies = [
  "hex",
  "rand 0.9.4",
  "serde",
+ "talea-core",
  "talea-server",
+ "talea-store-postgres",
  "talea-store-sqlite",
- "talea_core",
- "talea_store_postgres",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
