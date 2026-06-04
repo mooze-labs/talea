@@ -302,6 +302,10 @@ async fn load_pending(
 /// the event-log row. Every statement here runs while the book-counter lock
 /// is held, so this path carries no validation round trips. Runs entirely
 /// inside the caller's transaction or savepoint.
+///
+/// Parameter batching bounds a single transaction at ~3640 postings (9 binds
+/// per posting against SQLite's 32766-variable cap); past that the insert
+/// fails with a backend error. Real double-entry drafts sit far below this.
 async fn write_transaction(
     db: &mut DbTx<'_, Sqlite>,
     transaction: &Transaction,
