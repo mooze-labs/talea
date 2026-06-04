@@ -129,6 +129,36 @@ fn uuid_like() -> String {
 }
 
 #[tokio::test]
+async fn subscribe_catches_up_then_tails() {
+    use futures::StreamExt;
+    use std::time::Duration;
+
+    let url = harness::spawn_server(None).await;
+    let client = ready_client(&url).await;
+    client.post(transfer("s1", 100)).await.unwrap();
+
+    // from = 3 (trait semantics: first seq delivered) skips the two
+    // account_opened events; seq 3 already exists (catch-up path)
+    let mut stream = client.subscribe("onramp", 3).await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("timed out on catch-up")
+        .expect("stream ended")
+        .unwrap();
+    assert_eq!(first.seq, 3);
+    assert_eq!(first.kind, "transaction_posted");
+
+    // a commit made while subscribed arrives live
+    client.post(transfer("s2", 50)).await.unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("timed out on live event")
+        .expect("stream ended")
+        .unwrap();
+    assert_eq!(second.seq, 4);
+}
+
+#[tokio::test]
 async fn bearer_auth_round_trip() {
     let url = harness::spawn_server(Some("sekrit")).await;
 
