@@ -7,7 +7,7 @@ mod harness;
 use std::time::Duration;
 
 use talea_bench::Ctx;
-use talea_bench::scenarios::post_one_book;
+use talea_bench::scenarios::{post_many_books, post_one_book};
 
 fn smoke_ctx(url: String, run_id: &str) -> Ctx {
     Ctx {
@@ -32,4 +32,22 @@ async fn post_one_book_smoke() {
     assert_eq!(steps.len(), 1);
     assert!(steps[0].successes > 0);
     assert!(steps[0].latency.contains_key("post"));
+}
+
+#[tokio::test]
+async fn post_many_books_smoke() {
+    let url = harness::spawn_server(256).await;
+    let ctx = smoke_ctx(url, "smoke-many");
+    let steps = post_many_books::run(
+        &ctx,
+        post_many_books::Opts {
+            book_counts: vec![1, 2],
+            per_book_concurrency: 2,
+            postings_per_tx: 2,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(steps.len(), 2);
+    assert!(steps.iter().all(|s| s.successes > 0));
 }

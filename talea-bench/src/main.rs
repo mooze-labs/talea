@@ -5,7 +5,7 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use talea_bench::Ctx;
 use talea_bench::report::{self, RunJson, StepJson};
-use talea_bench::scenarios::post_one_book;
+use talea_bench::scenarios::{post_many_books, post_one_book};
 
 #[derive(Parser)]
 #[command(name = "talea-bench", about = "Capacity benchmark suite for talea-server")]
@@ -16,6 +16,7 @@ struct Cli {
     /// Bearer token; omit only against an open dev-mode server
     #[arg(long, env = "TALEA_TOKEN")]
     token: Option<String>,
+    /// Directory for JSON result files
     #[arg(long, default_value = "bench-results")]
     out_dir: PathBuf,
     /// Per-step warmup, excluded from stats
@@ -37,6 +38,15 @@ enum Cmd {
         #[arg(long, default_value_t = 2)]
         postings_per_tx: usize,
     },
+    /// Cross-book scaling: fixed per-book concurrency, sweep book count
+    PostManyBooks {
+        #[arg(long, value_delimiter = ',', default_value = "1,2,4,8,16,32,64,128")]
+        books: Vec<usize>,
+        #[arg(long, default_value_t = 4)]
+        per_book_concurrency: usize,
+        #[arg(long, default_value_t = 2)]
+        postings_per_tx: usize,
+    },
 }
 
 #[tokio::main]
@@ -47,7 +57,7 @@ async fn main() {
     let ctx = Ctx {
         url: cli.url,
         token: cli.token,
-        run_id: started_at.format("%Y%m%dT%H%M%S").to_string(),
+        run_id: started_at.format("%Y%m%dT%H%M%S%.3f").to_string(),
         warmup: Duration::from_secs(cli.warmup_secs),
         duration: Duration::from_secs(cli.duration_secs),
     };
@@ -58,6 +68,15 @@ async fn main() {
                 let opts = post_one_book::Opts { concurrencies: concurrency, postings_per_tx };
                 let config = run_config(&ctx, &opts);
                 ("post-one-book", config, post_one_book::run(&ctx, opts).await)
+            }
+            Cmd::PostManyBooks { books, per_book_concurrency, postings_per_tx } => {
+                let opts = post_many_books::Opts {
+                    book_counts: books,
+                    per_book_concurrency,
+                    postings_per_tx,
+                };
+                let config = run_config(&ctx, &opts);
+                ("post-many-books", config, post_many_books::run(&ctx, opts).await)
             }
         };
 
