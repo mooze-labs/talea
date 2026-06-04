@@ -77,6 +77,7 @@ mod tests {
         assert_eq!(format_minor(150000, 8), "0.00150000");
         assert_eq!(format_minor(-1500, 2), "-15.00");
         assert_eq!(format_minor(5, 2), "0.05");
+        assert_eq!(format_minor(100, 3), "0.100"); // digits.len() == precision boundary
         assert_eq!(format_minor(0, 2), "0.00");
         assert_eq!(format_minor(42, 0), "42");
         assert_eq!(format_minor(-42, 0), "-42");
