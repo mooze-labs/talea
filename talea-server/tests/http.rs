@@ -215,3 +215,51 @@ async fn sse_streams_envelopes_with_ids() {
     assert!(text.contains("id: 3"), "got: {text}");
     assert!(text.contains("transaction_posted"), "got: {text}");
 }
+
+#[tokio::test]
+async fn overload_maps_to_503_with_retry_after() {
+    let resp = talea_server::http::routes::handle_middleware_error(Box::new(
+        tower::load_shed::error::Overloaded::new(),
+    ))
+    .await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(resp.headers().contains_key(header::RETRY_AFTER));
+}
+
+/// Exercises the exact middleware stack routes.rs installs, around a slow
+/// service: with one in-flight slot taken, the concurrent request sheds.
+#[tokio::test]
+async fn load_shed_sheds_when_saturated() {
+    use std::time::Duration;
+    use tower::{Service, ServiceBuilder, ServiceExt, service_fn};
+
+    let svc = ServiceBuilder::new()
+        .layer(axum::error_handling::HandleErrorLayer::new(
+            talea_server::http::routes::handle_middleware_error,
+        ))
+        .load_shed()
+        .concurrency_limit(1)
+        .service(service_fn(|_req: Request<Body>| async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok::<_, std::convert::Infallible>(axum::response::Response::new(Body::empty()))
+        }));
+
+    let slow = {
+        let mut svc = svc.clone();
+        async move {
+            svc.ready().await.unwrap();
+            svc.call(Request::builder().body(Body::empty()).unwrap()).await
+        }
+    };
+    let shed = {
+        let mut svc = svc.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            svc.ready().await.unwrap();
+            svc.call(Request::builder().body(Body::empty()).unwrap()).await
+        }
+    };
+    let (a, b) = tokio::join!(slow, shed);
+    assert_eq!(a.unwrap().status(), StatusCode::OK);
+    assert_eq!(b.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
+}
