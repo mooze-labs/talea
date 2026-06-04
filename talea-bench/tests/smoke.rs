@@ -7,7 +7,8 @@ mod harness;
 use std::time::Duration;
 
 use talea_bench::Ctx;
-use talea_bench::scenarios::{post_many_books, post_one_book, reads};
+use talea_bench::scenarios::{mixed, post_many_books, post_one_book, reads};
+use talea_bench::workload::MixWeights;
 
 fn smoke_ctx(url: String, run_id: &str) -> Ctx {
     Ctx {
@@ -64,4 +65,26 @@ async fn reads_smoke() {
     .unwrap();
     assert_eq!(steps.len(), 3); // balance, history, trial-balance
     assert!(steps.iter().all(|s| s.successes > 0));
+}
+
+#[tokio::test]
+async fn mixed_smoke() {
+    let url = harness::spawn_server(256).await;
+    let ctx = smoke_ctx(url, "smoke-mixed");
+    let steps = mixed::run(
+        &ctx,
+        mixed::Opts {
+            concurrencies: vec![4],
+            books: 2,
+            sse_subscribers: 1,
+            weights: MixWeights { post: 60, balance: 25, history: 10, trial: 5 },
+        },
+    )
+    .await
+    .unwrap();
+    // 1 sweep step; the sse-lag pseudo-step is timing-dependent, so
+    // accept 1 or 2 steps but require the sweep step to have posts.
+    assert!(!steps.is_empty() && steps.len() <= 2);
+    assert!(steps[0].latency.contains_key("post"));
+    assert!(steps[0].successes > 0);
 }

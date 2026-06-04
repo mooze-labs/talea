@@ -5,7 +5,8 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use talea_bench::Ctx;
 use talea_bench::report::{self, RunJson, StepJson};
-use talea_bench::scenarios::{post_many_books, post_one_book, reads};
+use talea_bench::scenarios::{mixed, post_many_books, post_one_book, reads};
+use talea_bench::workload::MixWeights;
 
 #[derive(Parser)]
 #[command(name = "talea-bench", about = "Capacity benchmark suite for talea-server")]
@@ -57,6 +58,23 @@ enum Cmd {
         #[arg(long, default_value_t = 8)]
         seed_workers: usize,
     },
+    /// Realistic blend with SSE subscribers
+    Mixed {
+        #[arg(long, value_delimiter = ',', default_value = "8,32,128")]
+        concurrency: Vec<usize>,
+        #[arg(long, default_value_t = 8)]
+        books: usize,
+        #[arg(long, default_value_t = 4)]
+        sse_subscribers: usize,
+        #[arg(long, default_value_t = 60)]
+        post_weight: u32,
+        #[arg(long, default_value_t = 25)]
+        balance_weight: u32,
+        #[arg(long, default_value_t = 10)]
+        history_weight: u32,
+        #[arg(long, default_value_t = 5)]
+        trial_weight: u32,
+    },
 }
 
 #[tokio::main]
@@ -92,6 +110,29 @@ async fn main() {
                 let opts = reads::Opts { concurrencies: concurrency, depth, seed_workers };
                 let config = run_config(&ctx, &opts);
                 ("reads", config, reads::run(&ctx, opts).await)
+            }
+            Cmd::Mixed {
+                concurrency,
+                books,
+                sse_subscribers,
+                post_weight,
+                balance_weight,
+                history_weight,
+                trial_weight,
+            } => {
+                let opts = mixed::Opts {
+                    concurrencies: concurrency,
+                    books,
+                    sse_subscribers,
+                    weights: MixWeights {
+                        post: post_weight,
+                        balance: balance_weight,
+                        history: history_weight,
+                        trial: trial_weight,
+                    },
+                };
+                let config = run_config(&ctx, &opts);
+                ("mixed", config, mixed::run(&ctx, opts).await)
             }
         };
 
