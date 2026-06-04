@@ -652,3 +652,108 @@ pub async fn trial_balance_sums_per_asset(store: &impl Store) {
     assert_eq!(early.len(), 1);
     assert_eq!(early[0].asset.as_str(), asset_a);
 }
+
+// --- batch commits ------------------------------------------------------
+
+pub async fn commit_batch_all_succeed(store: &impl Store) {
+    let (book, asset_id) = setup_book(store).await;
+    let txs: Vec<Transaction> = (0..3)
+        .map(|i| {
+            transfer(
+                &book,
+                &format!("batch-{i}"),
+                "deposits",
+                "cash",
+                &asset_id,
+                100,
+            )
+        })
+        .collect();
+    let results = store.commit_batch(&txs).await;
+    assert_eq!(results.len(), 3);
+    // setup_book's two AccountOpened events hold seqs 1-2; the batch gets 3,4,5
+    let seqs: Vec<Seq> = results.iter().map(|r| r.as_ref().unwrap().seq).collect();
+    assert_eq!(seqs, vec![3, 4, 5]);
+    let bal = store
+        .balance(&account_id(&book, "cash"), None)
+        .await
+        .unwrap();
+    assert_eq!(bal.amount.minor(), 300);
+}
+
+pub async fn commit_batch_isolates_failures_and_stays_gapless(store: &impl Store) {
+    let book = unique("book");
+    let asset_id = unique("USD");
+    store.register_asset(&asset(&asset_id)).await.unwrap();
+    let (cash_def, mut cash_cfg) = open_spec(&book, "cash", &asset_id, AccountKind::Asset);
+    cash_cfg.min_balance = Some(0);
+    store.open_account(&cash_def, &cash_cfg).await.unwrap();
+    let (exp_def, exp_cfg) = open_spec(&book, "expenses", &asset_id, AccountKind::Expense);
+    store.open_account(&exp_def, &exp_cfg).await.unwrap();
+    let (dep_def, dep_cfg) = open_spec(&book, "deposits", &asset_id, AccountKind::Liability);
+    store.open_account(&dep_def, &dep_cfg).await.unwrap();
+    // seqs 1..=3 are the three AccountOpened events
+
+    let txs = vec![
+        transfer(&book, "fund", "deposits", "cash", &asset_id, 100), // ok
+        transfer(&book, "overdraft", "cash", "expenses", &asset_id, 500), // cash -> -400, blocked
+        transfer(&book, "spend", "cash", "expenses", &asset_id, 30), // ok
+    ];
+    let results = store.commit_batch(&txs).await;
+    match &results[1] {
+        Err(StoreError::ConstraintViolation { would_be, .. }) => assert_eq!(*would_be, -400),
+        other => panic!("expected ConstraintViolation, got {other:?}"),
+    }
+    let a = results[0].as_ref().unwrap();
+    let b = results[2].as_ref().unwrap();
+    // the failed draft's claimed seq rolled back and was reclaimed: gapless
+    assert_eq!((a.seq, b.seq), (4, 5));
+    let bal = store
+        .balance(&account_id(&book, "cash"), None)
+        .await
+        .unwrap();
+    assert_eq!(bal.amount.minor(), 70);
+    // the log holds exactly the two successful TransactionPosted events
+    let events = store.read_events(&Book(book.clone()), 4, 10).await.unwrap();
+    assert_eq!(events.len(), 2);
+}
+
+pub async fn commit_batch_dedups_within_batch(store: &impl Store) {
+    let (book, asset_id) = setup_book(store).await;
+    // same idempotency key, distinct tx ids (transfer() generates a fresh uuid)
+    let first = transfer(&book, "dup", "deposits", "cash", &asset_id, 100);
+    let second = transfer(&book, "dup", "deposits", "cash", &asset_id, 100);
+    let results = store.commit_batch(&[first.clone(), second]).await;
+    let a = results[0].as_ref().unwrap();
+    let b = results[1].as_ref().unwrap();
+    assert_eq!(a.txid, first.id);
+    assert_eq!(a, b); // the duplicate observes the first draft's commit
+    let bal = store
+        .balance(&account_id(&book, "cash"), None)
+        .await
+        .unwrap();
+    assert_eq!(bal.amount.minor(), 100); // posted exactly once
+}
+
+pub async fn commit_batch_dedups_against_prior_commit(store: &impl Store) {
+    let (book, asset_id) = setup_book(store).await;
+    let original = transfer(&book, "prior", "deposits", "cash", &asset_id, 100);
+    let prior = store.commit(&original).await.unwrap();
+    let replay = transfer(&book, "prior", "deposits", "cash", &asset_id, 100);
+    let results = store.commit_batch(&[replay]).await;
+    assert_eq!(*results[0].as_ref().unwrap(), prior);
+}
+
+pub async fn commit_batch_rejects_reserved_book(store: &impl Store) {
+    let (book, asset_id) = setup_book(store).await;
+    let mut bad = transfer(&book, "bad", "deposits", "cash", &asset_id, 100);
+    bad.book = Book(SYSTEM_BOOK.to_string());
+    let good = transfer(&book, "good", "deposits", "cash", &asset_id, 100);
+    let results = store.commit_batch(&[bad, good]).await;
+    assert!(matches!(results[0], Err(StoreError::InvalidBook(_))));
+    assert!(results[1].is_ok()); // the batchmate is unaffected
+}
+
+pub async fn commit_batch_empty_returns_empty(store: &impl Store) {
+    assert!(store.commit_batch(&[]).await.is_empty());
+}

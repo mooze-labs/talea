@@ -64,6 +64,23 @@ pub trait Store: Send + Sync {
     /// Duplicate `idem` => Ok(prior Committed), not an error.
     async fn commit(&self, transaction: &Transaction) -> Result<Committed, StoreError>;
 
+    /// Commit a batch of drafts. Results are positional: `out[i]` is the
+    /// outcome for `txs[i]`, and one rejected draft must not affect its
+    /// batchmates. Duplicate idempotency keys — within the batch or against
+    /// prior commits — resolve to the prior `Committed`, same as `commit`.
+    ///
+    /// The default implementation commits sequentially. Stores should
+    /// override it with a group commit (one storage transaction, one fsync)
+    /// where the backend allows; the per-book writer in talea-server feeds
+    /// its queue through this method.
+    async fn commit_batch(&self, txs: &[Transaction]) -> Vec<Result<Committed, StoreError>> {
+        let mut out = Vec::with_capacity(txs.len());
+        for tx in txs {
+            out.push(self.commit(tx).await);
+        }
+        out
+    }
+
     /// Current balance (projection) or point-in-time (replay from log).
     /// `as_of` filters on commit time. The amount is the normal-side-adjusted
     /// effective balance; `updated_seq` is the last seq that touched the
