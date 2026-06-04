@@ -48,6 +48,8 @@ pub async fn probe_seq(
 ///    book, within a tolerance of `ambiguous` (transport failures that
 ///    may have committed server-side). Below the window or above it:
 ///    hard error. Inside the ambiguous window: warning.
+/// 3. `label` must be unique per (run_id, book) across calls: the after-probe
+///    key embeds it, and a reused label dedups to the OLD seq, poisoning the count.
 pub async fn verify_books(
     api: &dyn LedgerApi,
     run_id: &str,
