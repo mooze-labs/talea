@@ -14,6 +14,7 @@
 | Streaming transport | SSE (axum built-in), resume via `?from=` cursor or `Last-Event-ID` header (header wins) |
 | Authentication | Static bearer token from `TALEA_API_TOKEN`; unset = open dev mode (logged loudly) |
 | Backend selection | Runtime URL scheme on `TALEA_DB_URL`: `postgres://`/`postgresql://` → `PgTaleaStore`, `sqlite://` → `SqliteTaleaStore` |
+| Concurrency / backpressure | The database row lock stays the write arbiter (correct across N server instances); admission control at the HTTP layer (tower limits + pool acquire-timeout → 503). No in-process write channels in v1 |
 | Posting addressing | `PostingDraft.account` is a path within the draft's book; transactions cannot touch other books (book isolation is structural) |
 | Balance formatting | `BalanceView.balance` is a decimal string formatted with the asset's registered precision (e.g. minor=150000, precision=2 → `"1500.00"`) |
 
@@ -143,21 +144,34 @@ GET  /health                                                     → 200, unauth
 - **Auth:** middleware on `/v1/*`. If `TALEA_API_TOKEN` is set, require `Authorization: Bearer <token>` with constant-time comparison, else `401`. Unset = open mode, one loud `tracing::warn!` at startup. `/health` always open.
 - **Status mapping:** `InvalidDraft`/`Unbalanced`/`InvalidAmount` → 400; `Unauthorized` → 401; `UnknownAccount`/`UnknownAsset`/`NotFound` → 404; `AlreadyExists`/`ConstraintViolation` → 409; `Internal` → 500. Response bodies are the serialized `ApiError` (already a tagged serde enum: `{"error": "unbalanced", ...}`).
 
+## Part 4.5 — Concurrency & backpressure
+
+**Write serialization is the database's job.** Commits to the same book queue on the `books` counter-row lock (the gapless-seq mechanism); commits to different books run concurrently. This is correct across multiple server instances sharing one database — which is why v1 deliberately does NOT introduce in-process write channels/actors: a channel only serializes within one process and adds nothing to correctness.
+
+**The per-book write ceiling is inherent:** ~`1 / commit-latency` tx/sec on a single book, horizontal across books. Accept it; don't hide it behind a queue.
+
+**Admission control at the HTTP layer:**
+- Explicit pool sizing: `TALEA_DB_POOL` (default 10) and a short `acquire_timeout` (~3s) on both store pools; pool exhaustion maps to **503 + `Retry-After`**, not a hung request or opaque 500.
+- Tower layers on the router: `ConcurrencyLimitLayer` (`TALEA_MAX_INFLIGHT`, default 256), `LoadShedLayer` (overflow → immediate 503), `TimeoutLayer` (`~30s`, SSE routes excluded).
+- **Idempotency keys are the retry safety valve:** a client receiving 503/timeout retries the same key and can never double-post. Overload degrades to "retry later", never "maybe applied twice".
+
+**Recorded upgrade path (not v1):** if a measured hot-book workload shows lock-waiters starving the pool, insert a per-book writer actor (bounded mpsc + single committer task, full queue → 429) behind `LedgerApi::post`. It caps connections-per-hot-book at 1 and enables group-commit batching, without changing the API or the stores. Do this only when numbers demand it.
+
 ## Part 5 — Binary wiring
 
 `main.rs` + `config.rs`:
 
-- `Config::from_env()`: `TALEA_DB_URL` (required — error out with a clear message), `TALEA_BIND` (default `127.0.0.1:8080`), `TALEA_API_TOKEN` (optional).
-- Store selection by URL scheme; both `connect()` constructors already run migrations.
+- `Config::from_env()`: `TALEA_DB_URL` (required — error out with a clear message), `TALEA_BIND` (default `127.0.0.1:8080`), `TALEA_API_TOKEN` (optional), `TALEA_DB_POOL` (default 10), `TALEA_MAX_INFLIGHT` (default 256).
+- Store selection by URL scheme. The server builds the pools itself (`PgPoolOptions`/`SqlitePoolOptions` with `max_connections = TALEA_DB_POOL`, `acquire_timeout ≈ 3s`) and uses the existing `::new(pool)` constructors + `migrate()` — no store-crate changes needed for pool control.
 - `tracing-subscriber` (env-filter) init; graceful shutdown on ctrl-c.
-- New `talea-server` dependencies: `talea_store_sqlite`, `uuid` (v7), `futures`, `serde_json`, `chrono`, `tracing`, `tracing-subscriber`; dev-deps `tower` (for `ServiceExt::oneshot`), `http-body-util`.
+- New `talea-server` dependencies: `talea_store_sqlite`, `sqlx` (pool options only), `uuid` (v7), `futures`, `serde_json`, `chrono`, `tower` (`limit`, `load-shed`, `timeout` features), `tracing`, `tracing-subscriber`; dev-deps `tower` `util` feature (for `ServiceExt::oneshot`), `http-body-util`.
 
 ## Part 6 — Testing
 
 - **Core unit tests:** `format_minor` (zero precision, zero-padding, negatives, minor < 10^precision).
 - **Conformance additions:** `asset_lookup`, `account_history_pages_exclusively`, `transaction_round_trip` (+ unknown id → None), `trial_balance_sums_per_asset` (+ as_of), `balance_snapshot_updated_seq`. Run by both store crates; Postgres against the live DB.
 - **Service-level tests** (in-memory SQLite store): every validation rejection (unbalanced, non-positive amounts, malformed drafts, crypto-without-network, reserved book), dedup flag on replay, error mapping, view formatting.
-- **HTTP-level tests** (`tower::ServiceExt::oneshot` against the real router + in-memory store): one happy round-trip per endpoint; 400/401/404/409 paths; auth enabled and disabled; SSE smoke test asserting `id:` fields and at least one catch-up event.
+- **HTTP-level tests** (`tower::ServiceExt::oneshot` against the real router + in-memory store): one happy round-trip per endpoint; 400/401/404/409 paths; auth enabled and disabled; SSE smoke test asserting `id:` fields and at least one catch-up event; load-shed test (in-flight limit of 1 + a blocked request → concurrent request sheds as 503).
 
 ## Out of scope
 
