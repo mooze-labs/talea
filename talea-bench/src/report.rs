@@ -90,12 +90,20 @@ pub fn render_table(steps: &[StepJson]) -> String {
     );
     for s in steps {
         let errs: u64 = s.errors.values().sum();
-        let label = if s.invalid { format!("{} [INVALID]", s.label) } else { s.label.clone() };
+        let label = if s.invalid {
+            format!("{} [INVALID]", s.label)
+        } else {
+            s.label.clone()
+        };
         let mut kinds: Vec<&String> = s.latency.keys().collect();
         kinds.sort();
         for k in kinds {
             let l = &s.latency[k];
-            let rate = if s.measured_secs > 0.0 { l.count as f64 / s.measured_secs } else { 0.0 };
+            let rate = if s.measured_secs > 0.0 {
+                l.count as f64 / s.measured_secs
+            } else {
+                0.0
+            };
             out.push_str(&format!(
                 "{:<24} {:<14} {:>10.1} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>10.1} {:>6} {:>6}\n",
                 label,

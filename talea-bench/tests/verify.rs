@@ -11,7 +11,9 @@ async fn verify_accounts_for_every_commit() {
     let book = workload::book_name(0);
 
     // Exact accounting passes with no warnings.
-    let before = verify::probe_seq(&client, &book, "vt", "t1-before").await.unwrap();
+    let before = verify::probe_seq(&client, &book, "vt", "t1-before")
+        .await
+        .unwrap();
     for n in 0..5u64 {
         let p = client
             .post(workload::transfer_draft(&book, "vt/posts", 0, n, 2))
@@ -25,14 +27,18 @@ async fn verify_accounts_for_every_commit() {
     assert!(warnings.is_empty());
 
     // A miscount fails loudly.
-    let before = verify::probe_seq(&client, &book, "vt", "t2-before").await.unwrap();
+    let before = verify::probe_seq(&client, &book, "vt", "t2-before")
+        .await
+        .unwrap();
     let err = verify::verify_books(&client, "vt", "t2", &[(book.clone(), before)], 7, 0)
         .await
         .unwrap_err();
     assert!(err.contains("SEQ MISMATCH"), "got: {err}");
 
     // Ambiguous transport outcomes widen the window and warn.
-    let before = verify::probe_seq(&client, &book, "vt", "t3-before").await.unwrap();
+    let before = verify::probe_seq(&client, &book, "vt", "t3-before")
+        .await
+        .unwrap();
     for n in 0..2u64 {
         client
             .post(workload::transfer_draft(&book, "vt/ambig", 0, n, 2))

@@ -9,7 +9,7 @@ use talea_client::LedgerApi;
 
 use crate::report::{self, StepJson};
 use crate::runner::{OpOutcome, StepConfig, classify, run_step};
-use crate::{seed, verify, workload, Ctx};
+use crate::{Ctx, seed, verify, workload};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Opts {
@@ -20,7 +20,11 @@ pub struct Opts {
 
 pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
     let client = Arc::new(ctx.client()?);
-    let max_books = *opts.book_counts.iter().max().ok_or("no book counts given")?;
+    let max_books = *opts
+        .book_counts
+        .iter()
+        .max()
+        .ok_or("no book counts given")?;
     seed::seed_books(client.as_ref(), max_books).await?;
     let mut probes = Vec::with_capacity(max_books);
     for i in 0..max_books {
@@ -43,7 +47,10 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
                 let scope = scope.clone();
                 async move {
                     let book = workload::book_name(w % n);
-                    match client.post(workload::transfer_draft(&book, &scope, w, s, ppt)).await {
+                    match client
+                        .post(workload::transfer_draft(&book, &scope, w, s, ppt))
+                        .await
+                    {
                         Ok(p) => OpOutcome::Success {
                             kind: "post",
                             deduplicated: p.deduplicated,
@@ -57,7 +64,11 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
             }
         };
         let r = run_step(
-            StepConfig { workers, warmup: ctx.warmup, duration: ctx.duration },
+            StepConfig {
+                workers,
+                warmup: ctx.warmup,
+                duration: ctx.duration,
+            },
             op,
         )
         .await;

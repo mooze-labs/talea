@@ -58,7 +58,9 @@ pub struct StepReport {
 pub fn classify(e: ApiError) -> OpOutcome {
     match e {
         ApiError::Transport { ref message } if message.starts_with("503") => OpOutcome::Saturated,
-        other => OpOutcome::Failed { kind: error_kind(&other).into() },
+        other => OpOutcome::Failed {
+            kind: error_kind(&other).into(),
+        },
     }
 }
 
@@ -107,7 +109,9 @@ impl Local {
     fn record(&mut self, outcome: &OpOutcome, latency: Duration, measured: bool) {
         // Lifetime tallies first: every commit counts, warmup or not.
         match outcome {
-            OpOutcome::Success { committed: true, .. } => self.total_committed += 1,
+            OpOutcome::Success {
+                committed: true, ..
+            } => self.total_committed += 1,
             OpOutcome::Failed { kind } if kind == "transport" => self.total_ambiguous += 1,
             _ => {}
         }
@@ -115,7 +119,9 @@ impl Local {
             return;
         }
         match outcome {
-            OpOutcome::Success { kind, deduplicated, .. } => {
+            OpOutcome::Success {
+                kind, deduplicated, ..
+            } => {
                 self.successes += 1;
                 if *deduplicated {
                     self.deduplicated += 1;
@@ -200,7 +206,9 @@ mod tests {
     #[test]
     fn classify_routes_outcomes() {
         assert!(matches!(
-            classify(ApiError::Transport { message: "503 Service Unavailable: busy".into() }),
+            classify(ApiError::Transport {
+                message: "503 Service Unavailable: busy".into()
+            }),
             OpOutcome::Saturated
         ));
         assert!(matches!(
@@ -228,15 +236,25 @@ mod tests {
                 async move {
                     c.fetch_add(1, Ordering::Relaxed);
                     tokio::time::sleep(Duration::from_millis(5)).await;
-                    OpOutcome::Success { kind: "op", deduplicated: false, committed: true }
+                    OpOutcome::Success {
+                        kind: "op",
+                        deduplicated: false,
+                        committed: true,
+                    }
                 }
             },
         )
         .await;
         let total = calls.load(Ordering::Relaxed);
         assert!(report.successes > 0);
-        assert!(report.successes < total, "warmup ops must be excluded from stats");
-        assert_eq!(report.total_committed, total, "lifetime commits include warmup");
+        assert!(
+            report.successes < total,
+            "warmup ops must be excluded from stats"
+        );
+        assert_eq!(
+            report.total_committed, total,
+            "lifetime commits include warmup"
+        );
         assert_eq!(report.latencies["op"].len(), report.successes);
         assert_eq!(report.workers, 4);
     }
@@ -254,7 +272,9 @@ mod tests {
                 if w == 0 {
                     OpOutcome::Saturated
                 } else {
-                    OpOutcome::Failed { kind: "transport".into() }
+                    OpOutcome::Failed {
+                        kind: "transport".into(),
+                    }
                 }
             },
         )

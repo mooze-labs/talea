@@ -13,7 +13,7 @@ use talea_core::api::Page;
 use crate::report::{self, StepJson};
 use crate::runner::{OpOutcome, StepConfig, classify, run_step};
 use crate::seed::READ_BOOK;
-use crate::{seed, verify, workload, Ctx};
+use crate::{Ctx, seed, verify, workload};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Opts {
@@ -40,9 +40,10 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
                     let client = client.clone();
                     async move {
                         let r = match ep {
-                            "balance" => {
-                                client.balance(READ_BOOK, workload::CASH, None).await.map(|_| ())
-                            }
+                            "balance" => client
+                                .balance(READ_BOOK, workload::CASH, None)
+                                .await
+                                .map(|_| ()),
                             "history" => {
                                 let cursor =
                                     (workload::pseudo(w, s) % top_seq.max(1) as u64) as i64;
@@ -50,7 +51,10 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
                                     .account_history(
                                         READ_BOOK,
                                         workload::CASH,
-                                        Page { after_seq: Some(cursor), limit: 100 },
+                                        Page {
+                                            after_seq: Some(cursor),
+                                            limit: 100,
+                                        },
                                     )
                                     .await
                                     .map(|_| ())
@@ -69,7 +73,11 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
                 }
             };
             let r = run_step(
-                StepConfig { workers: c, warmup: ctx.warmup, duration: ctx.duration },
+                StepConfig {
+                    workers: c,
+                    warmup: ctx.warmup,
+                    duration: ctx.duration,
+                },
                 op,
             )
             .await;
@@ -112,7 +120,8 @@ pub async fn seed_depth(
         }));
     }
     for h in handles {
-        h.await.map_err(|e| format!("seed worker panicked: {e}"))??;
+        h.await
+            .map_err(|e| format!("seed worker panicked: {e}"))??;
     }
     Ok(())
 }

@@ -9,7 +9,10 @@ use talea_bench::scenarios::{mixed, overload, post_many_books, post_one_book, re
 use talea_bench::workload::MixWeights;
 
 #[derive(Parser)]
-#[command(name = "talea-bench", about = "Capacity benchmark suite for talea-server")]
+#[command(
+    name = "talea-bench",
+    about = "Capacity benchmark suite for talea-server"
+)]
 struct Cli {
     /// Server base URL (no /v1)
     #[arg(long, env = "TALEA_URL", default_value = "http://127.0.0.1:8080")]
@@ -100,27 +103,59 @@ async fn main() {
 
     let (scenario, config, result): (&str, serde_json::Value, Result<Vec<StepJson>, String>) =
         match cli.cmd {
-            Cmd::PostOneBook { concurrency, postings_per_tx } => {
-                let opts = post_one_book::Opts { concurrencies: concurrency, postings_per_tx };
+            Cmd::PostOneBook {
+                concurrency,
+                postings_per_tx,
+            } => {
+                let opts = post_one_book::Opts {
+                    concurrencies: concurrency,
+                    postings_per_tx,
+                };
                 let config = run_config(&ctx, &opts);
-                ("post-one-book", config, post_one_book::run(&ctx, opts).await)
+                (
+                    "post-one-book",
+                    config,
+                    post_one_book::run(&ctx, opts).await,
+                )
             }
-            Cmd::PostManyBooks { books, per_book_concurrency, postings_per_tx } => {
+            Cmd::PostManyBooks {
+                books,
+                per_book_concurrency,
+                postings_per_tx,
+            } => {
                 let opts = post_many_books::Opts {
                     book_counts: books,
                     per_book_concurrency,
                     postings_per_tx,
                 };
                 let config = run_config(&ctx, &opts);
-                ("post-many-books", config, post_many_books::run(&ctx, opts).await)
+                (
+                    "post-many-books",
+                    config,
+                    post_many_books::run(&ctx, opts).await,
+                )
             }
-            Cmd::Reads { concurrency, depth, seed_workers } => {
-                let opts = reads::Opts { concurrencies: concurrency, depth, seed_workers };
+            Cmd::Reads {
+                concurrency,
+                depth,
+                seed_workers,
+            } => {
+                let opts = reads::Opts {
+                    concurrencies: concurrency,
+                    depth,
+                    seed_workers,
+                };
                 let config = run_config(&ctx, &opts);
                 ("reads", config, reads::run(&ctx, opts).await)
             }
-            Cmd::Overload { concurrency, postings_per_tx } => {
-                let opts = overload::Opts { concurrency, postings_per_tx };
+            Cmd::Overload {
+                concurrency,
+                postings_per_tx,
+            } => {
+                let opts = overload::Opts {
+                    concurrency,
+                    postings_per_tx,
+                };
                 let config = run_config(&ctx, &opts);
                 ("overload", config, overload::run(&ctx, opts).await)
             }

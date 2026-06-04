@@ -35,12 +35,18 @@ pub fn transfer_draft(
     for _ in 0..postings_per_tx / 2 {
         postings.push(PostingDraft {
             account: CASH.into(),
-            amount: WireAmount { minor: 100, asset: ASSET.into() },
+            amount: WireAmount {
+                minor: 100,
+                asset: ASSET.into(),
+            },
             direction: Direction::Debit,
         });
         postings.push(PostingDraft {
             account: EQUITY.into(),
-            amount: WireAmount { minor: 100, asset: ASSET.into() },
+            amount: WireAmount {
+                minor: 100,
+                asset: ASSET.into(),
+            },
             direction: Direction::Credit,
         });
     }
@@ -148,7 +154,11 @@ mod tests {
             for w in 0..3 {
                 for s in 0..3 {
                     let d = transfer_draft("b", scope, w, s, 2);
-                    assert!(seen.insert(d.idempotency_key.clone()), "dup: {}", d.idempotency_key);
+                    assert!(
+                        seen.insert(d.idempotency_key.clone()),
+                        "dup: {}",
+                        d.idempotency_key
+                    );
                 }
             }
         }
@@ -156,7 +166,12 @@ mod tests {
 
     #[test]
     fn mix_weights_hit_exact_ratios_per_cycle() {
-        let w = MixWeights { post: 60, balance: 25, history: 10, trial: 5 };
+        let w = MixWeights {
+            post: 60,
+            balance: 25,
+            history: 10,
+            trial: 5,
+        };
         let mut counts = [0u32; 4];
         for s in 0..100u64 {
             match w.op_for(s) {
@@ -172,7 +187,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "positive total")]
     fn mix_weights_reject_all_zero() {
-        MixWeights { post: 0, balance: 0, history: 0, trial: 0 }.op_for(0);
+        MixWeights {
+            post: 0,
+            balance: 0,
+            history: 0,
+            trial: 0,
+        }
+        .op_for(0);
     }
 
     #[test]

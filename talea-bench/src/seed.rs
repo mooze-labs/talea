@@ -6,7 +6,7 @@ use talea_client::LedgerApi;
 use talea_core::api::{AccountDraft, AssetDraft};
 use talea_core::types::Direction;
 
-use crate::workload::{book_name, ASSET, CASH, EQUITY};
+use crate::workload::{ASSET, CASH, EQUITY, book_name};
 
 /// Book used by the `reads` scenario; kept separate from bench-{i} so
 /// its event-log depth stays stable across runs.

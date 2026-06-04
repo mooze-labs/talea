@@ -26,7 +26,10 @@ async fn post_one_book_smoke() {
     let ctx = smoke_ctx(url, "smoke-one");
     let steps = post_one_book::run(
         &ctx,
-        post_one_book::Opts { concurrencies: vec![2], postings_per_tx: 2 },
+        post_one_book::Opts {
+            concurrencies: vec![2],
+            postings_per_tx: 2,
+        },
     )
     .await
     .unwrap();
@@ -59,7 +62,11 @@ async fn reads_smoke() {
     let ctx = smoke_ctx(url, "smoke-reads");
     let steps = reads::run(
         &ctx,
-        reads::Opts { concurrencies: vec![2], depth: 50, seed_workers: 4 },
+        reads::Opts {
+            concurrencies: vec![2],
+            depth: 50,
+            seed_workers: 4,
+        },
     )
     .await
     .unwrap();
@@ -77,7 +84,12 @@ async fn mixed_smoke() {
             concurrencies: vec![4],
             books: 2,
             sse_subscribers: 1,
-            weights: MixWeights { post: 60, balance: 25, history: 10, trial: 5 },
+            weights: MixWeights {
+                post: 60,
+                balance: 25,
+                history: 10,
+                trial: 5,
+            },
         },
     )
     .await
@@ -96,7 +108,10 @@ async fn overload_smoke() {
     let ctx = smoke_ctx(url, "smoke-overload");
     let steps = overload::run(
         &ctx,
-        overload::Opts { concurrency: 16, postings_per_tx: 2 },
+        overload::Opts {
+            concurrency: 16,
+            postings_per_tx: 2,
+        },
     )
     .await
     .unwrap();

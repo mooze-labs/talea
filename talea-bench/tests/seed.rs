@@ -18,11 +18,20 @@ async fn seed_is_idempotent_and_accounts_accept_postings() {
         .await
         .unwrap();
     assert!(!p.deduplicated);
-    let b = client.balance("bench-2", workload::CASH, None).await.unwrap();
+    let b = client
+        .balance("bench-2", workload::CASH, None)
+        .await
+        .unwrap();
     assert_eq!(b.balance, "1.00"); // 100 minor at precision 2
 
     let p = client
-        .post(workload::transfer_draft(seed::READ_BOOK, "seed-test-read", 0, 0, 2))
+        .post(workload::transfer_draft(
+            seed::READ_BOOK,
+            "seed-test-read",
+            0,
+            0,
+            2,
+        ))
         .await
         .unwrap();
     assert!(!p.deduplicated);

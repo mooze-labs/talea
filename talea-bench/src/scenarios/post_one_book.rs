@@ -10,7 +10,7 @@ use talea_client::LedgerApi;
 
 use crate::report::{self, StepJson};
 use crate::runner::{OpOutcome, StepConfig, classify, run_step};
-use crate::{seed, verify, workload, Ctx};
+use crate::{Ctx, seed, verify, workload};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Opts {
@@ -38,7 +38,10 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
                 let book = book.clone();
                 let scope = scope.clone();
                 async move {
-                    match client.post(workload::transfer_draft(&book, &scope, w, s, ppt)).await {
+                    match client
+                        .post(workload::transfer_draft(&book, &scope, w, s, ppt))
+                        .await
+                    {
                         Ok(p) => OpOutcome::Success {
                             kind: "post",
                             deduplicated: p.deduplicated,
@@ -52,7 +55,11 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
             }
         };
         let r = run_step(
-            StepConfig { workers: c, warmup: ctx.warmup, duration: ctx.duration },
+            StepConfig {
+                workers: c,
+                warmup: ctx.warmup,
+                duration: ctx.duration,
+            },
             op,
         )
         .await;

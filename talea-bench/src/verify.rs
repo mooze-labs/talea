@@ -23,12 +23,18 @@ pub async fn probe_seq(
         postings: vec![
             PostingDraft {
                 account: CASH.into(),
-                amount: WireAmount { minor: 1, asset: ASSET.into() },
+                amount: WireAmount {
+                    minor: 1,
+                    asset: ASSET.into(),
+                },
                 direction: Direction::Debit,
             },
             PostingDraft {
                 account: EQUITY.into(),
-                amount: WireAmount { minor: 1, asset: ASSET.into() },
+                amount: WireAmount {
+                    minor: 1,
+                    asset: ASSET.into(),
+                },
                 direction: Direction::Credit,
             },
         ],

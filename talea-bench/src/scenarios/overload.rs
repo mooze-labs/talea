@@ -12,7 +12,7 @@ use talea_client::{LedgerApi, Posted, RetryPolicy};
 
 use crate::report::{self, StepJson};
 use crate::runner::{OpOutcome, StepConfig, classify, run_step};
-use crate::{seed, verify, workload, Ctx};
+use crate::{Ctx, seed, verify, workload};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Opts {
@@ -56,7 +56,10 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
             let book = book.clone();
             let scope = scope.clone();
             async move {
-                match client.post(workload::transfer_draft(&book, &scope, w, s, ppt)).await {
+                match client
+                    .post(workload::transfer_draft(&book, &scope, w, s, ppt))
+                    .await
+                {
                     Ok(p) => OpOutcome::Success {
                         kind: "post",
                         deduplicated: p.deduplicated,
@@ -70,14 +73,20 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
         }
     };
     let r_a = run_step(
-        StepConfig { workers: opts.concurrency, warmup: ctx.warmup, duration: ctx.duration },
+        StepConfig {
+            workers: opts.concurrency,
+            warmup: ctx.warmup,
+            duration: ctx.duration,
+        },
         op_a,
     )
     .await;
     committed += r_a.total_committed;
     ambiguous += r_a.total_ambiguous;
 
-    let probe = probe.await.map_err(|e| format!("probe task panicked: {e}"))?;
+    let probe = probe
+        .await
+        .map_err(|e| format!("probe task panicked: {e}"))?;
     committed += probe.committed;
     if probe.saw_503 && !probe.retry_after_present {
         return Err("503 observed WITHOUT a Retry-After header — shedding contract broken".into());
@@ -109,7 +118,10 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
             let book = book.clone();
             let scope = scope.clone();
             async move {
-                match client.post(workload::transfer_draft(&book, &scope, w, s, ppt)).await {
+                match client
+                    .post(workload::transfer_draft(&book, &scope, w, s, ppt))
+                    .await
+                {
                     Ok(p) => OpOutcome::Success {
                         kind: "post",
                         deduplicated: p.deduplicated,
@@ -123,7 +135,11 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
         }
     };
     let r_b = run_step(
-        StepConfig { workers: opts.concurrency, warmup: ctx.warmup, duration: ctx.duration },
+        StepConfig {
+            workers: opts.concurrency,
+            warmup: ctx.warmup,
+            duration: ctx.duration,
+        },
         op_b,
     )
     .await;
@@ -163,7 +179,11 @@ async fn retry_after_probe(
     let client = reqwest::Client::new();
     let endpoint = format!("{}/v1/transactions", url.trim_end_matches('/'));
     let draft = workload::transfer_draft(&book, &format!("{run_id}/overload-probe"), 0, 0, 2);
-    let mut result = ProbeResult { saw_503: false, retry_after_present: false, committed: 0 };
+    let mut result = ProbeResult {
+        saw_503: false,
+        retry_after_present: false,
+        committed: 0,
+    };
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let mut req = client.post(&endpoint).json(&draft);
@@ -173,8 +193,7 @@ async fn retry_after_probe(
         let Ok(resp) = req.send().await else { continue };
         if resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
             result.saw_503 = true;
-            result.retry_after_present =
-                resp.headers().contains_key(reqwest::header::RETRY_AFTER);
+            result.retry_after_present = resp.headers().contains_key(reqwest::header::RETRY_AFTER);
             return result;
         }
         if resp.status().is_success()

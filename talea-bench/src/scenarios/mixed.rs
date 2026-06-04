@@ -59,8 +59,7 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
             };
             while let Some(item) = stream.next().await {
                 if let Ok(env) = item {
-                    let us =
-                        (Utc::now() - env.at).num_microseconds().unwrap_or(0).max(1) as u64;
+                    let us = (Utc::now() - env.at).num_microseconds().unwrap_or(0).max(1) as u64;
                     let _ = lag.lock().expect("lag lock").record(us);
                 }
             }
@@ -101,16 +100,14 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
                                 Err(e) => classify(e),
                             }
                         }
-                        MixOp::Balance => {
-                            match client.balance(book, workload::CASH, None).await {
-                                Ok(_) => OpOutcome::Success {
-                                    kind: "balance",
-                                    deduplicated: false,
-                                    committed: false,
-                                },
-                                Err(e) => classify(e),
-                            }
-                        }
+                        MixOp::Balance => match client.balance(book, workload::CASH, None).await {
+                            Ok(_) => OpOutcome::Success {
+                                kind: "balance",
+                                deduplicated: false,
+                                committed: false,
+                            },
+                            Err(e) => classify(e),
+                        },
                         MixOp::History => {
                             let cursor =
                                 (workload::pseudo(w, s) % (*base_seq).max(1) as u64) as i64;
@@ -118,7 +115,10 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
                                 .account_history(
                                     book,
                                     workload::CASH,
-                                    Page { after_seq: Some(cursor), limit: 100 },
+                                    Page {
+                                        after_seq: Some(cursor),
+                                        limit: 100,
+                                    },
                                 )
                                 .await
                             {
@@ -143,7 +143,11 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
             }
         };
         let r = run_step(
-            StepConfig { workers: c, warmup: ctx.warmup, duration: ctx.duration },
+            StepConfig {
+                workers: c,
+                warmup: ctx.warmup,
+                duration: ctx.duration,
+            },
             op,
         )
         .await;
