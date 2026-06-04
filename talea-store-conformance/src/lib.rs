@@ -174,6 +174,9 @@ pub async fn commit_is_idempotent(store: &impl Store) {
     assert_eq!(bal.minor(), 500);
 }
 
+/// Interleaved (single-task `join!`) duplicate commits — an idempotency-under-
+/// interleaving check, NOT a true parallel race; the unique-violation recovery
+/// path needs multi-connection contention to be exercised for real.
 pub async fn concurrent_same_key_commits_once(store: &(impl Store + Sync)) {
     let (book, asset_id) = setup_book(store).await;
     let tx = transfer(&book, "race", "deposits", "cash", &asset_id, 250);
@@ -230,6 +233,9 @@ pub async fn min_balance_is_normal_side_adjusted(store: &impl Store) {
 
 // --- reads ------------------------------------------------------------
 
+/// Assumes the store stamps commit time from the same clock as this process
+/// (the plan's stores take `Utc::now()` in-process); a DB-side clock with skew
+/// could place `mid` on the wrong side of a commit.
 pub async fn balance_as_of_point_in_time(store: &impl Store) {
     let (book, asset_id) = setup_book(store).await;
     store.commit(&transfer(&book, "p1", "deposits", "cash", &asset_id, 100)).await.unwrap();
@@ -286,7 +292,9 @@ pub async fn system_book_is_reserved(store: &impl Store) {
     }
     assert!(found, "AssetRegistered event not found in _system book");
 
-    // user activity in books starting with '_' is rejected:
+    // user activity in books starting with '_' is rejected. NOTE: this asserts
+    // the reservation check runs BEFORE account/asset lookups ("a"/"b" below
+    // were never opened) — stores must validate the book name first.
     let (def, cfg) = open_spec("_sneaky", "cash", &asset_id, AccountKind::Asset);
     match store.open_account(&def, &cfg).await {
         Err(StoreError::InvalidBook(_)) => {}
