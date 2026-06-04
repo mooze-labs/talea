@@ -85,7 +85,7 @@ pub fn render_table(steps: &[StepJson]) -> String {
         us as f64 / 1000.0
     }
     let mut out = format!(
-        "{:<20} {:<14} {:>10} {:>9} {:>9} {:>9} {:>9} {:>10} {:>6} {:>6}\n",
+        "{:<24} {:<14} {:>10} {:>9} {:>9} {:>9} {:>9} {:>10} {:>6} {:>6}\n",
         "step", "op", "ops/s", "p50ms", "p90ms", "p99ms", "p99.9ms", "maxms", "503s", "errs"
     );
     for s in steps {
@@ -97,7 +97,7 @@ pub fn render_table(steps: &[StepJson]) -> String {
             let l = &s.latency[k];
             let rate = if s.measured_secs > 0.0 { l.count as f64 / s.measured_secs } else { 0.0 };
             out.push_str(&format!(
-                "{:<20} {:<14} {:>10.1} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>10.1} {:>6} {:>6}\n",
+                "{:<24} {:<14} {:>10.1} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>10.1} {:>6} {:>6}\n",
                 label,
                 k,
                 rate,
@@ -112,7 +112,7 @@ pub fn render_table(steps: &[StepJson]) -> String {
         }
         if s.latency.is_empty() {
             out.push_str(&format!(
-                "{:<20} {:<14} {:>10} (no successful ops; 503s={} errs={})\n",
+                "{:<24} {:<14} {:>10} (no successful ops; 503s={} errs={})\n",
                 label, "-", "-", s.saturated_503, errs
             ));
         }
@@ -156,7 +156,7 @@ pub fn write_json(out_dir: &Path, run: &RunJson) -> Result<PathBuf, String> {
     fs::create_dir_all(out_dir).map_err(|e| format!("creating {}: {e}", out_dir.display()))?;
     let path = out_dir.join(format!(
         "{}-{}.json",
-        run.started_at.format("%Y%m%dT%H%M%SZ"),
+        run.started_at.format("%Y%m%dT%H%M%S%.3fZ"),
         run.scenario
     ));
     let body = serde_json::to_string_pretty(run).map_err(|e| format!("serializing run: {e}"))?;
