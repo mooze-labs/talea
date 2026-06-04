@@ -43,6 +43,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// control (acquire_timeout -> 503) is configurable in one place.
 async fn connect_store(config: &Config) -> Result<Arc<dyn Store>, Box<dyn std::error::Error>> {
     if config.db_url.starts_with("postgres://") || config.db_url.starts_with("postgresql://") {
+        // Each active SSE subscription pins one pool connection for its whole
+        // lifetime (PgListener). With max_inflight admitting far more requests
+        // than the pool holds, heavy subscriber fan-out starves commits into
+        // acquire_timeout 503s — size TALEA_DB_POOL for subscribers + workers.
+        if config.max_inflight as u32 > config.db_pool {
+            tracing::warn!(
+                db_pool = config.db_pool,
+                max_inflight = config.max_inflight,
+                "TALEA_DB_POOL is far below TALEA_MAX_INFLIGHT; sustained SSE \
+                 subscriber fan-out on Postgres can starve the pool (each \
+                 subscription holds one connection)"
+            );
+        }
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(config.db_pool)
             .acquire_timeout(Config::DB_ACQUIRE_TIMEOUT)
@@ -55,6 +68,15 @@ async fn connect_store(config: &Config) -> Result<Arc<dyn Store>, Box<dyn std::e
         use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
         use std::str::FromStr;
 
+        // A pooled bare :memory: URL would give every connection its OWN
+        // empty database — silent data divergence. Refuse it outright.
+        if config.db_url.contains(":memory:") {
+            return Err(
+                "sqlite::memory: is not supported by the server (each pooled \
+                 connection would get its own database); use a file path"
+                    .into(),
+            );
+        }
         let opts = SqliteConnectOptions::from_str(&config.db_url)?
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)

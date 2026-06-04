@@ -1,6 +1,10 @@
 //! Router assembly with admission control: requests beyond the in-flight
 //! limit shed immediately as 503 + Retry-After; the DB row lock remains the
 //! write arbiter (correct across instances) — see the spec's Part 4.5.
+//!
+//! /health sits INSIDE the limits on purpose: overload 503s are a real load
+//! signal. Configure load balancers to treat them as "busy" (readiness),
+//! not "dead" (liveness), or saturation will eject healthy instances.
 
 use std::sync::Arc;
 
