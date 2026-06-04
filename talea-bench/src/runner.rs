@@ -32,6 +32,7 @@ pub enum OpOutcome {
     },
 }
 
+// No Debug derive: hdrhistogram's Histogram does not implement Debug.
 pub struct StepReport {
     pub workers: usize,
     /// Nominal measure window; throughput = successes / measured.
@@ -59,6 +60,8 @@ pub fn classify(e: ApiError) -> OpOutcome {
     }
 }
 
+/// Stable string tag per [`ApiError`] variant; used as the key space of
+/// [`StepReport::errors`].
 pub fn error_kind(e: &ApiError) -> &'static str {
     match e {
         ApiError::Unbalanced { .. } => "unbalanced",
@@ -256,6 +259,8 @@ mod tests {
         .await;
         assert!(report.saturated > 0);
         assert!(report.errors["transport"] > 0);
+        // Equality holds here only because warmup is zero; in general
+        // total_ambiguous >= errors["transport"] (it also counts warmup).
         assert_eq!(report.total_ambiguous, report.errors["transport"]);
         assert_eq!(report.successes, 0);
     }
