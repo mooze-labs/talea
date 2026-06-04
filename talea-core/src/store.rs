@@ -17,6 +17,38 @@ pub fn system_book() -> Book {
     Book(SYSTEM_BOOK.to_string())
 }
 
+/// Now, truncated to whole microseconds — the timestamp stores must use
+/// for everything they persist.
+///
+/// Ledger timestamps must round-trip identically through every backend.
+/// Postgres TIMESTAMPTZ holds microseconds, while Linux clocks produce
+/// nanoseconds: an untruncated `Utc::now()` makes a commit's in-memory
+/// `Committed.at` differ from its own database read-back, so an idempotent
+/// replay would return a value unequal to the original. (macOS clocks are
+/// effectively microsecond-precision, which hides the bug locally.)
+pub fn ledger_now() -> DateTime<Utc> {
+    let now = Utc::now();
+    DateTime::from_timestamp_micros(now.timestamp_micros())
+        .expect("current time is within chrono's representable range")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ledger_now_is_microsecond_aligned() {
+        for _ in 0..1_000 {
+            let t = ledger_now();
+            assert_eq!(
+                t.timestamp_subsec_nanos() % 1_000,
+                0,
+                "ledger_now leaked sub-microsecond precision: {t:?}"
+            );
+        }
+    }
+}
+
 #[async_trait]
 pub trait Store: Send + Sync {
     /// Register an asset. Idempotent on id: identical def => Ok(());

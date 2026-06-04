@@ -245,7 +245,7 @@ impl Store for PgTaleaStore {
         .map_err(io_err)?;
 
         let seq = next_seq(&mut db, SYSTEM_BOOK).await?;
-        let at = Utc::now();
+        let at = ledger_now();
         insert_event(
             &mut db,
             SYSTEM_BOOK,
@@ -315,7 +315,7 @@ impl Store for PgTaleaStore {
         .map_err(io_err)?;
 
         let seq = next_seq(&mut db, &def.id.book.0).await?;
-        let at = Utc::now();
+        let at = ledger_now();
         insert_event(
             &mut db,
             &def.id.book.0,
@@ -347,7 +347,7 @@ impl Store for PgTaleaStore {
 
         // 2. claim the per-book seq (row-locks the counter => gapless, serialized per book)
         let seq = next_seq(&mut db, &transaction.book.0).await?;
-        let at = Utc::now();
+        let at = ledger_now();
 
         // 3. load + validate accounts, accumulating one raw delta per account
         struct Pending {

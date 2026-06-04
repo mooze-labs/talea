@@ -258,7 +258,7 @@ impl Store for SqliteTaleaStore {
         .map_err(io_err)?;
 
         let seq = next_seq(&mut db, SYSTEM_BOOK).await?;
-        let at = Utc::now();
+        let at = ledger_now();
         insert_event(
             &mut db,
             SYSTEM_BOOK,
@@ -328,7 +328,7 @@ impl Store for SqliteTaleaStore {
         .map_err(io_err)?;
 
         let seq = next_seq(&mut db, &def.id.book.0).await?;
-        let at = Utc::now();
+        let at = ledger_now();
         insert_event(
             &mut db,
             &def.id.book.0,
@@ -360,7 +360,7 @@ impl Store for SqliteTaleaStore {
 
         // 2. claim the per-book seq (serializes writers on this book => gapless)
         let seq = next_seq(&mut db, &transaction.book.0).await?;
-        let at = Utc::now();
+        let at = ledger_now();
 
         // 3. load + validate accounts, accumulating one raw delta per account
         struct Pending {
