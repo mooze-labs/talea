@@ -1,14 +1,225 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use sqlx::{Row, Sqlite, SqlitePool, Transaction as DbTx};
+use tokio::sync::broadcast;
+
+use talea_core::{events::*, store::*, types::*};
+
+/// Wake-up published on the in-process channel after every committed write.
+/// Carries only the book: subscribers always fetch rows from the events table.
+#[derive(Debug, Clone)]
+struct WakeUp {
+    book: Book,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Debug, Clone)]
+pub struct SqliteTaleaStore {
+    pool: SqlitePool,
+    publisher: broadcast::Sender<Arc<WakeUp>>,
+}
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+impl SqliteTaleaStore {
+    pub fn new(pool: SqlitePool) -> Self {
+        let (publisher, _) = broadcast::channel(1024);
+        Self { pool, publisher }
+    }
+
+    /// Open (creating if missing) a SQLite database, apply pragmas, run migrations.
+    pub async fn connect(url: &str) -> Result<Self, StoreError> {
+        use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+        use std::str::FromStr;
+
+        let opts = SqliteConnectOptions::from_str(url)
+            .map_err(io_err)?
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new().connect_with(opts).await.map_err(io_err)?;
+        let store = Self::new(pool);
+        store.migrate().await?;
+        Ok(store)
+    }
+
+    pub async fn migrate(&self) -> Result<(), StoreError> {
+        sqlx::migrate!("./migrations").run(&self.pool).await.map_err(io_err)
+    }
+
+    fn publish(&self, book: Book) {
+        // a send error just means nobody is subscribed
+        let _ = self.publisher.send(Arc::new(WakeUp { book }));
+    }
+}
+
+// --- shared helpers -----------------------------------------------------
+
+fn io_err(e: impl std::error::Error + Send + Sync + 'static) -> StoreError {
+    StoreError::Io(Box::new(e))
+}
+
+/// Raw stored balance is debit-positive; the effective balance is
+/// normal-side-adjusted (negated for credit-normal accounts).
+fn effective(raw: i64, normal_side: &Option<Direction>) -> i64 {
+    match normal_side {
+        Some(Direction::Credit) => -raw,
+        _ => raw,
+    }
+}
+
+fn posting_delta(p: &Posting) -> i64 {
+    match p.direction {
+        Direction::Debit => p.amount.minor(),
+        Direction::Credit => -p.amount.minor(),
+    }
+}
+
+struct AccountRow {
+    asset: AssetId,
+    normal_side: Option<Direction>,
+    min_balance: Option<i64>,
+}
+
+async fn load_account<'e, E>(executor: E, key: &str) -> Result<Option<AccountRow>, StoreError>
+where
+    E: sqlx::Executor<'e, Database = Sqlite>,
+{
+    let row = sqlx::query("SELECT asset, normal_side, min_balance FROM accounts WHERE key = ?1")
+        .bind(key)
+        .fetch_optional(executor)
+        .await
+        .map_err(io_err)?;
+    Ok(row.map(|r| AccountRow {
+        asset: AssetId::new(r.get::<String, _>("asset")),
+        normal_side: r
+            .get::<Option<String>, _>("normal_side")
+            .as_deref()
+            .and_then(Direction::from_db),
+        min_balance: r.get("min_balance"),
+    }))
+}
+
+/// Claim the next per-book sequence number. The upsert takes a write lock on
+/// the counter row, serializing concurrent writers on the same book => gapless.
+async fn next_seq(db: &mut DbTx<'_, Sqlite>, book: &str) -> Result<Seq, StoreError> {
+    let row = sqlx::query(
+        "INSERT INTO books (book, next_seq) VALUES (?1, 1)
+         ON CONFLICT (book) DO UPDATE SET next_seq = books.next_seq + 1
+         RETURNING next_seq",
+    )
+    .bind(book)
+    .fetch_one(&mut **db)
+    .await
+    .map_err(io_err)?;
+    Ok(row.get::<i64, _>("next_seq"))
+}
+
+async fn insert_event(
+    db: &mut DbTx<'_, Sqlite>,
+    book: &str,
+    seq: Seq,
+    at: DateTime<Utc>,
+    event: &LedgerEvent,
+) -> Result<(), StoreError> {
+    let payload = serde_json::to_string(event).map_err(io_err)?;
+    sqlx::query("INSERT INTO events (book, seq, at, kind, payload) VALUES (?1, ?2, ?3, ?4, ?5)")
+        .bind(book)
+        .bind(seq)
+        .bind(at)
+        .bind(event.kind())
+        .bind(payload)
+        .execute(&mut **db)
+        .await
+        .map_err(io_err)?;
+    Ok(())
+}
+
+async fn fetch_events(
+    pool: &SqlitePool,
+    book: &Book,
+    from: Seq,
+    limit: i64,
+) -> Result<Vec<Sequenced<LedgerEvent>>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT seq, at, payload FROM events WHERE book = ?1 AND seq >= ?2 ORDER BY seq LIMIT ?3",
+    )
+    .bind(&book.0)
+    .bind(from)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(io_err)?;
+    rows.into_iter()
+        .map(|r| {
+            let event: LedgerEvent =
+                serde_json::from_str(&r.get::<String, _>("payload")).map_err(io_err)?;
+            Ok(Sequenced {
+                seq: r.get("seq"),
+                at: r.get("at"),
+                event,
+            })
+        })
+        .collect()
+}
+
+async fn find_committed(
+    db: &mut DbTx<'_, Sqlite>,
+    book: &Book,
+    idem: &IdempotencyKey,
+) -> Result<Option<Committed>, StoreError> {
+    let row = sqlx::query(
+        "SELECT tx_id, seq, committed_at FROM transactions WHERE book = ?1 AND idempotency_key = ?2",
+    )
+    .bind(&book.0)
+    .bind(&idem.0)
+    .fetch_optional(&mut **db)
+    .await
+    .map_err(io_err)?;
+    row.map(|r| {
+        let txid = uuid::Uuid::parse_str(&r.get::<String, _>("tx_id")).map_err(io_err)?;
+        Ok(Committed {
+            txid: TxId(txid),
+            seq: r.get("seq"),
+            at: r.get("committed_at"),
+        })
+    })
+    .transpose()
+}
+
+#[async_trait]
+impl Store for SqliteTaleaStore {
+    async fn register_asset(&self, asset: &AssetDef) -> Result<(), StoreError> {
+        todo!()
+    }
+
+    async fn open_account(&self, def: &AccountDef, cfg: &AccountCfg) -> Result<(), StoreError> {
+        todo!()
+    }
+
+    async fn commit(&self, transaction: &Transaction) -> Result<Committed, StoreError> {
+        todo!()
+    }
+
+    async fn balance(
+        &self,
+        account: &AccountId,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<Amount, StoreError> {
+        todo!()
+    }
+
+    async fn read_events(
+        &self,
+        book: &Book,
+        from: Seq,
+        limit: usize,
+    ) -> Result<Vec<Sequenced<LedgerEvent>>, StoreError> {
+        todo!()
+    }
+
+    fn subscribe(&self, book: &Book, from: Seq) -> EventStream {
+        todo!()
     }
 }
