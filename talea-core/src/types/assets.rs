@@ -1,6 +1,8 @@
 //! Asset registry.
 
-#[derive(Debug, Clone)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetDef {
     pub id: AssetId,
     pub class: AssetClass,
@@ -8,13 +10,14 @@ pub struct AssetDef {
     pub name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AssetId(String); // "USD", "BTC", "L-USDT", "USDT-ETH";
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Network(String); // "bitcoin", "liquid", "ethereum"...
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AssetClass {
     Fiat,
     Crypto {
@@ -23,7 +26,7 @@ pub enum AssetClass {
     }, // asset_id, contract addr
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Amount {
     minor: i64,
     asset: AssetId,

@@ -33,7 +33,7 @@ pub trait Store {
     fn subscribe(&self, book: &Book, from: Seq) -> EventStream;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AccountCfg {
     pub normal_side: Option<Direction>,
     pub min_balance: Option<i64>,
