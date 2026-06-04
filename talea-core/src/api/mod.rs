@@ -32,38 +32,64 @@ pub fn format_minor(minor: i64, precision: u8) -> String {
     }
 }
 
-/// The full server contract. Each transport adapter is a thin translation
-/// onto it.
+/// The full ledger contract. Each transport adapter is a thin translation
+/// onto it: the server implements it over a `Store`, the client over HTTP —
+/// code written against this trait runs unchanged against either.
 #[async_trait]
 pub trait LedgerApi: Send + Sync {
-    // --- registry (idempotent on id) ---
+    /// Register an asset. Idempotent on id: an identical re-registration
+    /// succeeds, the same id with a different definition is `AlreadyExists`.
+    /// Crypto assets require a network; precision is immutable forever.
     async fn register_asset(&self, draft: AssetDraft) -> ApiResult<()>;
+
+    /// Open an account in a book. Idempotent on book+path with the same
+    /// rule as assets. Book names starting with '_' are reserved.
     async fn open_account(&self, draft: AccountDraft) -> ApiResult<()>;
 
-    // --- write (idempotent on idempotency_key) ---
+    /// Post a balanced transaction (per-asset debits == credits, all
+    /// amounts positive). Idempotent on the caller-supplied idempotency key
+    /// (unique per book): a replay returns the original `Posted` with
+    /// `deduplicated: true` and never double-posts — which is what makes
+    /// retrying on failure unconditionally safe.
     async fn post(&self, draft: TransactionDraft) -> ApiResult<Posted>;
 
-    // --- reads ---
+    /// Effective (normal-side-adjusted) balance, rendered as a decimal
+    /// string using the asset's precision. `as_of` replays by commit time;
+    /// `None` reads the live projection.
     async fn balance(
         &self,
         book: &str,
         path: &str,
         as_of: Option<DateTime<Utc>>,
     ) -> ApiResult<BalanceView>;
+
+    /// Postings for one account, seq-ascending. `page.after_seq` is
+    /// exclusive (resume with the last seen seq); `limit` counts
+    /// transactions, so one transaction's postings never split across
+    /// pages. `Paged::next` is `None` once exhausted.
     async fn account_history(
         &self,
         book: &str,
         path: &str,
         page: Page,
     ) -> ApiResult<Paged<PostingView>>;
+
+    /// A committed transaction by its id (UUID assigned at post time).
+    /// Unknown ids are `NotFound`.
     async fn transaction(&self, tx_id: &str) -> ApiResult<TransactionView>;
+
+    /// Per-asset debit/credit sums for a book, optionally as of commit
+    /// time. Every line balances when the ledger does.
     async fn trial_balance(
         &self,
         book: &str,
         as_of: Option<DateTime<Utc>>,
     ) -> ApiResult<TrialBalance>;
 
-    // --- stream (at least once; resume from a cursor) ---
+    /// Live event stream for a book, starting at seq `from` (inclusive:
+    /// catch-up first, then tail). Delivery is at-least-once; consumers
+    /// resume after a disconnect from their last seen `EventEnvelope::seq`.
+    /// The HTTP client implementation does that resumption automatically.
     async fn subscribe(&self, book: &str, from: Seq) -> ApiResult<EventStream>;
 }
 

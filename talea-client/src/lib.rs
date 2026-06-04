@@ -1,4 +1,34 @@
 //! Typed client SDK for the talea ledger server, plus the `talea` CLI.
+//!
+//! [`TaleaClient`] implements the same [`LedgerApi`] trait the server's
+//! in-process service does, so code written against the trait runs
+//! unchanged against either. All operations are retry-safe by construction
+//! (posts carry caller-supplied idempotency keys, registry writes are
+//! idempotent on id, reads are reads), and the client retries 503/transport
+//! failures automatically within a bounded [`RetryPolicy`].
+//!
+//! ```no_run
+//! use talea_client::{LedgerApi, Page, TaleaClient};
+//!
+//! # async fn demo() -> talea_client::ApiResult<()> {
+//! let client = TaleaClient::builder("http://127.0.0.1:8080")
+//!     .bearer_token("sekrit")
+//!     .build()?;
+//!
+//! let balance = client.balance("onramp", "cash", None).await?;
+//! println!("{} {}", balance.balance, balance.asset);
+//!
+//! let page = client
+//!     .account_history("onramp", "cash", Page { after_seq: None, limit: 100 })
+//!     .await?;
+//! # let _ = page;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Subscriptions are unbroken streams: [`LedgerApi::subscribe`] reconnects
+//! with backoff and resumes from the last seen sequence, so consumers never
+//! re-implement cursor bookkeeping.
 
 mod http;
 mod retry;
@@ -14,10 +44,16 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use talea_core::types::Seq;
 
+/// HTTP client for a talea server, implementing [`LedgerApi`].
+///
+/// Cheap to share: hold it in an `Arc` or clone the underlying reqwest
+/// client via the builder. Construct with [`TaleaClient::builder`].
 pub struct TaleaClient {
     http: http::Http,
 }
 
+/// Configures and builds a [`TaleaClient`]. Created by
+/// [`TaleaClient::builder`]; finish with [`ClientBuilder::build`].
 pub struct ClientBuilder {
     base_url: String,
     token: Option<String>,
@@ -27,6 +63,9 @@ pub struct ClientBuilder {
 }
 
 impl TaleaClient {
+    /// Start building a client for the server at `base_url`
+    /// (e.g. `http://127.0.0.1:8080`). A path prefix is preserved, but the
+    /// base must not already include the `/v1` version segment.
     pub fn builder(base_url: impl Into<String>) -> ClientBuilder {
         ClientBuilder {
             base_url: base_url.into(),
@@ -39,6 +78,9 @@ impl TaleaClient {
 }
 
 impl ClientBuilder {
+    /// Send `Authorization: Bearer <token>` on every request (matches the
+    /// server's `TALEA_API_TOKEN`). Without it the client only works
+    /// against a server running in open dev mode.
     pub fn bearer_token(mut self, token: impl Into<String>) -> Self {
         self.token = Some(token.into());
         self
@@ -50,6 +92,9 @@ impl ClientBuilder {
         self
     }
 
+    /// Retry policy for 503/408/transport failures (default: 3 attempts,
+    /// exponential 200ms..5s, honoring `Retry-After`). Safe for every
+    /// operation; use [`RetryPolicy::none`] to surface failures immediately.
     pub fn retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
         self
@@ -62,6 +107,9 @@ impl ClientBuilder {
         self
     }
 
+    /// Validate the base URL and construct the client. Fails with
+    /// [`ApiError::Transport`] on an unparseable URL; no network I/O happens
+    /// until the first request.
     pub fn build(self) -> ApiResult<TaleaClient> {
         let base = reqwest::Url::parse(&self.base_url).map_err(|e| ApiError::Transport {
             message: format!("invalid base url: {e}"),
