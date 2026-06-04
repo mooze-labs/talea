@@ -356,3 +356,114 @@ pub async fn subscribe_catches_up_then_tails(store: &impl Store) {
         .expect("stream ended").unwrap();
     assert_eq!(second.seq, 4);
 }
+
+// --- read extensions ----------------------------------------------------
+
+pub async fn asset_lookup(store: &impl Store) {
+    let id = unique("USD");
+    store.register_asset(&asset(&id)).await.unwrap();
+    let found = store
+        .asset(&AssetId::new(&id))
+        .await
+        .unwrap()
+        .expect("registered asset must be found");
+    assert_eq!(found, asset(&id));
+    assert!(store.asset(&AssetId::new(unique("NOPE"))).await.unwrap().is_none());
+}
+
+pub async fn balance_snapshot_updated_seq(store: &impl Store) {
+    let (book, asset_id) = setup_book(store).await;
+    // never posted: zero balance, seq 0
+    let empty = store.balance(&account_id(&book, "cash"), None).await.unwrap();
+    assert_eq!(empty.amount.minor(), 0);
+    assert_eq!(empty.updated_seq, 0);
+
+    store.commit(&transfer(&book, "u1", "deposits", "cash", &asset_id, 100)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let mid = Utc::now();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    store.commit(&transfer(&book, "u2", "deposits", "cash", &asset_id, 50)).await.unwrap();
+
+    // seqs 1,2 = account_opened; 3,4 = the two commits
+    let now = store.balance(&account_id(&book, "cash"), None).await.unwrap();
+    assert_eq!(now.updated_seq, 4);
+    let then = store.balance(&account_id(&book, "cash"), Some(mid)).await.unwrap();
+    assert_eq!(then.updated_seq, 3);
+    assert_eq!(then.amount.minor(), 100);
+}
+
+pub async fn account_history_pages_exclusively(store: &impl Store) {
+    let (book, asset_id) = setup_book(store).await;
+    for i in 0..3i64 {
+        store
+            .commit(&transfer(&book, &format!("h{i}"), "deposits", "cash", &asset_id, 10 + i))
+            .await
+            .unwrap();
+    }
+    let cash = account_id(&book, "cash");
+    let first = store.account_history(&cash, None, 2).await.unwrap();
+    assert_eq!(first.len(), 2);
+    assert_eq!((first[0].seq, first[1].seq), (3, 4));
+    assert_eq!(first[0].amount.minor(), 10);
+    assert_eq!(first[0].direction, Direction::Debit);
+    assert_eq!(first[0].account, cash);
+    // after_seq is exclusive: resume with the last seen seq
+    let rest = store.account_history(&cash, Some(first[1].seq), 10).await.unwrap();
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].seq, 5);
+    assert_eq!(rest[0].amount.minor(), 12);
+    // the credit side sees its own postings
+    let dep = store.account_history(&account_id(&book, "deposits"), None, 10).await.unwrap();
+    assert_eq!(dep.len(), 3);
+    assert_eq!(dep[0].direction, Direction::Credit);
+}
+
+pub async fn transaction_round_trip(store: &impl Store) {
+    let (book, asset_id) = setup_book(store).await;
+    let tx = transfer(&book, "tr1", "deposits", "cash", &asset_id, 777);
+    let committed = store.commit(&tx).await.unwrap();
+
+    let stored = store
+        .transaction(&tx.id)
+        .await
+        .unwrap()
+        .expect("committed tx must be found");
+    assert_eq!(stored.seq, committed.seq);
+    // timestamp round-trips through the backend's encoding; allow tiny drift
+    assert!((stored.at - committed.at).num_milliseconds().abs() < 5);
+    assert_eq!(stored.transaction.id, tx.id);
+    assert_eq!(stored.transaction.idempotency_key, tx.idempotency_key);
+    assert_eq!(stored.transaction.postings.len(), 2);
+
+    let missing = store.transaction(&TxId(Uuid::new_v4())).await.unwrap();
+    assert!(missing.is_none());
+}
+
+pub async fn trial_balance_sums_per_asset(store: &impl Store) {
+    let (book, asset_a) = setup_book(store).await;
+    // a second asset with its own account pair in the same book
+    let asset_b = unique("EUR");
+    store.register_asset(&asset(&asset_b)).await.unwrap();
+    let (cash_b, cash_b_cfg) = open_spec(&book, "cash-eur", &asset_b, AccountKind::Asset);
+    store.open_account(&cash_b, &cash_b_cfg).await.unwrap();
+    let (dep_b, dep_b_cfg) = open_spec(&book, "deposits-eur", &asset_b, AccountKind::Liability);
+    store.open_account(&dep_b, &dep_b_cfg).await.unwrap();
+
+    store.commit(&transfer(&book, "ta", "deposits", "cash", &asset_a, 100)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let mid = Utc::now();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    store.commit(&transfer(&book, "tb", "deposits-eur", "cash-eur", &asset_b, 40)).await.unwrap();
+
+    let all = store.trial_balance(&Book(book.clone()), None).await.unwrap();
+    assert_eq!(all.len(), 2);
+    let row_a = all.iter().find(|r| r.asset.as_str() == asset_a).unwrap();
+    assert_eq!((row_a.debits, row_a.credits), (100, 100));
+    let row_b = all.iter().find(|r| r.asset.as_str() == asset_b).unwrap();
+    assert_eq!((row_b.debits, row_b.credits), (40, 40));
+
+    // as_of cuts the second commit off
+    let early = store.trial_balance(&Book(book.clone()), Some(mid)).await.unwrap();
+    assert_eq!(early.len(), 1);
+    assert_eq!(early[0].asset.as_str(), asset_a);
+}
