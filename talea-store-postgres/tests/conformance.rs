@@ -43,3 +43,4 @@ pg_test!(min_balance_is_normal_side_adjusted);
 pg_test!(balance_as_of_point_in_time);
 pg_test!(read_events_paginates_inclusively);
 pg_test!(system_book_is_reserved);
+pg_test!(subscribe_catches_up_then_tails);

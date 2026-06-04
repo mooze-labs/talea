@@ -527,6 +527,45 @@ impl Store for PgTaleaStore {
     }
 
     fn subscribe(&self, book: &Book, from: Seq) -> EventStream {
-        todo!()
+        let pool = self.pool.clone();
+        let book = book.clone();
+        Box::pin(async_stream::stream! {
+            let mut listener = match sqlx::postgres::PgListener::connect_with(&pool).await {
+                Ok(l) => l,
+                Err(e) => {
+                    yield Err(io_err(e));
+                    return;
+                }
+            };
+            if let Err(e) = listener.listen(&book_channel_name(&book)).await {
+                yield Err(io_err(e));
+                return;
+            }
+            let mut next = from;
+            loop {
+                // catch up from the log until dry
+                loop {
+                    let batch = match fetch_events(&pool, &book, next, 256).await {
+                        Ok(batch) => batch,
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
+                    };
+                    if batch.is_empty() {
+                        break;
+                    }
+                    for ev in batch {
+                        next = ev.seq + 1;
+                        yield Ok(ev);
+                    }
+                }
+                // wait for a write to this book (payload is just a wake-up)
+                if let Err(e) = listener.recv().await {
+                    yield Err(io_err(e));
+                    return;
+                }
+            }
+        })
     }
 }
