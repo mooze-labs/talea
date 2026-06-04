@@ -2133,11 +2133,15 @@ dependencies = [
 name = "talea_store_postgres"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "async-trait",
  "chrono",
  "futures",
+ "serde_json",
  "sqlx",
+ "talea-store-conformance",
  "talea_core",
+ "tokio",
  "uuid",
 ]
 

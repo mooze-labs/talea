@@ -2,12 +2,13 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, Transaction as PgTx};
+use sqlx::{PgPool, Postgres, Row, Transaction as DbTx};
 use uuid::Uuid;
 
 use talea_core::{events::*, store::*, types::*};
 
 mod helpers;
+pub use helpers::book_channel_name;
 
 #[derive(Debug, Clone)]
 pub struct PgTaleaStore {
@@ -19,22 +20,300 @@ impl PgTaleaStore {
         Self { pool }
     }
 
-    async fn load_account_cfg(
-        pg_tx: &mut PgTx<'_, Postgres>,
-        transaction: &Transaction,
-    ) -> Result<HashMap<String, AccountCfg>, StoreError> {
-        todo!()
+    /// Connect and run migrations.
+    pub async fn connect(url: &str) -> Result<Self, StoreError> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(url)
+            .await
+            .map_err(io_err)?;
+        let store = Self::new(pool);
+        store.migrate().await?;
+        Ok(store)
     }
+
+    pub async fn migrate(&self) -> Result<(), StoreError> {
+        sqlx::migrate!("./migrations").run(&self.pool).await.map_err(io_err)
+    }
+}
+
+// --- shared helpers -----------------------------------------------------
+
+fn io_err(e: impl std::error::Error + Send + Sync + 'static) -> StoreError {
+    StoreError::Io(Box::new(e))
+}
+
+/// Raw stored balance is debit-positive; the effective balance is
+/// normal-side-adjusted (negated for credit-normal accounts).
+fn effective(raw: i64, normal_side: &Option<Direction>) -> i64 {
+    match normal_side {
+        Some(Direction::Credit) => -raw,
+        _ => raw,
+    }
+}
+
+fn posting_delta(p: &Posting) -> i64 {
+    match p.direction {
+        Direction::Debit => p.amount.minor(),
+        Direction::Credit => -p.amount.minor(),
+    }
+}
+
+struct AccountRow {
+    asset: AssetId,
+    normal_side: Option<Direction>,
+    min_balance: Option<i64>,
+}
+
+async fn load_account<'e, E>(executor: E, key: &str) -> Result<Option<AccountRow>, StoreError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let row = sqlx::query("SELECT asset, normal_side, min_balance FROM accounts WHERE key = $1")
+        .bind(key)
+        .fetch_optional(executor)
+        .await
+        .map_err(io_err)?;
+    Ok(row.map(|r| AccountRow {
+        asset: AssetId::new(r.get::<String, _>("asset")),
+        normal_side: r
+            .get::<Option<String>, _>("normal_side")
+            .as_deref()
+            .and_then(Direction::from_db),
+        min_balance: r.get("min_balance"),
+    }))
+}
+
+/// Claim the next per-book sequence number. The upsert's row lock on the
+/// counter is held until the surrounding transaction commits or rolls back,
+/// so concurrent same-book writers serialize here and an aborted commit
+/// releases its claimed seq atomically => gapless, dense 1..N per book.
+async fn next_seq(db: &mut DbTx<'_, Postgres>, book: &str) -> Result<Seq, StoreError> {
+    let row = sqlx::query(
+        "INSERT INTO books (book, next_seq) VALUES ($1, 1)
+         ON CONFLICT (book) DO UPDATE SET next_seq = books.next_seq + 1
+         RETURNING next_seq",
+    )
+    .bind(book)
+    .fetch_one(&mut **db)
+    .await
+    .map_err(io_err)?;
+    Ok(row.get::<i64, _>("next_seq"))
+}
+
+async fn insert_event(
+    db: &mut DbTx<'_, Postgres>,
+    book: &str,
+    seq: Seq,
+    at: DateTime<Utc>,
+    event: &LedgerEvent,
+) -> Result<(), StoreError> {
+    let payload = serde_json::to_value(event).map_err(io_err)?;
+    sqlx::query("INSERT INTO events (book, seq, at, kind, payload) VALUES ($1, $2, $3, $4, $5)")
+        .bind(book)
+        .bind(seq)
+        .bind(at)
+        .bind(event.kind())
+        .bind(payload)
+        .execute(&mut **db)
+        .await
+        .map_err(io_err)?;
+    Ok(())
+}
+
+/// Issued inside the transaction: Postgres delivers it only if the tx commits.
+/// The payload is informational; subscribers always read rows from `events`.
+async fn notify(db: &mut DbTx<'_, Postgres>, book: &Book, seq: Seq) -> Result<(), StoreError> {
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(book_channel_name(book))
+        .bind(seq.to_string())
+        .execute(&mut **db)
+        .await
+        .map_err(io_err)?;
+    Ok(())
+}
+
+async fn fetch_events(
+    pool: &PgPool,
+    book: &Book,
+    from: Seq,
+    limit: i64,
+) -> Result<Vec<Sequenced<LedgerEvent>>, StoreError> {
+    let rows = sqlx::query(
+        "SELECT seq, at, payload FROM events WHERE book = $1 AND seq >= $2 ORDER BY seq LIMIT $3",
+    )
+    .bind(&book.0)
+    .bind(from)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(io_err)?;
+    rows.into_iter()
+        .map(|r| {
+            let event: LedgerEvent =
+                serde_json::from_value(r.get::<serde_json::Value, _>("payload")).map_err(io_err)?;
+            Ok(Sequenced {
+                seq: r.get("seq"),
+                at: r.get("at"),
+                event,
+            })
+        })
+        .collect()
+}
+
+async fn find_committed(
+    db: &mut DbTx<'_, Postgres>,
+    book: &Book,
+    idem: &IdempotencyKey,
+) -> Result<Option<Committed>, StoreError> {
+    let row = sqlx::query(
+        "SELECT tx_id, seq, committed_at FROM transactions WHERE book = $1 AND idempotency_key = $2",
+    )
+    .bind(&book.0)
+    .bind(&idem.0)
+    .fetch_optional(&mut **db)
+    .await
+    .map_err(io_err)?;
+    Ok(row.map(|r| Committed {
+        txid: TxId(r.get::<Uuid, _>("tx_id")),
+        seq: r.get("seq"),
+        at: r.get("committed_at"),
+    }))
 }
 
 #[async_trait]
 impl Store for PgTaleaStore {
     async fn register_asset(&self, asset: &AssetDef) -> Result<(), StoreError> {
-        todo!()
+        let mut db = self.pool.begin().await.map_err(io_err)?;
+
+        if let Some(row) = sqlx::query(
+            "SELECT class, network, native_id, precision, name FROM assets WHERE id = $1",
+        )
+        .bind(asset.id.as_str())
+        .fetch_optional(&mut *db)
+        .await
+        .map_err(io_err)?
+        {
+            let class: String = row.get("class");
+            let existing = AssetDef {
+                id: asset.id.clone(),
+                class: match class.as_str() {
+                    "fiat" => AssetClass::Fiat,
+                    _ => AssetClass::Crypto {
+                        network: Network::new(
+                            row.get::<Option<String>, _>("network").unwrap_or_default(),
+                        ),
+                        native_id: row.get("native_id"),
+                    },
+                },
+                precision: row.get::<i16, _>("precision") as u8,
+                name: row.get("name"),
+            };
+            return if existing == *asset {
+                Ok(())
+            } else {
+                Err(StoreError::AlreadyExists {
+                    what: format!("asset {}", asset.id.as_str()),
+                })
+            };
+        }
+
+        let (class, network, native_id) = match &asset.class {
+            AssetClass::Fiat => ("fiat", None, None),
+            AssetClass::Crypto { network, native_id } => {
+                ("crypto", Some(network.as_str().to_string()), native_id.clone())
+            }
+        };
+        sqlx::query(
+            "INSERT INTO assets (id, class, network, native_id, precision, name)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(asset.id.as_str())
+        .bind(class)
+        .bind(network)
+        .bind(native_id)
+        .bind(asset.precision as i16)
+        .bind(&asset.name)
+        .execute(&mut *db)
+        .await
+        .map_err(io_err)?;
+
+        let seq = next_seq(&mut db, SYSTEM_BOOK).await?;
+        let at = Utc::now();
+        insert_event(&mut db, SYSTEM_BOOK, seq, at, &LedgerEvent::AssetRegistered(asset.clone())).await?;
+        notify(&mut db, &system_book(), seq).await?;
+        db.commit().await.map_err(io_err)?;
+        Ok(())
     }
 
     async fn open_account(&self, def: &AccountDef, cfg: &AccountCfg) -> Result<(), StoreError> {
-        todo!()
+        if def.id.book.is_reserved() {
+            return Err(StoreError::InvalidBook(def.id.book.clone()));
+        }
+        let key = def.id.to_key();
+        let mut db = self.pool.begin().await.map_err(io_err)?;
+
+        let asset_exists = sqlx::query("SELECT 1 FROM assets WHERE id = $1")
+            .bind(def.asset.as_str())
+            .fetch_optional(&mut *db)
+            .await
+            .map_err(io_err)?;
+        if asset_exists.is_none() {
+            return Err(StoreError::UnknownAsset(def.asset.clone()));
+        }
+
+        if let Some(row) = sqlx::query(
+            "SELECT asset, kind, normal_side, min_balance FROM accounts WHERE key = $1",
+        )
+        .bind(&key)
+        .fetch_optional(&mut *db)
+        .await
+        .map_err(io_err)?
+        {
+            let same_def = row.get::<String, _>("asset") == def.asset.as_str()
+                && AccountKind::from_db(&row.get::<String, _>("kind")).as_ref() == Some(&def.kind);
+            let same_cfg = row
+                .get::<Option<String>, _>("normal_side")
+                .as_deref()
+                .and_then(Direction::from_db)
+                == cfg.normal_side
+                && row.get::<Option<i64>, _>("min_balance") == cfg.min_balance;
+            return if same_def && same_cfg {
+                Ok(())
+            } else {
+                Err(StoreError::AlreadyExists {
+                    what: format!("account {key}"),
+                })
+            };
+        }
+
+        sqlx::query(
+            "INSERT INTO accounts (key, book, path, asset, kind, normal_side, min_balance)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&key)
+        .bind(&def.id.book.0)
+        .bind(&def.id.path)
+        .bind(def.asset.as_str())
+        .bind(def.kind.as_str())
+        .bind(cfg.normal_side.as_ref().map(|d| d.as_str().to_string()))
+        .bind(cfg.min_balance)
+        .execute(&mut *db)
+        .await
+        .map_err(io_err)?;
+
+        let seq = next_seq(&mut db, &def.id.book.0).await?;
+        let at = Utc::now();
+        insert_event(
+            &mut db,
+            &def.id.book.0,
+            seq,
+            at,
+            &LedgerEvent::AccountOpened { def: def.clone(), cfg: cfg.clone() },
+        )
+        .await?;
+        notify(&mut db, &def.id.book, seq).await?;
+        db.commit().await.map_err(io_err)?;
+        Ok(())
     }
 
     async fn commit(&self, transaction: &Transaction) -> Result<Committed, StoreError> {
@@ -60,20 +339,5 @@ impl Store for PgTaleaStore {
 
     fn subscribe(&self, book: &Book, from: Seq) -> EventStream {
         todo!()
-    }
-}
-
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
     }
 }
