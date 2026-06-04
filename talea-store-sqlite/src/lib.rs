@@ -101,8 +101,10 @@ where
     }))
 }
 
-/// Claim the next per-book sequence number. The upsert takes a write lock on
-/// the counter row, serializing concurrent writers on the same book => gapless.
+/// Claim the next per-book sequence number. The upsert's write lock on the
+/// counter row is held until the surrounding transaction commits or rolls
+/// back, so concurrent same-book writers serialize here and an aborted commit
+/// releases its claimed seq atomically => gapless, dense 1..N per book.
 async fn next_seq(db: &mut DbTx<'_, Sqlite>, book: &str) -> Result<Seq, StoreError> {
     let row = sqlx::query(
         "INSERT INTO books (book, next_seq) VALUES (?1, 1)
@@ -375,13 +377,20 @@ impl Store for SqliteTaleaStore {
                     asset: posting.amount.asset().clone(),
                 });
             }
-            entry.delta += posting_delta(posting);
+            // checked: a silent i64 wrap would corrupt the balance projection
+            entry.delta = entry.delta.checked_add(posting_delta(posting)).ok_or_else(|| {
+                StoreError::Io(format!("posting delta overflow for account {key}").into())
+            })?;
         }
 
         // 4. apply to the balances projection, enforcing min_balance on the
         //    effective (normal-side-adjusted) balance. An Err return drops
-        //    `db`, rolling the whole transaction back.
-        for p in pending.values() {
+        //    `db`, rolling the whole transaction back. Sorted key order keeps
+        //    lock acquisition deterministic — required to avoid lock-order
+        //    deadlocks on backends with row-level locking (Postgres mirror).
+        let mut ordered: Vec<_> = pending.iter().collect();
+        ordered.sort_by(|a, b| a.0.cmp(b.0));
+        for (_, p) in ordered {
             let row = sqlx::query(
                 "INSERT INTO balances (account_key, asset, balance, updated_seq)
                  VALUES (?1, ?2, ?3, ?4)
@@ -439,6 +448,8 @@ impl Store for SqliteTaleaStore {
                 {
                     return Ok(prior);
                 }
+                // the winner vanished => it rolled back its own commit;
+                // surface the original conflict rather than silently retrying
             }
             return Err(io_err(e));
         }
