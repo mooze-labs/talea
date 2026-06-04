@@ -1,0 +1,35 @@
+//! End-to-end smoke: every scenario at tiny scale against the real
+//! router over in-memory SQLite. Proves the machinery; capacity numbers
+//! come from Postgres runs.
+
+mod harness;
+
+use std::time::Duration;
+
+use talea_bench::Ctx;
+use talea_bench::scenarios::post_one_book;
+
+fn smoke_ctx(url: String, run_id: &str) -> Ctx {
+    Ctx {
+        url,
+        token: None,
+        run_id: run_id.into(),
+        warmup: Duration::ZERO,
+        duration: Duration::from_millis(300),
+    }
+}
+
+#[tokio::test]
+async fn post_one_book_smoke() {
+    let url = harness::spawn_server(256).await;
+    let ctx = smoke_ctx(url, "smoke-one");
+    let steps = post_one_book::run(
+        &ctx,
+        post_one_book::Opts { concurrencies: vec![2], postings_per_tx: 2 },
+    )
+    .await
+    .unwrap();
+    assert_eq!(steps.len(), 1);
+    assert!(steps[0].successes > 0);
+    assert!(steps[0].latency.contains_key("post"));
+}
