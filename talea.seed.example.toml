@@ -1,0 +1,68 @@
+# Example seed file for `talead init`.
+#
+# Copy to `talea.seed.toml` and edit — `talead init` picks that name up
+# automatically from the working directory (or pass --seed <path>).
+# Seeding is idempotent: re-running init with the same file is a no-op;
+# changing a field on an already-registered asset is an error (definitions
+# are immutable once registered — fix the file and re-run).
+
+# --- Assets -----------------------------------------------------------------
+# id        — ledger-wide identifier ("USD", "BTC", "USDT-ETH", ...)
+# class     — "fiat", or { crypto = { network = "...", native_id = "..." } }
+#             (native_id is optional: contract address / on-chain asset id)
+# precision — decimal places, IMMUTABLE once registered (USD: 2, BTC: 8)
+# name      — human-readable display name
+
+[[assets]]
+id = "USD"
+class = "fiat"
+precision = 2
+name = "US Dollar"
+
+[[assets]]
+id = "BTC"
+class = { crypto = { network = "bitcoin" } }
+precision = 8
+name = "Bitcoin"
+
+[[assets]]
+id = "USDT-ETH"
+class = { crypto = { network = "ethereum", native_id = "0xdAC17F958D2ee523a2206206994597C13D831ec7" } }
+precision = 6
+name = "Tether (ERC-20)"
+
+# --- Accounts ---------------------------------------------------------------
+# book        — per-consumer namespace ("onramp", "gateway", ...).
+#               Names starting with '_' are reserved for the ledger itself.
+# path        — account path within the book; ':' is the conventional separator
+# asset       — must reference an asset above (or one already registered)
+# kind        — asset | liability | income | expense | equity | clearing
+# min_balance — optional floor in minor units (e.g. 0 = can't go negative)
+# normal_side — optional override: "debit" | "credit"
+#               (defaults by kind: asset/expense = debit,
+#                liability/income/equity = credit, clearing = none)
+
+[[accounts]]
+book = "onramp"
+path = "treasury:usd"
+asset = "USD"
+kind = "asset"
+min_balance = 0
+
+[[accounts]]
+book = "onramp"
+path = "customer:deposits:usd"
+asset = "USD"
+kind = "liability"
+
+[[accounts]]
+book = "onramp"
+path = "fees:btc"
+asset = "BTC"
+kind = "income"
+
+[[accounts]]
+book = "onramp"
+path = "settlement:usdt"
+asset = "USDT-ETH"
+kind = "clearing"
