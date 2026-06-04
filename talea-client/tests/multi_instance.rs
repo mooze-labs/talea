@@ -197,3 +197,39 @@ async fn subscriber_on_a_sees_commits_via_b() {
     assert_eq!(env.seq, posted.seq);
     assert_eq!(env.kind, "transaction_posted");
 }
+
+#[tokio::test]
+async fn client_resumes_cursor_across_instances() {
+    let Some((a, b, book, asset_id)) = two_instances().await else {
+        return;
+    };
+    for i in 0..3 {
+        a.post(transfer(&book, &asset_id, &format!("pre-{i}"), 10))
+            .await
+            .unwrap();
+    }
+
+    // consume everything so far via A: 2 setup events + 3 commits
+    let mut stream_a = a.subscribe(&book, 1).await.unwrap();
+    let mut cursor = 0;
+    for _ in 0..5 {
+        cursor = next_event(&mut stream_a).await.seq;
+    }
+    assert_eq!(cursor, 5);
+    drop(stream_a); // "instance A goes away"
+
+    // more commits land via B while we are disconnected
+    for i in 0..3 {
+        b.post(transfer(&book, &asset_id, &format!("post-{i}"), 10))
+            .await
+            .unwrap();
+    }
+
+    // resume on B from cursor+1: continuity — no gaps, no replays
+    let mut stream_b = b.subscribe(&book, cursor + 1).await.unwrap();
+    let mut seqs = Vec::new();
+    for _ in 0..3 {
+        seqs.push(next_event(&mut stream_b).await.seq);
+    }
+    assert_eq!(seqs, vec![6, 7, 8]);
+}
