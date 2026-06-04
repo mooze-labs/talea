@@ -120,6 +120,34 @@ pub async fn unknown_asset_rejected(store: &impl Store) {
     }
 }
 
+/// Exercises the Crypto class round-trip in the registry idempotency
+/// comparison (network/native_id columns), which Fiat fixtures never touch.
+pub async fn crypto_asset_round_trips(store: &impl Store) {
+    let id = unique("USDT-ETH");
+    let def = AssetDef {
+        id: AssetId::new(&id),
+        class: AssetClass::Crypto {
+            network: Network::new("ethereum"),
+            native_id: Some("0xdac17f958d2ee523a2206206994597c13d831ec7".into()),
+        },
+        precision: 6,
+        name: "Tether".into(),
+    };
+    store.register_asset(&def).await.unwrap();
+    store.register_asset(&def).await.unwrap(); // identical: fine
+    let conflicting = AssetDef {
+        class: AssetClass::Crypto {
+            network: Network::new("tron"),
+            native_id: None,
+        },
+        ..def.clone()
+    };
+    match store.register_asset(&conflicting).await {
+        Err(StoreError::AlreadyExists { .. }) => {}
+        other => panic!("expected AlreadyExists, got {other:?}"),
+    }
+}
+
 // --- commit -----------------------------------------------------------
 
 pub async fn commit_happy_path(store: &impl Store) {
