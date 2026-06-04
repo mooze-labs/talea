@@ -493,7 +493,34 @@ impl Store for SqliteTaleaStore {
         account: &AccountId,
         as_of: Option<DateTime<Utc>>,
     ) -> Result<Amount, StoreError> {
-        todo!()
+        let key = account.to_key();
+        let acct = load_account(&self.pool, &key)
+            .await?
+            .ok_or_else(|| StoreError::UnknownAccount(account.clone()))?;
+
+        let raw: i64 = match as_of {
+            // current balance: the projection row (0 if never posted to)
+            None => sqlx::query("SELECT balance FROM balances WHERE account_key = ?1")
+                .bind(&key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(io_err)?
+                .map(|r| r.get("balance"))
+                .unwrap_or(0),
+            // point-in-time: aggregate the postings projection by commit time
+            Some(t) => sqlx::query(
+                "SELECT COALESCE(SUM(CASE WHEN direction = 'D' THEN minor ELSE -minor END), 0) AS raw
+                 FROM postings WHERE account_key = ?1 AND committed_at <= ?2",
+            )
+            .bind(&key)
+            .bind(t)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(io_err)?
+            .get("raw"),
+        };
+
+        Ok(Amount::new(effective(raw, &acct.normal_side), acct.asset))
     }
 
     async fn read_events(
@@ -502,7 +529,7 @@ impl Store for SqliteTaleaStore {
         from: Seq,
         limit: usize,
     ) -> Result<Vec<Sequenced<LedgerEvent>>, StoreError> {
-        todo!()
+        fetch_events(&self.pool, book, from, limit as i64).await
     }
 
     fn subscribe(&self, book: &Book, from: Seq) -> EventStream {
