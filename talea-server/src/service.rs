@@ -193,7 +193,28 @@ impl LedgerApi for LedgerService {
         path: &str,
         as_of: Option<DateTime<Utc>>,
     ) -> ApiResult<BalanceView> {
-        todo!()
+        let account = AccountId { book: parse_book_lax(book)?, path: path.to_string() };
+        let snapshot = self.store.balance(&account, as_of).await.map_err(map_store_err)?;
+        let asset = self
+            .store
+            .asset(snapshot.amount.asset())
+            .await
+            .map_err(map_store_err)?
+            .ok_or_else(|| {
+                tracing::error!(
+                    asset = snapshot.amount.asset().as_str(),
+                    account = account.to_key(),
+                    "account references an unregistered asset"
+                );
+                ApiError::Internal { message: "ledger inconsistency".into() }
+            })?;
+        Ok(BalanceView {
+            account: account.to_key(),
+            asset: asset.id.as_str().to_string(),
+            balance: format_minor(snapshot.amount.minor(), asset.precision),
+            as_of,
+            updated_seq: snapshot.updated_seq,
+        })
     }
 
     async fn account_history(
@@ -202,11 +223,66 @@ impl LedgerApi for LedgerService {
         path: &str,
         page: Page,
     ) -> ApiResult<Paged<PostingView>> {
-        todo!()
+        let account = AccountId { book: parse_book_lax(book)?, path: path.to_string() };
+        let limit = (page.limit as usize).clamp(1, 1000);
+        let records = self
+            .store
+            .account_history(&account, page.after_seq, limit)
+            .await
+            .map_err(map_store_err)?;
+        // limit counts distinct seqs; fewer rows than limit can still mean a
+        // full page, so the cursor closes only when the page came back short
+        let next = if records.len() < limit { None } else { records.last().map(|r| r.seq) };
+        let items = records
+            .into_iter()
+            .map(|r| PostingView {
+                seq: r.seq,
+                tx_id: r.txid.0.to_string(),
+                account: r.account.to_key(),
+                amount: WireAmount {
+                    minor: r.amount.minor(),
+                    asset: r.amount.asset().as_str().to_string(),
+                },
+                direction: r.direction,
+                at: r.at,
+            })
+            .collect();
+        Ok(Paged { items, next })
     }
 
     async fn transaction(&self, tx_id: &str) -> ApiResult<TransactionView> {
-        todo!()
+        let id = Uuid::parse_str(tx_id)
+            .map_err(|e| invalid("tx_id", format!("not a uuid: {e}")))?;
+        let stored = self
+            .store
+            .transaction(&TxId(id))
+            .await
+            .map_err(map_store_err)?
+            .ok_or_else(|| ApiError::NotFound { what: format!("transaction {tx_id}") })?;
+        let t = stored.transaction;
+        Ok(TransactionView {
+            tx_id: t.id.0.to_string(),
+            book: t.book.0.clone(),
+            seq: stored.seq,
+            at: stored.at,
+            postings: t
+                .postings
+                .iter()
+                .map(|p| PostingView {
+                    seq: stored.seq,
+                    tx_id: t.id.0.to_string(),
+                    account: p.account.to_key(),
+                    amount: WireAmount {
+                        minor: p.amount.minor(),
+                        asset: p.amount.asset().as_str().to_string(),
+                    },
+                    direction: p.direction.clone(),
+                    at: stored.at,
+                })
+                .collect(),
+            external_refs: t.external_refs,
+            metadata: t.metadata,
+        })
     }
 
     async fn trial_balance(
@@ -214,10 +290,33 @@ impl LedgerApi for LedgerService {
         book: &str,
         as_of: Option<DateTime<Utc>>,
     ) -> ApiResult<TrialBalance> {
-        todo!()
+        let b = parse_book_lax(book)?;
+        let rows = self.store.trial_balance(&b, as_of).await.map_err(map_store_err)?;
+        Ok(TrialBalance {
+            book: b.0,
+            as_of,
+            lines: rows
+                .into_iter()
+                .map(|r| TrialBalanceLine {
+                    asset: r.asset.as_str().to_string(),
+                    debits: r.debits,
+                    credits: r.credits,
+                })
+                .collect(),
+        })
     }
 
     async fn subscribe(&self, book: &str, from: Seq) -> ApiResult<EventStream> {
-        todo!()
+        let b = parse_book_lax(book)?;
+        let stream = self.store.subscribe(&b, from);
+        Ok(Box::pin(stream.map(|item| {
+            let s = item.map_err(map_store_err)?;
+            let kind = s.event.kind().to_string();
+            let payload = serde_json::to_value(&s.event).map_err(|e| {
+                tracing::error!(error = %e, "event serialization failed");
+                ApiError::Internal { message: "event serialization failed".into() }
+            })?;
+            Ok(EventEnvelope { seq: s.seq, at: s.at, kind, payload })
+        })))
     }
 }

@@ -202,3 +202,99 @@ async fn store_errors_map_to_api_errors() {
         Err(ApiError::AlreadyExists { .. })
     ));
 }
+
+#[tokio::test]
+async fn balance_view_formats_decimal() {
+    let svc = funded_svc().await;
+    svc.post(tx_draft("onramp", "b1", balanced(1000))).await.unwrap();
+
+    let view = svc.balance("onramp", "cash", None).await.unwrap();
+    assert_eq!(view.balance, "10.00"); // 1000 minor at precision 2
+    assert_eq!(view.asset, "USD");
+    assert_eq!(view.account, "onramp:cash");
+    assert_eq!(view.updated_seq, 3);
+    assert!(view.as_of.is_none());
+
+    // unknown account → 404-shaped error
+    assert!(matches!(
+        svc.balance("onramp", "ghost", None).await,
+        Err(ApiError::UnknownAccount { .. })
+    ));
+}
+
+#[tokio::test]
+async fn account_history_pages() {
+    let svc = funded_svc().await;
+    for i in 0..3 {
+        svc.post(tx_draft("onramp", &format!("h{i}"), balanced(100))).await.unwrap();
+    }
+    let page = svc
+        .account_history("onramp", "cash", Page { after_seq: None, limit: 2 })
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.items[0].seq, 3);
+    assert_eq!(page.items[0].amount.minor, 100);
+    assert_eq!(page.next, Some(4));
+
+    let rest = svc
+        .account_history("onramp", "cash", Page { after_seq: page.next, limit: 10 })
+        .await
+        .unwrap();
+    assert_eq!(rest.items.len(), 1);
+    assert_eq!(rest.items[0].seq, 5);
+    assert!(rest.next.is_none()); // short page => no further cursor
+}
+
+#[tokio::test]
+async fn transaction_view_and_not_found() {
+    let svc = funded_svc().await;
+    let posted = svc.post(tx_draft("onramp", "tv1", balanced(250))).await.unwrap();
+
+    let view = svc.transaction(&posted.tx_id).await.unwrap();
+    assert_eq!(view.tx_id, posted.tx_id);
+    assert_eq!(view.book, "onramp");
+    assert_eq!(view.seq, posted.seq);
+    assert_eq!(view.postings.len(), 2);
+
+    // unknown id → NotFound; garbage id → InvalidDraft
+    let missing = uuid::Uuid::now_v7().to_string();
+    assert!(matches!(
+        svc.transaction(&missing).await,
+        Err(ApiError::NotFound { .. })
+    ));
+    assert!(matches!(
+        svc.transaction("not-a-uuid").await,
+        Err(ApiError::InvalidDraft { field, .. }) if field == "tx_id"
+    ));
+}
+
+#[tokio::test]
+async fn trial_balance_view() {
+    let svc = funded_svc().await;
+    svc.post(tx_draft("onramp", "tb1", balanced(500))).await.unwrap();
+
+    let tb = svc.trial_balance("onramp", None).await.unwrap();
+    assert_eq!(tb.book, "onramp");
+    assert_eq!(tb.lines.len(), 1);
+    assert_eq!(tb.lines[0].asset, "USD");
+    assert_eq!((tb.lines[0].debits, tb.lines[0].credits), (500, 500));
+}
+
+#[tokio::test]
+async fn subscribe_yields_envelopes() {
+    use futures::StreamExt;
+
+    let svc = funded_svc().await;
+    svc.post(tx_draft("onramp", "s1", balanced(10))).await.unwrap();
+
+    let mut stream = svc.subscribe("onramp", 3).await.unwrap();
+    let env = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("timed out")
+        .expect("stream ended")
+        .unwrap();
+    assert_eq!(env.seq, 3);
+    assert_eq!(env.kind, "transaction_posted");
+    assert_eq!(env.payload["kind"], "transaction_posted");
+}
