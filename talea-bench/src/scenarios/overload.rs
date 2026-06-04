@@ -60,7 +60,9 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
                     Ok(p) => OpOutcome::Success {
                         kind: "post",
                         deduplicated: p.deduplicated,
-                        committed: !p.deduplicated,
+                        // Keys are run-scoped unique: a dedup'd success can only be
+                        // an SDK retry whose original attempt committed — count it.
+                        committed: true,
                     },
                     Err(e) => classify(e),
                 }
@@ -111,7 +113,9 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
                     Ok(p) => OpOutcome::Success {
                         kind: "post",
                         deduplicated: p.deduplicated,
-                        committed: !p.deduplicated,
+                        // Keys are run-scoped unique: a dedup'd success can only be
+                        // an SDK retry whose original attempt committed — count it.
+                        committed: true,
                     },
                     Err(e) => classify(e),
                 }

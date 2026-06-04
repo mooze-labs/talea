@@ -22,7 +22,9 @@ pub enum OpOutcome {
     Success {
         kind: &'static str,
         deduplicated: bool,
-        /// True when this op appended an event (a non-deduplicated post).
+        /// True when this op caused an event to be appended. For ops with
+        /// run-scoped unique keys this includes dedup'd successes: the
+        /// dedup means this op's own retried attempt had already committed.
         committed: bool,
     },
     /// Load-shed 503: rejected at admission, definitely not committed.
