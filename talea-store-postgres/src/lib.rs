@@ -348,6 +348,72 @@ async fn commit_draft(
     write_transaction(db, transaction, &pending).await
 }
 
+/// One draft inside a shared batch transaction. SAVEPOINT scoping makes a
+/// failed draft roll back alone — including its claimed seq, so a later
+/// draft in the same batch reclaims the freed number and the per-book
+/// sequence stays gapless. Savepoint names come from the loop index, never
+/// from user input.
+async fn commit_in_savepoint(
+    db: &mut DbTx<'_, Postgres>,
+    i: usize,
+    transaction: &Transaction,
+) -> Result<Committed, StoreError> {
+    if transaction.book.is_reserved() {
+        // nothing written yet: no savepoint needed
+        return Err(StoreError::InvalidBook(transaction.book.clone()));
+    }
+    // SAFETY: savepoint names are "sp_{i}" where i is a loop index (usize),
+    // never derived from user input — no injection risk.
+    sqlx::query(sqlx::AssertSqlSafe(format!("SAVEPOINT sp_{i}")))
+        .execute(&mut **db)
+        .await
+        .map_err(io_err)?;
+    match commit_draft(db, transaction).await {
+        Ok(committed) => {
+            sqlx::query(sqlx::AssertSqlSafe(format!("RELEASE SAVEPOINT sp_{i}")))
+                .execute(&mut **db)
+                .await
+                .map_err(io_err)?;
+            Ok(committed)
+        }
+        Err(e) => {
+            // Undo just this draft's writes. If the undo itself fails (broken
+            // connection, disk full) the whole batch is doomed — surface both
+            // errors, the draft error being the root cause.
+            let undo: Result<(), sqlx::Error> = async {
+                // SAFETY: savepoint names are "sp_{i}" where i is a loop index (usize),
+                // never derived from user input — no injection risk.
+                sqlx::query(sqlx::AssertSqlSafe(format!("ROLLBACK TO SAVEPOINT sp_{i}")))
+                    .execute(&mut **db)
+                    .await?;
+                // ROLLBACK TO leaves the savepoint defined; RELEASE discards it
+                sqlx::query(sqlx::AssertSqlSafe(format!("RELEASE SAVEPOINT sp_{i}")))
+                    .execute(&mut **db)
+                    .await?;
+                Ok(())
+            }
+            .await;
+            if let Err(undo_err) = undo {
+                return Err(StoreError::Io(
+                    format!("draft failed ({e}); savepoint rollback also failed: {undo_err}")
+                        .into(),
+                ));
+            }
+            // A unique violation means another writer owns this idempotency key;
+            // under read-committed the re-read can observe the winner's commit
+            // after our savepoint rollback. (Mirror note: on SQLite this branch
+            // is effectively dead — see the sqlite store.)
+            if is_unique_violation(&e)
+                && let Some(prior) =
+                    find_committed(db, &transaction.book, &transaction.idempotency_key).await?
+            {
+                return Ok(prior);
+            }
+            Err(e)
+        }
+    }
+}
+
 /// Claim the next per-book sequence number. The upsert's row lock on the
 /// counter is held until the surrounding transaction commits or rolls back,
 /// so concurrent same-book writers serialize here and an aborted commit
@@ -620,6 +686,39 @@ impl Store for PgTaleaStore {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Group commit: the whole batch shares one storage transaction (one
+    /// fsync), each draft isolated by a savepoint. Each draft's pg_notify is
+    /// queued within its savepoint, so a rolled-back draft (or an aborted
+    /// outer commit) never emits a wake-up. See commit_in_savepoint.
+    async fn commit_batch(&self, txs: &[Transaction]) -> Vec<Result<Committed, StoreError>> {
+        if txs.is_empty() {
+            return Vec::new();
+        }
+        let mut db = match self.pool.begin().await {
+            Ok(db) => db,
+            Err(e) => {
+                let msg = format!("failed to begin batch transaction: {e}");
+                return txs
+                    .iter()
+                    .map(|_| Err(StoreError::Io(msg.clone().into())))
+                    .collect();
+            }
+        };
+        let mut results = Vec::with_capacity(txs.len());
+        for (i, tx) in txs.iter().enumerate() {
+            results.push(commit_in_savepoint(&mut db, i, tx).await);
+        }
+        if let Err(e) = db.commit().await {
+            // nothing became durable: every recorded success is void
+            let msg = format!("batch commit failed: {e}");
+            return txs
+                .iter()
+                .map(|_| Err(StoreError::Io(msg.clone().into())))
+                .collect();
+        }
+        results
     }
 
     async fn balance(
