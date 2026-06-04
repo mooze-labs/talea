@@ -37,6 +37,11 @@ pub enum ApiError {
     NotFound {
         what: String,
     },
+    /// Client-side transport failure (network error, retry budget exhausted,
+    /// undecodable response). Never produced by the server.
+    Transport {
+        message: String,
+    },
     Unauthorized,
     Internal {
         message: String,

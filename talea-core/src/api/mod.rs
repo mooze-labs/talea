@@ -104,6 +104,10 @@ mod tests {
         };
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"asset\":\"EUR\""), "got: {json}");
+
+        let e = ApiError::Transport { message: "connection refused".into() };
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains("\"error\":\"transport\""), "got: {json}");
     }
 
     #[test]

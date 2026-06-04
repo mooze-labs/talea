@@ -9,7 +9,7 @@ pub struct WireAmount {
     pub asset: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetDraft {
     pub id: String,
     pub class: String,
@@ -19,7 +19,7 @@ pub struct AssetDraft {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountDraft {
     pub book: String,
     pub path: String,
@@ -29,14 +29,14 @@ pub struct AccountDraft {
     pub min_balance: Option<i64>,       // null = unconstrained
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostingDraft {
     pub account: String,
     pub amount: WireAmount,
     pub direction: Direction,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionDraft {
     pub book: String,
     pub idempotency_key: String,
