@@ -455,19 +455,34 @@ async fn commit_in_savepoint(
             Ok(committed)
         }
         Err(e) => {
-            // ROLLBACK TO leaves the savepoint defined; RELEASE discards it
-            sqlx::query(sqlx::AssertSqlSafe(format!("ROLLBACK TO SAVEPOINT sp_{i}")))
-                .execute(&mut **db)
-                .await
-                .map_err(io_err)?;
-            sqlx::query(sqlx::AssertSqlSafe(format!("RELEASE SAVEPOINT sp_{i}")))
-                .execute(&mut **db)
-                .await
-                .map_err(io_err)?;
-            // a unique violation here means another writer owns this
-            // idempotency key; after the rollback a re-read may see it
-            // (Postgres read-committed does; SQLite snapshots usually
-            // surface this as a busy error instead — harmless either way)
+            // Undo just this draft's writes. If the undo itself fails (broken
+            // connection, disk full) the whole batch is doomed — surface both
+            // errors, the draft error being the root cause.
+            let undo: Result<(), sqlx::Error> = async {
+                // SAFETY: savepoint names are "sp_{i}" where i is a loop index (usize),
+                // never derived from user input — no injection risk.
+                sqlx::query(sqlx::AssertSqlSafe(format!("ROLLBACK TO SAVEPOINT sp_{i}")))
+                    .execute(&mut **db)
+                    .await?;
+                // ROLLBACK TO leaves the savepoint defined; RELEASE discards it
+                sqlx::query(sqlx::AssertSqlSafe(format!("RELEASE SAVEPOINT sp_{i}")))
+                    .execute(&mut **db)
+                    .await?;
+                Ok(())
+            }
+            .await;
+            if let Err(undo_err) = undo {
+                return Err(StoreError::Io(
+                    format!("draft failed ({e}); savepoint rollback also failed: {undo_err}")
+                        .into(),
+                ));
+            }
+            // A unique violation here means another writer owns this idempotency
+            // key. On SQLite this branch is effectively dead: the outer tx holds
+            // the single write lock, so an external winner cannot have committed
+            // mid-batch, and a within-batch duplicate already deduped inside
+            // commit_draft. It exists for the Postgres mirror, where read-committed
+            // lets this re-read observe a concurrent winner after the rollback.
             if is_unique_violation(&e)
                 && let Some(prior) =
                     find_committed(db, &transaction.book, &transaction.idempotency_key).await?
