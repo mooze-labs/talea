@@ -221,17 +221,25 @@ impl LedgerApi for LedgerService {
             metadata: draft.metadata,
             occurred_at: draft.occurred_at.unwrap_or_else(Utc::now),
         };
-        let committed = self
-            .store
-            .commit(&transaction)
-            .await
-            .map_err(map_store_err)?;
+        let started = std::time::Instant::now();
+        let committed = self.store.commit(&transaction).await.map_err(|e| {
+            metrics::counter!("talea_commits_total", "result" => "rejected").increment(1);
+            map_store_err(e)
+        })?;
+        metrics::histogram!("talea_commit_duration_seconds")
+            .record(started.elapsed().as_secs_f64());
+        let deduplicated = committed.txid != id;
+        metrics::counter!(
+            "talea_commits_total",
+            "result" => if deduplicated { "deduplicated" } else { "committed" },
+        )
+        .increment(1);
         Ok(Posted {
             tx_id: committed.txid.0.to_string(),
             seq: committed.seq,
             at: committed.at,
             // a dedup hit returns the prior transaction's id, not ours
-            deduplicated: committed.txid != id,
+            deduplicated,
         })
     }
 

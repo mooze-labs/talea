@@ -7,16 +7,22 @@ use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::{Stream, StreamExt};
 use serde::Deserialize;
-use talea_core::api::LedgerApi;
+use talea_core::api::{ApiError, LedgerApi};
 
 use crate::http::error::ApiFailure;
 use crate::http::routes::AppState;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 pub struct EventsQuery {
     pub from: Option<i64>,
 }
 
+#[utoipa::path(get, path = "/v1/books/{book}/events",
+    params(("book" = String, Path), EventsQuery),
+    responses(
+        (status = 200, description = "SSE stream (text/event-stream): each event carries id: <seq> and an EventEnvelope JSON body; ?from= and Last-Event-ID both mean 'last seen seq' (header wins); reconnect resumes from the cursor", content_type = "text/event-stream"),
+        (status = 401, body = ApiError),
+    ), security(("bearer" = [])), tag = "stream")]
 pub async fn events(
     State(state): State<AppState>,
     Path(book): Path<String>,
@@ -35,7 +41,9 @@ pub async fn events(
         .subscribe(&book, from)
         .await
         .map_err(ApiFailure)?;
+    let guard = crate::metrics::SseSubscriberGuard::new();
     let stream = async_stream::stream! {
+        let _guard = guard; // lives exactly as long as the connection
         while let Some(item) = inner.next().await {
             match item {
                 Ok(env) => match Event::default().id(env.seq.to_string()).json_data(&env) {

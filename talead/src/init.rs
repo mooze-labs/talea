@@ -18,7 +18,8 @@ pub fn render_env(db_url: &str, token: &str) -> String {
          TALEA_API_TOKEN={token}\n\
          TALEA_BIND=127.0.0.1:8080\n\
          # TALEA_DB_POOL=10\n\
-         # TALEA_MAX_INFLIGHT=256\n"
+         # TALEA_MAX_INFLIGHT=256\n\
+         # TALEA_METRICS_BIND=127.0.0.1:9100\n"
     )
 }
 
@@ -130,6 +131,7 @@ mod tests {
         assert!(env.contains("TALEA_BIND=127.0.0.1:8080\n"));
         assert!(env.contains("# TALEA_DB_POOL=10\n"));
         assert!(env.contains("# TALEA_MAX_INFLIGHT=256\n"));
+        assert!(env.contains("# TALEA_METRICS_BIND=127.0.0.1:9100\n"));
     }
 
     #[test]

@@ -8,6 +8,9 @@ pub struct Config {
     pub api_token: Option<String>,
     pub db_pool: u32,
     pub max_inflight: usize,
+    /// Optional bind for the Prometheus /metrics listener; unset = no
+    /// metrics endpoint (the recorder still runs, nothing is exposed).
+    pub metrics_bind: Option<SocketAddr>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -53,12 +56,20 @@ impl Config {
                 reason: format!("{e}"),
             })?
             .unwrap_or(256);
+        let metrics_bind = get("TALEA_METRICS_BIND")
+            .map(|v| v.parse())
+            .transpose()
+            .map_err(|e| ConfigError::Invalid {
+                var: "TALEA_METRICS_BIND",
+                reason: format!("{e}"),
+            })?;
         Ok(Self {
             db_url,
             bind,
             api_token: get("TALEA_API_TOKEN"),
             db_pool,
             max_inflight,
+            metrics_bind,
         })
     }
 }
@@ -104,6 +115,36 @@ mod tests {
         assert_eq!(c.api_token.as_deref(), Some("secret"));
         assert_eq!(c.db_pool, 32);
         assert_eq!(c.max_inflight, 512);
+    }
+
+    #[test]
+    fn metrics_bind_defaults_to_none() {
+        let c = cfg(&[("TALEA_DB_URL", "sqlite://x.db")]).unwrap();
+        assert!(c.metrics_bind.is_none());
+    }
+
+    #[test]
+    fn metrics_bind_parses() {
+        let c = cfg(&[
+            ("TALEA_DB_URL", "sqlite://x.db"),
+            ("TALEA_METRICS_BIND", "127.0.0.1:9100"),
+        ])
+        .unwrap();
+        assert_eq!(c.metrics_bind, Some("127.0.0.1:9100".parse().unwrap()));
+    }
+
+    #[test]
+    fn metrics_bind_garbage_rejected() {
+        assert!(matches!(
+            cfg(&[
+                ("TALEA_DB_URL", "sqlite://x.db"),
+                ("TALEA_METRICS_BIND", "nope")
+            ]),
+            Err(ConfigError::Invalid {
+                var: "TALEA_METRICS_BIND",
+                ..
+            })
+        ));
     }
 
     #[test]

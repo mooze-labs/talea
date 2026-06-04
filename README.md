@@ -76,6 +76,8 @@ All `/v1` routes require `Authorization: Bearer <token>` when `TALEA_API_TOKEN` 
 | `GET /v1/books/{book}/trial-balance?as_of=` | Per-asset debit/credit sums |
 | `GET /v1/books/{book}/events?from=` | SSE event stream; resume via `Last-Event-ID` |
 | `GET /health` | Liveness (open, but inside the load-shed limits: 503 means busy, not dead) |
+| `GET /docs` | Swagger UI (open, like `/health`) |
+| `GET /openapi.json` | OpenAPI 3 document, generated from the code at compile time |
 
 Overload returns `503` + `Retry-After`. Retrying with the same idempotency key is always safe; the server's shedding design assumes clients do exactly that, and the SDK does it automatically.
 
@@ -121,8 +123,23 @@ Server (`talead serve` / `talea-server`, via env or `.env`):
 | `TALEA_API_TOKEN` | unset | Bearer token; unset means OPEN dev mode (logged loudly) |
 | `TALEA_DB_POOL` | `10` | Connection pool size. On Postgres each SSE subscriber pins one connection: size for subscribers + workers |
 | `TALEA_MAX_INFLIGHT` | `256` | In-flight request cap; excess sheds as 503 |
+| `TALEA_METRICS_BIND` | unset | Optional Prometheus listener (e.g. `127.0.0.1:9100`); unset = no metrics endpoint |
 
 Client (`talea` CLI): `TALEA_URL`, `TALEA_TOKEN`.
+
+## Metrics
+
+Set `TALEA_METRICS_BIND` to expose Prometheus metrics on a separate listener (`GET /metrics`). Labels never carry user-controlled values: route labels are the route templates (`/v1/books/{book}/...`), so cardinality stays bounded no matter how many books exist.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `talea_http_requests_total` | counter | `method`, `route`, `status` |
+| `talea_http_request_duration_seconds` | histogram | `method`, `route` |
+| `talea_commits_total` | counter | `result` = `committed` \| `deduplicated` \| `rejected` |
+| `talea_commit_duration_seconds` | histogram | — |
+| `talea_shed_total` | counter | — (503s from admission control) |
+| `talea_sse_subscribers` | gauge | — (live event-stream connections; each pins a DB connection on Postgres) |
+| `talea_db_pool_connections` | gauge | `state` = `size` \| `idle` |
 
 ## Development
 
