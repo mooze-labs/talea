@@ -11,6 +11,10 @@ pub struct Config {
     /// Optional bind for the Prometheus /metrics listener; unset = no
     /// metrics endpoint (the recorder still runs, nothing is exposed).
     pub metrics_bind: Option<SocketAddr>,
+    /// Per-book write queue length; a full queue answers 429 + Retry-After.
+    pub write_queue_depth: usize,
+    /// Max drafts group-committed in one storage transaction per book.
+    pub write_batch_max: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +67,8 @@ impl Config {
                 var: "TALEA_METRICS_BIND",
                 reason: format!("{e}"),
             })?;
+        let write_queue_depth = Self::parse_nonzero(&get, "TALEA_WRITE_QUEUE_DEPTH", 256)?;
+        let write_batch_max = Self::parse_nonzero(&get, "TALEA_WRITE_BATCH_MAX", 64)?;
         Ok(Self {
             db_url,
             bind,
@@ -70,7 +76,30 @@ impl Config {
             db_pool,
             max_inflight,
             metrics_bind,
+            write_queue_depth,
+            write_batch_max,
         })
+    }
+
+    fn parse_nonzero(
+        get: impl Fn(&str) -> Option<String>,
+        var: &'static str,
+        default: usize,
+    ) -> Result<usize, ConfigError> {
+        let value = match get(var) {
+            None => return Ok(default),
+            Some(v) => v.parse::<usize>().map_err(|e| ConfigError::Invalid {
+                var,
+                reason: format!("{e}"),
+            })?,
+        };
+        if value == 0 {
+            return Err(ConfigError::Invalid {
+                var,
+                reason: "must be >= 1".into(),
+            });
+        }
+        Ok(value)
     }
 }
 
@@ -142,6 +171,45 @@ mod tests {
             ]),
             Err(ConfigError::Invalid {
                 var: "TALEA_METRICS_BIND",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn write_knobs_default() {
+        let c = cfg(&[("TALEA_DB_URL", "sqlite://x.db")]).unwrap();
+        assert_eq!(c.write_queue_depth, 256);
+        assert_eq!(c.write_batch_max, 64);
+    }
+
+    #[test]
+    fn write_knobs_parse_and_reject_zero() {
+        let c = cfg(&[
+            ("TALEA_DB_URL", "sqlite://x.db"),
+            ("TALEA_WRITE_QUEUE_DEPTH", "8"),
+            ("TALEA_WRITE_BATCH_MAX", "16"),
+        ])
+        .unwrap();
+        assert_eq!(c.write_queue_depth, 8);
+        assert_eq!(c.write_batch_max, 16);
+        assert!(matches!(
+            cfg(&[
+                ("TALEA_DB_URL", "sqlite://x.db"),
+                ("TALEA_WRITE_QUEUE_DEPTH", "0")
+            ]),
+            Err(ConfigError::Invalid {
+                var: "TALEA_WRITE_QUEUE_DEPTH",
+                ..
+            })
+        ));
+        assert!(matches!(
+            cfg(&[
+                ("TALEA_DB_URL", "sqlite://x.db"),
+                ("TALEA_WRITE_BATCH_MAX", "0")
+            ]),
+            Err(ConfigError::Invalid {
+                var: "TALEA_WRITE_BATCH_MAX",
                 ..
             })
         ));
