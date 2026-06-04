@@ -5,7 +5,7 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use talea_bench::Ctx;
 use talea_bench::report::{self, RunJson, StepJson};
-use talea_bench::scenarios::{mixed, post_many_books, post_one_book, reads};
+use talea_bench::scenarios::{mixed, overload, post_many_books, post_one_book, reads};
 use talea_bench::workload::MixWeights;
 
 #[derive(Parser)]
@@ -57,6 +57,14 @@ enum Cmd {
         depth: usize,
         #[arg(long, default_value_t = 8)]
         seed_workers: usize,
+    },
+    /// Exceed admission capacity; verify shedding + retry safety
+    Overload {
+        /// Several times TALEA_MAX_INFLIGHT (server default 256)
+        #[arg(long, default_value_t = 1024)]
+        concurrency: usize,
+        #[arg(long, default_value_t = 2)]
+        postings_per_tx: usize,
     },
     /// Realistic blend with SSE subscribers
     Mixed {
@@ -110,6 +118,11 @@ async fn main() {
                 let opts = reads::Opts { concurrencies: concurrency, depth, seed_workers };
                 let config = run_config(&ctx, &opts);
                 ("reads", config, reads::run(&ctx, opts).await)
+            }
+            Cmd::Overload { concurrency, postings_per_tx } => {
+                let opts = overload::Opts { concurrency, postings_per_tx };
+                let config = run_config(&ctx, &opts);
+                ("overload", config, overload::run(&ctx, opts).await)
             }
             Cmd::Mixed {
                 concurrency,

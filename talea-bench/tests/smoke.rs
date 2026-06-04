@@ -7,7 +7,7 @@ mod harness;
 use std::time::Duration;
 
 use talea_bench::Ctx;
-use talea_bench::scenarios::{mixed, post_many_books, post_one_book, reads};
+use talea_bench::scenarios::{mixed, overload, post_many_books, post_one_book, reads};
 use talea_bench::workload::MixWeights;
 
 fn smoke_ctx(url: String, run_id: &str) -> Ctx {
@@ -87,4 +87,19 @@ async fn mixed_smoke() {
     assert!(!steps.is_empty() && steps.len() <= 2);
     assert!(steps[0].latency.contains_key("post"));
     assert!(steps[0].successes > 0);
+}
+
+#[tokio::test]
+async fn overload_smoke() {
+    // Tiny admission limit so 16 workers genuinely overload it.
+    let url = harness::spawn_server(4).await;
+    let ctx = smoke_ctx(url, "smoke-overload");
+    let steps = overload::run(
+        &ctx,
+        overload::Opts { concurrency: 16, postings_per_tx: 2 },
+    )
+    .await
+    .unwrap();
+    assert_eq!(steps.len(), 2); // raw-503 pass + retry-to-success pass
+    assert!(steps[1].successes > 0, "retrying pass must land commits");
 }
