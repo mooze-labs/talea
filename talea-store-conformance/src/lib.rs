@@ -205,7 +205,7 @@ pub async fn commit_is_idempotent(store: &impl Store) {
 /// Interleaved (single-task `join!`) duplicate commits — an idempotency-under-
 /// interleaving check, NOT a true parallel race; the unique-violation recovery
 /// path needs multi-connection contention to be exercised for real.
-pub async fn concurrent_same_key_commits_once(store: &(impl Store + Sync)) {
+pub async fn concurrent_same_key_commits_once(store: &impl Store) {
     let (book, asset_id) = setup_book(store).await;
     let tx = transfer(&book, "race", "deposits", "cash", &asset_id, 250);
     let (a, b) = futures::join!(store.commit(&tx), store.commit(&tx));
@@ -337,7 +337,7 @@ pub async fn system_book_is_reserved(store: &impl Store) {
 
 // --- subscribe ----------------------------------------------------------
 
-pub async fn subscribe_catches_up_then_tails(store: &(impl Store + Sync)) {
+pub async fn subscribe_catches_up_then_tails(store: &impl Store) {
     let (book, asset_id) = setup_book(store).await;
     store.commit(&transfer(&book, "s1", "deposits", "cash", &asset_id, 10)).await.unwrap();
 
