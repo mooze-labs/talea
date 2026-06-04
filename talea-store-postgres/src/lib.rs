@@ -526,6 +526,12 @@ impl Store for PgTaleaStore {
         fetch_events(&self.pool, book, from, limit as i64).await
     }
 
+    /// Each active subscription holds one connection from the pool for its
+    /// whole lifetime (PgListener parks on it) — size the pool for
+    /// `subscribers + workers`, or commits will starve waiting for a
+    /// connection that is never returned. A transient DB outage that defeats
+    /// PgListener's auto-reconnect ends the stream with an error; callers
+    /// resume by re-subscribing from `last_seen + 1`.
     fn subscribe(&self, book: &Book, from: Seq) -> EventStream {
         let pool = self.pool.clone();
         let book = book.clone();
