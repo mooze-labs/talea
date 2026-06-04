@@ -56,7 +56,9 @@ pub struct InitReport {
 /// need the server's pool sizing.
 pub async fn connect_store(db_url: &str) -> Result<Arc<dyn Store>, Box<dyn std::error::Error>> {
     if db_url.contains(":memory:") {
-        return Err("sqlite::memory: is not supported (nothing would persist); use a file path".into());
+        return Err(
+            "sqlite::memory: is not supported (nothing would persist); use a file path".into(),
+        );
     }
     if db_url.starts_with("postgres://") || db_url.starts_with("postgresql://") {
         let store = talea_store_postgres::PgTaleaStore::connect(db_url)
@@ -69,7 +71,10 @@ pub async fn connect_store(db_url: &str) -> Result<Arc<dyn Store>, Box<dyn std::
             .map_err(|e| format!("couldn't open {db_url}: {e}"))?;
         Ok(Arc::new(store))
     } else {
-        Err(format!("unsupported db url scheme: {db_url} (expected postgres://... or sqlite://...)").into())
+        Err(format!(
+            "unsupported db url scheme: {db_url} (expected postgres://... or sqlite://...)"
+        )
+        .into())
     }
 }
 
@@ -96,7 +101,11 @@ pub async fn run_init(opts: &InitOpts) -> Result<InitReport, Box<dyn std::error:
         None => None,
     };
 
-    let env = write_env(&opts.env_out, &render_env(&opts.db_url, &generate_token()), opts.force)?;
+    let env = write_env(
+        &opts.env_out,
+        &render_env(&opts.db_url, &generate_token()),
+        opts.force,
+    )?;
     Ok(InitReport { seed, env })
 }
 
@@ -128,11 +137,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".env");
 
-        assert!(matches!(write_env(&path, "first", false).unwrap(), EnvOutcome::Written));
-        assert!(matches!(write_env(&path, "second", false).unwrap(), EnvOutcome::KeptExisting));
+        assert!(matches!(
+            write_env(&path, "first", false).unwrap(),
+            EnvOutcome::Written
+        ));
+        assert!(matches!(
+            write_env(&path, "second", false).unwrap(),
+            EnvOutcome::KeptExisting
+        ));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
 
-        assert!(matches!(write_env(&path, "third", true).unwrap(), EnvOutcome::Written));
+        assert!(matches!(
+            write_env(&path, "third", true).unwrap(),
+            EnvOutcome::Written
+        ));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "third");
     }
 }

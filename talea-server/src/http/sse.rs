@@ -30,7 +30,11 @@ pub async fn events(
         .or(q.from);
     let from = last_seen.map(|s| s + 1).unwrap_or(1);
 
-    let mut inner = state.service.subscribe(&book, from).await.map_err(ApiFailure)?;
+    let mut inner = state
+        .service
+        .subscribe(&book, from)
+        .await
+        .map_err(ApiFailure)?;
     let stream = async_stream::stream! {
         while let Some(item) = inner.next().await {
             match item {

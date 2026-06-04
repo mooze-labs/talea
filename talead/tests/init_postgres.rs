@@ -1,4 +1,4 @@
-use talead::init::{run_init, InitOpts};
+use talead::init::{InitOpts, run_init};
 
 /// Gated like the store conformance suite:
 /// TALEA_TEST_PG_URL=postgres://localhost/talea_test cargo test -p talead --test init_postgres

@@ -3,7 +3,7 @@ use std::path::Path;
 use clap::Parser;
 
 use talead::cli::{Cli, Command};
-use talead::init::{run_init, EnvOutcome, InitOpts};
+use talead::init::{EnvOutcome, InitOpts, run_init};
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
@@ -19,8 +19,18 @@ async fn main() -> std::process::ExitCode {
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Init { db_url, seed, env_out, force } => {
-            let opts = InitOpts { db_url, seed, env_out, force };
+        Command::Init {
+            db_url,
+            seed,
+            env_out,
+            force,
+        } => {
+            let opts = InitOpts {
+                db_url,
+                seed,
+                env_out,
+                force,
+            };
             let report = run_init(&opts).await?;
             match &report.seed {
                 Some(s) => println!(
@@ -47,10 +57,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .init();
             let env_path = Path::new(".env");
-            let config = talead::serve::load_config(
-                env_path.exists().then_some(env_path),
-                |k| std::env::var(k).ok(),
-            )?;
+            let config = talead::serve::load_config(env_path.exists().then_some(env_path), |k| {
+                std::env::var(k).ok()
+            })?;
             talea_server::run::run(config).await
         }
     }

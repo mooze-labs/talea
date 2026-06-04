@@ -20,7 +20,9 @@ async fn app(token: Option<&str>) -> axum::Router {
     let service = Arc::new(LedgerService::new(Arc::new(store)));
     talea_server::http::routes::router(
         service,
-        AuthConfig { token: token.map(String::from) },
+        AuthConfig {
+            token: token.map(String::from),
+        },
         256,
     )
 }
@@ -77,9 +79,23 @@ fn transfer_body(idem: &str, minor: i64) -> serde_json::Value {
 async fn setup(app: &axum::Router) {
     let (s, _) = send(app, "POST", "/v1/assets", None, Some(usd())).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
-    let (s, _) = send(app, "POST", "/v1/accounts", None, Some(account("cash", "asset", "debit"))).await;
+    let (s, _) = send(
+        app,
+        "POST",
+        "/v1/accounts",
+        None,
+        Some(account("cash", "asset", "debit")),
+    )
+    .await;
     assert_eq!(s, StatusCode::NO_CONTENT);
-    let (s, _) = send(app, "POST", "/v1/accounts", None, Some(account("deposits", "liability", "credit"))).await;
+    let (s, _) = send(
+        app,
+        "POST",
+        "/v1/accounts",
+        None,
+        Some(account("deposits", "liability", "credit")),
+    )
+    .await;
     assert_eq!(s, StatusCode::NO_CONTENT);
 }
 
@@ -89,25 +105,53 @@ async fn full_rest_round_trip() {
     setup(&app).await;
 
     // post a transaction
-    let (s, posted) = send(&app, "POST", "/v1/transactions", None, Some(transfer_body("t1", 1000))).await;
+    let (s, posted) = send(
+        &app,
+        "POST",
+        "/v1/transactions",
+        None,
+        Some(transfer_body("t1", 1000)),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(posted["seq"], 3);
     assert_eq!(posted["deduplicated"], false);
 
     // balance
-    let (s, bal) = send(&app, "GET", "/v1/books/onramp/accounts/cash/balance", None, None).await;
+    let (s, bal) = send(
+        &app,
+        "GET",
+        "/v1/books/onramp/accounts/cash/balance",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(bal["balance"], "10.00");
     assert_eq!(bal["updated_seq"], 3);
 
     // history
-    let (s, page) = send(&app, "GET", "/v1/books/onramp/accounts/cash/history?limit=10", None, None).await;
+    let (s, page) = send(
+        &app,
+        "GET",
+        "/v1/books/onramp/accounts/cash/history?limit=10",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
 
     // transaction view
     let tx_id = posted["tx_id"].as_str().unwrap();
-    let (s, view) = send(&app, "GET", &format!("/v1/transactions/{tx_id}"), None, None).await;
+    let (s, view) = send(
+        &app,
+        "GET",
+        &format!("/v1/transactions/{tx_id}"),
+        None,
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(view["book"], "onramp");
 
@@ -134,13 +178,27 @@ async fn error_statuses() {
     assert_eq!(body["error"], "unbalanced");
 
     // 404 unknown account balance
-    let (s, body) = send(&app, "GET", "/v1/books/onramp/accounts/ghost/balance", None, None).await;
+    let (s, body) = send(
+        &app,
+        "GET",
+        "/v1/books/onramp/accounts/ghost/balance",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "unknown_account");
 
     // 404 unknown transaction
     let missing = uuid::Uuid::now_v7();
-    let (s, body) = send(&app, "GET", &format!("/v1/transactions/{missing}"), None, None).await;
+    let (s, body) = send(
+        &app,
+        "GET",
+        &format!("/v1/transactions/{missing}"),
+        None,
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "not_found");
 
@@ -185,7 +243,14 @@ async fn sse_streams_envelopes_with_ids() {
 
     let app = app(None).await;
     setup(&app).await;
-    let (s, _) = send(&app, "POST", "/v1/transactions", None, Some(transfer_body("sse1", 100))).await;
+    let (s, _) = send(
+        &app,
+        "POST",
+        "/v1/transactions",
+        None,
+        Some(transfer_body("sse1", 100)),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
 
     // from=2 means "last seen seq 2": stream starts at 3 (the transaction)
@@ -248,7 +313,8 @@ async fn load_shed_sheds_when_saturated() {
         let mut svc = svc.clone();
         async move {
             svc.ready().await.unwrap();
-            svc.call(Request::builder().body(Body::empty()).unwrap()).await
+            svc.call(Request::builder().body(Body::empty()).unwrap())
+                .await
         }
     };
     let shed = {
@@ -256,7 +322,8 @@ async fn load_shed_sheds_when_saturated() {
         async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             svc.ready().await.unwrap();
-            svc.call(Request::builder().body(Body::empty()).unwrap()).await
+            svc.call(Request::builder().body(Body::empty()).unwrap())
+                .await
         }
     };
     let (a, b) = tokio::join!(slow, shed);

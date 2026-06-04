@@ -119,7 +119,9 @@ mod tests {
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"error\":\"invalid_draft\""), "got: {json}");
 
-        let e = ApiError::NotFound { what: "transaction x".into() };
+        let e = ApiError::NotFound {
+            what: "transaction x".into(),
+        };
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"error\":\"not_found\""), "got: {json}");
 
@@ -131,17 +133,17 @@ mod tests {
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"asset\":\"EUR\""), "got: {json}");
 
-        let e = ApiError::Transport { message: "connection refused".into() };
+        let e = ApiError::Transport {
+            message: "connection refused".into(),
+        };
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"error\":\"transport\""), "got: {json}");
     }
 
     #[test]
     fn transaction_draft_occurred_at_defaults_to_none() {
-        let draft: TransactionDraft = serde_json::from_str(
-            r#"{"book":"b","idempotency_key":"k","postings":[]}"#,
-        )
-        .unwrap();
+        let draft: TransactionDraft =
+            serde_json::from_str(r#"{"book":"b","idempotency_key":"k","postings":[]}"#).unwrap();
         assert!(draft.occurred_at.is_none());
     }
 }

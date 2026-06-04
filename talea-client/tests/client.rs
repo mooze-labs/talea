@@ -32,12 +32,18 @@ fn transfer(idem: &str, minor: i64) -> TransactionDraft {
         postings: vec![
             PostingDraft {
                 account: "deposits".into(),
-                amount: WireAmount { minor, asset: "USD".into() },
+                amount: WireAmount {
+                    minor,
+                    asset: "USD".into(),
+                },
                 direction: Direction::Credit,
             },
             PostingDraft {
                 account: "cash".into(),
-                amount: WireAmount { minor, asset: "USD".into() },
+                amount: WireAmount {
+                    minor,
+                    asset: "USD".into(),
+                },
                 direction: Direction::Debit,
             },
         ],
@@ -50,8 +56,14 @@ fn transfer(idem: &str, minor: i64) -> TransactionDraft {
 async fn ready_client(url: &str) -> TaleaClient {
     let client = TaleaClient::builder(url).build().unwrap();
     client.register_asset(usd()).await.unwrap();
-    client.open_account(account("cash", "asset", Direction::Debit)).await.unwrap();
-    client.open_account(account("deposits", "liability", Direction::Credit)).await.unwrap();
+    client
+        .open_account(account("cash", "asset", Direction::Debit))
+        .await
+        .unwrap();
+    client
+        .open_account(account("deposits", "liability", Direction::Credit))
+        .await
+        .unwrap();
     client
 }
 
@@ -73,7 +85,14 @@ async fn full_ledger_round_trip() {
     assert_eq!(bal.updated_seq, 3);
 
     let page = client
-        .account_history("onramp", "cash", Page { after_seq: None, limit: 10 })
+        .account_history(
+            "onramp",
+            "cash",
+            Page {
+                after_seq: None,
+                limit: 10,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(page.items.len(), 1);
@@ -164,10 +183,16 @@ async fn bearer_auth_round_trip() {
 
     // no token -> Unauthorized
     let anon = TaleaClient::builder(&url).build().unwrap();
-    assert!(matches!(anon.register_asset(usd()).await, Err(ApiError::Unauthorized)));
+    assert!(matches!(
+        anon.register_asset(usd()).await,
+        Err(ApiError::Unauthorized)
+    ));
 
     // with token -> works
-    let auth = TaleaClient::builder(&url).bearer_token("sekrit").build().unwrap();
+    let auth = TaleaClient::builder(&url)
+        .bearer_token("sekrit")
+        .build()
+        .unwrap();
     auth.register_asset(usd()).await.unwrap();
 }
 

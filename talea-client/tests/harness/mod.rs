@@ -19,7 +19,13 @@ pub async fn spawn_server(token: Option<&str>) -> String {
     let store = SqliteTaleaStore::new(pool);
     store.migrate().await.unwrap();
     let service = Arc::new(LedgerService::new(Arc::new(store)));
-    let app = router(service, AuthConfig { token: token.map(String::from) }, 256);
+    let app = router(
+        service,
+        AuthConfig {
+            token: token.map(String::from),
+        },
+        256,
+    );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();

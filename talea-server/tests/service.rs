@@ -48,7 +48,10 @@ fn account_draft(
 fn posting(account: &str, asset: &str, minor: i64, direction: Direction) -> PostingDraft {
     PostingDraft {
         account: account.into(),
-        amount: WireAmount { minor, asset: asset.into() },
+        amount: WireAmount {
+            minor,
+            asset: asset.into(),
+        },
         direction,
     }
 }
@@ -68,12 +71,24 @@ fn tx_draft(book: &str, idem: &str, postings: Vec<PostingDraft>) -> TransactionD
 async fn funded_svc() -> LedgerService {
     let svc = svc().await;
     svc.register_asset(usd_draft("USD")).await.unwrap();
-    svc.open_account(account_draft("onramp", "cash", "USD", "asset", Some(Direction::Debit)))
-        .await
-        .unwrap();
-    svc.open_account(account_draft("onramp", "deposits", "USD", "liability", Some(Direction::Credit)))
-        .await
-        .unwrap();
+    svc.open_account(account_draft(
+        "onramp",
+        "cash",
+        "USD",
+        "asset",
+        Some(Direction::Debit),
+    ))
+    .await
+    .unwrap();
+    svc.open_account(account_draft(
+        "onramp",
+        "deposits",
+        "USD",
+        "liability",
+        Some(Direction::Credit),
+    ))
+    .await
+    .unwrap();
     svc
 }
 
@@ -101,12 +116,20 @@ async fn post_round_trip_and_dedup() {
 #[tokio::test]
 async fn unbalanced_rejected() {
     let svc = funded_svc().await;
-    let draft = tx_draft("onramp", "u1", vec![
-        posting("deposits", "USD", 1000, Direction::Credit),
-        posting("cash", "USD", 900, Direction::Debit),
-    ]);
+    let draft = tx_draft(
+        "onramp",
+        "u1",
+        vec![
+            posting("deposits", "USD", 1000, Direction::Credit),
+            posting("cash", "USD", 900, Direction::Debit),
+        ],
+    );
     match svc.post(draft).await {
-        Err(ApiError::Unbalanced { debit, credit, asset }) => {
+        Err(ApiError::Unbalanced {
+            debit,
+            credit,
+            asset,
+        }) => {
             assert_eq!((debit, credit, asset.as_str()), (900, 1000, "USD"));
         }
         other => panic!("expected Unbalanced, got {other:?}"),
@@ -116,10 +139,14 @@ async fn unbalanced_rejected() {
 #[tokio::test]
 async fn non_positive_amount_rejected() {
     let svc = funded_svc().await;
-    let draft = tx_draft("onramp", "n1", vec![
-        posting("deposits", "USD", 0, Direction::Credit),
-        posting("cash", "USD", 0, Direction::Debit),
-    ]);
+    let draft = tx_draft(
+        "onramp",
+        "n1",
+        vec![
+            posting("deposits", "USD", 0, Direction::Credit),
+            posting("cash", "USD", 0, Direction::Debit),
+        ],
+    );
     match svc.post(draft).await {
         Err(ApiError::InvalidAmount { amount: 0 }) => {}
         other => panic!("expected InvalidAmount, got {other:?}"),
@@ -176,20 +203,28 @@ async fn malformed_drafts_rejected() {
 async fn store_errors_map_to_api_errors() {
     let svc = funded_svc().await;
     // unknown account
-    let draft = tx_draft("onramp", "m1", vec![
-        posting("deposits", "USD", 10, Direction::Credit),
-        posting("ghost", "USD", 10, Direction::Debit),
-    ]);
+    let draft = tx_draft(
+        "onramp",
+        "m1",
+        vec![
+            posting("deposits", "USD", 10, Direction::Credit),
+            posting("ghost", "USD", 10, Direction::Debit),
+        ],
+    );
     assert!(matches!(
         svc.post(draft).await,
         Err(ApiError::UnknownAccount { account }) if account == "onramp:ghost"
     ));
     // asset mismatch: EUR postings against USD accounts
     svc.register_asset(usd_draft("EUR")).await.unwrap();
-    let draft = tx_draft("onramp", "m2", vec![
-        posting("deposits", "EUR", 10, Direction::Credit),
-        posting("cash", "EUR", 10, Direction::Debit),
-    ]);
+    let draft = tx_draft(
+        "onramp",
+        "m2",
+        vec![
+            posting("deposits", "EUR", 10, Direction::Credit),
+            posting("cash", "EUR", 10, Direction::Debit),
+        ],
+    );
     assert!(matches!(
         svc.post(draft).await,
         Err(ApiError::AssetMismatch { asset, .. }) if asset == "EUR"
@@ -206,7 +241,9 @@ async fn store_errors_map_to_api_errors() {
 #[tokio::test]
 async fn balance_view_formats_decimal() {
     let svc = funded_svc().await;
-    svc.post(tx_draft("onramp", "b1", balanced(1000))).await.unwrap();
+    svc.post(tx_draft("onramp", "b1", balanced(1000)))
+        .await
+        .unwrap();
 
     let view = svc.balance("onramp", "cash", None).await.unwrap();
     assert_eq!(view.balance, "10.00"); // 1000 minor at precision 2
@@ -226,10 +263,19 @@ async fn balance_view_formats_decimal() {
 async fn account_history_pages() {
     let svc = funded_svc().await;
     for i in 0..3 {
-        svc.post(tx_draft("onramp", &format!("h{i}"), balanced(100))).await.unwrap();
+        svc.post(tx_draft("onramp", &format!("h{i}"), balanced(100)))
+            .await
+            .unwrap();
     }
     let page = svc
-        .account_history("onramp", "cash", Page { after_seq: None, limit: 2 })
+        .account_history(
+            "onramp",
+            "cash",
+            Page {
+                after_seq: None,
+                limit: 2,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(page.items.len(), 2);
@@ -238,7 +284,14 @@ async fn account_history_pages() {
     assert_eq!(page.next, Some(4));
 
     let rest = svc
-        .account_history("onramp", "cash", Page { after_seq: page.next, limit: 10 })
+        .account_history(
+            "onramp",
+            "cash",
+            Page {
+                after_seq: page.next,
+                limit: 10,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(rest.items.len(), 1);
@@ -249,7 +302,10 @@ async fn account_history_pages() {
 #[tokio::test]
 async fn transaction_view_and_not_found() {
     let svc = funded_svc().await;
-    let posted = svc.post(tx_draft("onramp", "tv1", balanced(250))).await.unwrap();
+    let posted = svc
+        .post(tx_draft("onramp", "tv1", balanced(250)))
+        .await
+        .unwrap();
 
     let view = svc.transaction(&posted.tx_id).await.unwrap();
     assert_eq!(view.tx_id, posted.tx_id);
@@ -272,7 +328,9 @@ async fn transaction_view_and_not_found() {
 #[tokio::test]
 async fn trial_balance_view() {
     let svc = funded_svc().await;
-    svc.post(tx_draft("onramp", "tb1", balanced(500))).await.unwrap();
+    svc.post(tx_draft("onramp", "tb1", balanced(500)))
+        .await
+        .unwrap();
 
     let tb = svc.trial_balance("onramp", None).await.unwrap();
     assert_eq!(tb.book, "onramp");
@@ -286,7 +344,9 @@ async fn subscribe_yields_envelopes() {
     use futures::StreamExt;
 
     let svc = funded_svc().await;
-    svc.post(tx_draft("onramp", "s1", balanced(10))).await.unwrap();
+    svc.post(tx_draft("onramp", "s1", balanced(10)))
+        .await
+        .unwrap();
 
     let mut stream = svc.subscribe("onramp", 3).await.unwrap();
     let env = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())

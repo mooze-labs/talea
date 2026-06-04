@@ -1,4 +1,4 @@
-use talead::init::{run_init, EnvOutcome, InitOpts};
+use talead::init::{EnvOutcome, InitOpts, run_init};
 use talead::seed::SeedError;
 
 const SEED: &str = r#"
@@ -36,7 +36,10 @@ async fn init_then_rerun_is_idempotent() {
 
     let report = run_init(&o).await.unwrap();
     let s = report.seed.as_ref().unwrap();
-    assert_eq!((s.assets_created, s.assets_existing, s.accounts_ensured), (1, 0, 1));
+    assert_eq!(
+        (s.assets_created, s.assets_existing, s.accounts_ensured),
+        (1, 0, 1)
+    );
     assert_eq!(report.env, EnvOutcome::Written);
 
     let env = std::fs::read_to_string(&o.env_out).unwrap();
@@ -50,7 +53,10 @@ async fn init_then_rerun_is_idempotent() {
     // Re-run: same DB, same seed — exits Ok, asset already present, .env untouched.
     let report2 = run_init(&o).await.unwrap();
     let s2 = report2.seed.as_ref().unwrap();
-    assert_eq!((s2.assets_created, s2.assets_existing, s2.accounts_ensured), (0, 1, 1));
+    assert_eq!(
+        (s2.assets_created, s2.assets_existing, s2.accounts_ensured),
+        (0, 1, 1)
+    );
     assert_eq!(report2.env, EnvOutcome::KeptExisting);
     assert_eq!(std::fs::read_to_string(&o.env_out).unwrap(), env);
 }
@@ -61,7 +67,9 @@ async fn conflicting_asset_def_fails_with_named_field() {
     run_init(&opts(dir.path(), Some(SEED))).await.unwrap();
 
     let conflicting = SEED.replace("precision = 2", "precision = 4");
-    let err = run_init(&opts(dir.path(), Some(&conflicting))).await.unwrap_err();
+    let err = run_init(&opts(dir.path(), Some(&conflicting)))
+        .await
+        .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("USD"), "got: {msg}");
     assert!(msg.contains("precision 2 vs 4"), "got: {msg}");

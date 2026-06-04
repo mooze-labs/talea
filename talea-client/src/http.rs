@@ -132,13 +132,17 @@ pub(crate) fn decode_error(status: StatusCode, body: &[u8]) -> ApiError {
             || s == StatusCode::REQUEST_TIMEOUT
             || s.is_server_error() =>
         {
-            ApiError::Transport { message: format!("{s}: {excerpt}") }
+            ApiError::Transport {
+                message: format!("{s}: {excerpt}"),
+            }
         }
         s if s.is_client_error() => ApiError::InvalidDraft {
             field: "request".into(),
             reason: format!("{s}: {excerpt}"),
         },
-        s => ApiError::Transport { message: format!("unexpected status {s}: {excerpt}") },
+        s => ApiError::Transport {
+            message: format!("unexpected status {s}: {excerpt}"),
+        },
     }
 }
 
@@ -150,7 +154,11 @@ mod tests {
     fn domain_envelope_decodes_as_is() {
         let body = br#"{"error":"unbalanced","asset":"USD","debit":900,"credit":1000}"#;
         match decode_error(StatusCode::BAD_REQUEST, body) {
-            ApiError::Unbalanced { asset, debit, credit } => {
+            ApiError::Unbalanced {
+                asset,
+                debit,
+                credit,
+            } => {
                 assert_eq!((asset.as_str(), debit, credit), ("USD", 900, 1000));
             }
             other => panic!("expected Unbalanced, got {other:?}"),

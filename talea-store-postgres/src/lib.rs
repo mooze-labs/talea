@@ -32,7 +32,10 @@ impl PgTaleaStore {
     }
 
     pub async fn migrate(&self) -> Result<(), StoreError> {
-        sqlx::migrate!("./migrations").run(&self.pool).await.map_err(io_err)
+        sqlx::migrate!("./migrations")
+            .run(&self.pool)
+            .await
+            .map_err(io_err)
     }
 }
 
@@ -221,9 +224,11 @@ impl Store for PgTaleaStore {
 
         let (class, network, native_id) = match &asset.class {
             AssetClass::Fiat => ("fiat", None, None),
-            AssetClass::Crypto { network, native_id } => {
-                ("crypto", Some(network.as_str().to_string()), native_id.clone())
-            }
+            AssetClass::Crypto { network, native_id } => (
+                "crypto",
+                Some(network.as_str().to_string()),
+                native_id.clone(),
+            ),
         };
         sqlx::query(
             "INSERT INTO assets (id, class, network, native_id, precision, name)
@@ -241,7 +246,14 @@ impl Store for PgTaleaStore {
 
         let seq = next_seq(&mut db, SYSTEM_BOOK).await?;
         let at = Utc::now();
-        insert_event(&mut db, SYSTEM_BOOK, seq, at, &LedgerEvent::AssetRegistered(asset.clone())).await?;
+        insert_event(
+            &mut db,
+            SYSTEM_BOOK,
+            seq,
+            at,
+            &LedgerEvent::AssetRegistered(asset.clone()),
+        )
+        .await?;
         notify(&mut db, &system_book(), seq).await?;
         db.commit().await.map_err(io_err)?;
         Ok(())
@@ -263,13 +275,12 @@ impl Store for PgTaleaStore {
             return Err(StoreError::UnknownAsset(def.asset.clone()));
         }
 
-        if let Some(row) = sqlx::query(
-            "SELECT asset, kind, normal_side, min_balance FROM accounts WHERE key = $1",
-        )
-        .bind(&key)
-        .fetch_optional(&mut *db)
-        .await
-        .map_err(io_err)?
+        if let Some(row) =
+            sqlx::query("SELECT asset, kind, normal_side, min_balance FROM accounts WHERE key = $1")
+                .bind(&key)
+                .fetch_optional(&mut *db)
+                .await
+                .map_err(io_err)?
         {
             let same_def = row.get::<String, _>("asset") == def.asset.as_str()
                 && AccountKind::from_db(&row.get::<String, _>("kind")).as_ref() == Some(&def.kind);
@@ -310,7 +321,10 @@ impl Store for PgTaleaStore {
             &def.id.book.0,
             seq,
             at,
-            &LedgerEvent::AccountOpened { def: def.clone(), cfg: cfg.clone() },
+            &LedgerEvent::AccountOpened {
+                def: def.clone(),
+                cfg: cfg.clone(),
+            },
         )
         .await?;
         notify(&mut db, &def.id.book, seq).await?;
@@ -370,9 +384,12 @@ impl Store for PgTaleaStore {
                 });
             }
             // checked: a silent i64 wrap would corrupt the balance projection
-            entry.delta = entry.delta.checked_add(posting_delta(posting)).ok_or_else(|| {
-                StoreError::Io(format!("posting delta overflow for account {key}").into())
-            })?;
+            entry.delta = entry
+                .delta
+                .checked_add(posting_delta(posting))
+                .ok_or_else(|| {
+                    StoreError::Io(format!("posting delta overflow for account {key}").into())
+                })?;
         }
 
         // 4. apply to the balances projection, enforcing min_balance on the
@@ -477,7 +494,11 @@ impl Store for PgTaleaStore {
         notify(&mut db, &transaction.book, seq).await?;
 
         db.commit().await.map_err(io_err)?;
-        Ok(Committed { txid: transaction.id.clone(), seq, at })
+        Ok(Committed {
+            txid: transaction.id.clone(),
+            seq,
+            at,
+        })
     }
 
     async fn balance(
@@ -495,15 +516,13 @@ impl Store for PgTaleaStore {
 
         let (raw, updated_seq): (i64, i64) = match as_of {
             // current balance: the projection row (0 if never posted to)
-            None => sqlx::query(
-                "SELECT balance, updated_seq FROM balances WHERE account_key = $1",
-            )
-            .bind(&key)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(io_err)?
-            .map(|r| (r.get("balance"), r.get("updated_seq")))
-            .unwrap_or((0, 0)),
+            None => sqlx::query("SELECT balance, updated_seq FROM balances WHERE account_key = $1")
+                .bind(&key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(io_err)?
+                .map(|r| (r.get("balance"), r.get("updated_seq")))
+                .unwrap_or((0, 0)),
             // point-in-time: aggregate the postings projection by commit time.
             // SUM(BIGINT) returns NUMERIC in Postgres => cast back to BIGINT.
             Some(t) => {
@@ -583,13 +602,12 @@ impl Store for PgTaleaStore {
     }
 
     async fn transaction(&self, txid: &TxId) -> Result<Option<StoredTransaction>, StoreError> {
-        let Some(row) = sqlx::query(
-            "SELECT book, seq, committed_at FROM transactions WHERE tx_id = $1",
-        )
-        .bind(txid.0)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(io_err)?
+        let Some(row) =
+            sqlx::query("SELECT book, seq, committed_at FROM transactions WHERE tx_id = $1")
+                .bind(txid.0)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(io_err)?
         else {
             return Ok(None);
         };
@@ -603,7 +621,11 @@ impl Store for PgTaleaStore {
             Some(Sequenced {
                 event: LedgerEvent::TransactionPosted(transaction),
                 ..
-            }) if transaction.id == *txid => Ok(Some(StoredTransaction { transaction, seq, at })),
+            }) if transaction.id == *txid => Ok(Some(StoredTransaction {
+                transaction,
+                seq,
+                at,
+            })),
             _ => Err(StoreError::Io(
                 format!("event log missing transaction_posted for tx {}", txid.0).into(),
             )),

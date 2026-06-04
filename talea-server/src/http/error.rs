@@ -46,16 +46,42 @@ mod tests {
     #[test]
     fn statuses_match_contract() {
         let cases = [
-            (ApiError::InvalidDraft { field: "x".into(), reason: "y".into() }, StatusCode::BAD_REQUEST),
-            (ApiError::Unauthorized, StatusCode::UNAUTHORIZED),
-            (ApiError::NotFound { what: "t".into() }, StatusCode::NOT_FOUND),
-            (ApiError::AlreadyExists { what: "a".into() }, StatusCode::CONFLICT),
             (
-                ApiError::ConstraintViolation { account: "a".into(), min_balance: 0, would_be: -1 },
+                ApiError::InvalidDraft {
+                    field: "x".into(),
+                    reason: "y".into(),
+                },
+                StatusCode::BAD_REQUEST,
+            ),
+            (ApiError::Unauthorized, StatusCode::UNAUTHORIZED),
+            (
+                ApiError::NotFound { what: "t".into() },
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                ApiError::AlreadyExists { what: "a".into() },
                 StatusCode::CONFLICT,
             ),
-            (ApiError::Transport { message: "m".into() }, StatusCode::INTERNAL_SERVER_ERROR),
-            (ApiError::Internal { message: "m".into() }, StatusCode::INTERNAL_SERVER_ERROR),
+            (
+                ApiError::ConstraintViolation {
+                    account: "a".into(),
+                    min_balance: 0,
+                    would_be: -1,
+                },
+                StatusCode::CONFLICT,
+            ),
+            (
+                ApiError::Transport {
+                    message: "m".into(),
+                },
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                ApiError::Internal {
+                    message: "m".into(),
+                },
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
         ];
         for (err, expected) in cases {
             assert_eq!(ApiFailure(err).into_response().status(), expected);

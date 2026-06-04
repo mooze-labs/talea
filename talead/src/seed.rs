@@ -56,7 +56,10 @@ pub enum SeedError {
     #[error("asset {id:?} already registered with a different definition ({diff})")]
     AssetConflict { id: String, diff: String },
     #[error("{entry} {field} cannot be blank")]
-    BlankField { entry: &'static str, field: &'static str },
+    BlankField {
+        entry: &'static str,
+        field: &'static str,
+    },
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -72,10 +75,16 @@ fn validate(seed: &SeedFile) -> Result<(), SeedError> {
     let mut asset_ids = HashSet::new();
     for asset in &seed.assets {
         if asset.id.trim().is_empty() {
-            return Err(SeedError::BlankField { entry: "asset", field: "id" });
+            return Err(SeedError::BlankField {
+                entry: "asset",
+                field: "id",
+            });
         }
         if asset.name.trim().is_empty() {
-            return Err(SeedError::BlankField { entry: "asset", field: "name" });
+            return Err(SeedError::BlankField {
+                entry: "asset",
+                field: "name",
+            });
         }
         if !asset_ids.insert(asset.id.as_str()) {
             return Err(SeedError::DuplicateAsset(asset.id.clone()));
@@ -84,13 +93,22 @@ fn validate(seed: &SeedFile) -> Result<(), SeedError> {
     let mut account_keys = HashSet::new();
     for account in &seed.accounts {
         if account.book.trim().is_empty() {
-            return Err(SeedError::BlankField { entry: "account", field: "book" });
+            return Err(SeedError::BlankField {
+                entry: "account",
+                field: "book",
+            });
         }
         if account.path.trim().is_empty() {
-            return Err(SeedError::BlankField { entry: "account", field: "path" });
+            return Err(SeedError::BlankField {
+                entry: "account",
+                field: "path",
+            });
         }
         if account.asset.trim().is_empty() {
-            return Err(SeedError::BlankField { entry: "account", field: "asset" });
+            return Err(SeedError::BlankField {
+                entry: "account",
+                field: "asset",
+            });
         }
         if account.book.starts_with('_') {
             return Err(SeedError::ReservedBook(account.book.clone()));
@@ -152,7 +170,10 @@ pub async fn apply(store: &dyn Store, seed: &SeedFile) -> Result<ApplySummary, S
 fn diff_assets(existing: &AssetDef, new: &AssetDef) -> String {
     let mut diffs = Vec::new();
     if existing.precision != new.precision {
-        diffs.push(format!("precision {} vs {}", existing.precision, new.precision));
+        diffs.push(format!(
+            "precision {} vs {}",
+            existing.precision, new.precision
+        ));
     }
     if existing.name != new.name {
         diffs.push(format!("name {:?} vs {:?}", existing.name, new.name));
@@ -178,7 +199,10 @@ impl SeedAccount {
     pub fn to_def(&self) -> (AccountDef, AccountCfg) {
         (
             AccountDef {
-                id: AccountId { book: Book(self.book.clone()), path: self.path.clone() },
+                id: AccountId {
+                    book: Book(self.book.clone()),
+                    path: self.path.clone(),
+                },
                 asset: AssetId::new(self.asset.clone()),
                 kind: self.kind.clone(),
             },
@@ -253,14 +277,20 @@ kind = "income"
 
     #[test]
     fn rejects_duplicate_asset_id() {
-        let input = format!("{VALID}\n[[assets]]\nid = \"USD\"\nclass = \"fiat\"\nprecision = 2\nname = \"Dup\"\n");
+        let input = format!(
+            "{VALID}\n[[assets]]\nid = \"USD\"\nclass = \"fiat\"\nprecision = 2\nname = \"Dup\"\n"
+        );
         assert!(matches!(parse(&input), Err(SeedError::DuplicateAsset(id)) if id == "USD"));
     }
 
     #[test]
     fn rejects_duplicate_account() {
-        let input = format!("{VALID}\n[[accounts]]\nbook = \"onramp\"\npath = \"treasury:usd\"\nasset = \"USD\"\nkind = \"asset\"\n");
-        assert!(matches!(parse(&input), Err(SeedError::DuplicateAccount(k)) if k == "onramp:treasury:usd"));
+        let input = format!(
+            "{VALID}\n[[accounts]]\nbook = \"onramp\"\npath = \"treasury:usd\"\nasset = \"USD\"\nkind = \"asset\"\n"
+        );
+        assert!(
+            matches!(parse(&input), Err(SeedError::DuplicateAccount(k)) if k == "onramp:treasury:usd")
+        );
     }
 
     #[test]
@@ -272,16 +302,28 @@ kind = "income"
     #[test]
     fn rejects_blank_asset_fields() {
         let blank_id = VALID.replace("id = \"USD\"", "id = \" \"");
-        assert!(matches!(parse(&blank_id), Err(SeedError::BlankField { .. })));
+        assert!(matches!(
+            parse(&blank_id),
+            Err(SeedError::BlankField { .. })
+        ));
         let blank_name = VALID.replace("name = \"US Dollar\"", "name = \"\"");
-        assert!(matches!(parse(&blank_name), Err(SeedError::BlankField { .. })));
+        assert!(matches!(
+            parse(&blank_name),
+            Err(SeedError::BlankField { .. })
+        ));
     }
 
     #[test]
     fn rejects_blank_account_fields() {
         let blank_book = VALID.replacen("book = \"onramp\"", "book = \"\"", 1);
-        assert!(matches!(parse(&blank_book), Err(SeedError::BlankField { field: "book", .. })));
+        assert!(matches!(
+            parse(&blank_book),
+            Err(SeedError::BlankField { field: "book", .. })
+        ));
         let blank_path = VALID.replacen("path = \"treasury:usd\"", "path = \"  \"", 1);
-        assert!(matches!(parse(&blank_path), Err(SeedError::BlankField { field: "path", .. })));
+        assert!(matches!(
+            parse(&blank_path),
+            Err(SeedError::BlankField { field: "path", .. })
+        ));
     }
 }

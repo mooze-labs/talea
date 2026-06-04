@@ -47,7 +47,13 @@ mod tests {
     #[test]
     fn init_defaults_apply() {
         let cli = Cli::try_parse_from(["talead", "init"]).unwrap();
-        let Command::Init { db_url, seed, env_out, force } = cli.command else {
+        let Command::Init {
+            db_url,
+            seed,
+            env_out,
+            force,
+        } = cli.command
+        else {
             panic!("expected init");
         };
         assert_eq!(db_url, "sqlite://talea.db");

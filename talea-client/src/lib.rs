@@ -30,10 +30,10 @@
 //! with backoff and resumes from the last seen sequence, so consumers never
 //! re-implement cursor bookkeeping.
 
+pub mod cli;
 mod http;
 mod retry;
 mod sse;
-pub mod cli;
 
 pub use retry::RetryPolicy;
 pub use talea_core::api::*;
@@ -164,11 +164,15 @@ impl LedgerApi for TaleaClient {
         path: &str,
         as_of: Option<DateTime<Utc>>,
     ) -> ApiResult<BalanceView> {
-        let mut url = self.http.url(&["books", book, "accounts", path, "balance"])?;
+        let mut url = self
+            .http
+            .url(&["books", book, "accounts", path, "balance"])?;
         if let Some(t) = as_of {
             url.query_pairs_mut().append_pair("as_of", &t.to_rfc3339());
         }
-        self.http.execute(|| self.http.client.get(url.clone())).await
+        self.http
+            .execute(|| self.http.client.get(url.clone()))
+            .await
     }
 
     async fn account_history(
@@ -177,7 +181,9 @@ impl LedgerApi for TaleaClient {
         path: &str,
         page: Page,
     ) -> ApiResult<Paged<PostingView>> {
-        let mut url = self.http.url(&["books", book, "accounts", path, "history"])?;
+        let mut url = self
+            .http
+            .url(&["books", book, "accounts", path, "history"])?;
         {
             let mut q = url.query_pairs_mut();
             if let Some(after) = page.after_seq {
@@ -185,12 +191,16 @@ impl LedgerApi for TaleaClient {
             }
             q.append_pair("limit", &page.limit.to_string());
         }
-        self.http.execute(|| self.http.client.get(url.clone())).await
+        self.http
+            .execute(|| self.http.client.get(url.clone()))
+            .await
     }
 
     async fn transaction(&self, tx_id: &str) -> ApiResult<TransactionView> {
         let url = self.http.url(&["transactions", tx_id])?;
-        self.http.execute(|| self.http.client.get(url.clone())).await
+        self.http
+            .execute(|| self.http.client.get(url.clone()))
+            .await
     }
 
     async fn trial_balance(
@@ -202,7 +212,9 @@ impl LedgerApi for TaleaClient {
         if let Some(t) = as_of {
             url.query_pairs_mut().append_pair("as_of", &t.to_rfc3339());
         }
-        self.http.execute(|| self.http.client.get(url.clone())).await
+        self.http
+            .execute(|| self.http.client.get(url.clone()))
+            .await
     }
 
     async fn subscribe(&self, book: &str, from: Seq) -> ApiResult<EventStream> {

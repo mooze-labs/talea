@@ -16,7 +16,12 @@ use crate::{RetryPolicy, TaleaClient};
 #[command(name = "talea", about = "talea ledger client", version)]
 pub struct Cli {
     /// Server base URL
-    #[arg(long, env = "TALEA_URL", default_value = "http://127.0.0.1:8080", global = true)]
+    #[arg(
+        long,
+        env = "TALEA_URL",
+        default_value = "http://127.0.0.1:8080",
+        global = true
+    )]
     pub url: String,
     /// Bearer token
     #[arg(long, env = "TALEA_TOKEN", global = true)]
@@ -149,7 +154,10 @@ pub enum AccountCmd {
 }
 
 fn invalid(reason: String) -> ApiError {
-    ApiError::InvalidDraft { field: "args".into(), reason }
+    ApiError::InvalidDraft {
+        field: "args".into(),
+        reason,
+    }
 }
 
 fn build_client(cli: &Cli) -> ApiResult<TaleaClient> {
@@ -166,7 +174,9 @@ fn parse_side(s: &str) -> ApiResult<talea_core::types::Direction> {
     match s {
         "debit" => Ok(talea_core::types::Direction::Debit),
         "credit" => Ok(talea_core::types::Direction::Credit),
-        other => Err(invalid(format!("normal side '{other}' (want debit|credit)"))),
+        other => Err(invalid(format!(
+            "normal side '{other}' (want debit|credit)"
+        ))),
     }
 }
 
@@ -175,20 +185,62 @@ fn parse_side(s: &str) -> ApiResult<talea_core::types::Direction> {
 pub async fn execute(cli: Cli) -> ApiResult<Option<serde_json::Value>> {
     let client = build_client(&cli)?;
     match cli.command {
-        Command::Asset { cmd: AssetCmd::Register { id, class, network, native_id, precision, name } } => {
+        Command::Asset {
+            cmd:
+                AssetCmd::Register {
+                    id,
+                    class,
+                    network,
+                    native_id,
+                    precision,
+                    name,
+                },
+        } => {
             client
-                .register_asset(AssetDraft { id, class, network, native_id, precision, name })
+                .register_asset(AssetDraft {
+                    id,
+                    class,
+                    network,
+                    native_id,
+                    precision,
+                    name,
+                })
                 .await?;
             Ok(None)
         }
-        Command::Account { cmd: AccountCmd::Open { book, path, asset, kind, normal_side, min_balance } } => {
+        Command::Account {
+            cmd:
+                AccountCmd::Open {
+                    book,
+                    path,
+                    asset,
+                    kind,
+                    normal_side,
+                    min_balance,
+                },
+        } => {
             let normal_side = normal_side.as_deref().map(parse_side).transpose()?;
             client
-                .open_account(AccountDraft { book, path, asset, kind, normal_side, min_balance })
+                .open_account(AccountDraft {
+                    book,
+                    path,
+                    asset,
+                    kind,
+                    normal_side,
+                    min_balance,
+                })
                 .await?;
             Ok(None)
         }
-        Command::Post { book, idem, debit, credit, occurred_at, metadata, draft } => {
+        Command::Post {
+            book,
+            idem,
+            debit,
+            credit,
+            occurred_at,
+            metadata,
+            draft,
+        } => {
             let base = match draft {
                 None => None,
                 Some(src) => {
@@ -203,7 +255,10 @@ pub async fn execute(cli: Cli) -> ApiResult<Option<serde_json::Value>> {
                         std::fs::read_to_string(&src)
                             .map_err(|e| invalid(format!("reading {src}: {e}")))?
                     };
-                    Some(serde_json::from_str(&raw).map_err(|e| invalid(format!("draft json: {e}")))?)
+                    Some(
+                        serde_json::from_str(&raw)
+                            .map_err(|e| invalid(format!("draft json: {e}")))?,
+                    )
                 }
             };
             let debits = debit
@@ -226,17 +281,31 @@ pub async fn execute(cli: Cli) -> ApiResult<Option<serde_json::Value>> {
                 .map(serde_json::from_str)
                 .transpose()
                 .map_err(|e| invalid(format!("metadata json: {e}")))?;
-            let draft = parse::build_draft(base, book, idem, debits, credits, occurred_at, metadata)
-                .map_err(invalid)?;
+            let draft =
+                parse::build_draft(base, book, idem, debits, credits, occurred_at, metadata)
+                    .map_err(invalid)?;
             let posted = client.post(draft).await?;
-            Ok(Some(serde_json::to_value(posted).expect("Posted serializes")))
+            Ok(Some(
+                serde_json::to_value(posted).expect("Posted serializes"),
+            ))
         }
         Command::Balance { book, path, as_of } => {
-            let as_of = as_of.as_deref().map(parse::parse_rfc3339).transpose().map_err(invalid)?;
+            let as_of = as_of
+                .as_deref()
+                .map(parse::parse_rfc3339)
+                .transpose()
+                .map_err(invalid)?;
             let view = client.balance(&book, &path, as_of).await?;
-            Ok(Some(serde_json::to_value(view).expect("BalanceView serializes")))
+            Ok(Some(
+                serde_json::to_value(view).expect("BalanceView serializes"),
+            ))
         }
-        Command::History { book, path, after_seq, limit } => {
+        Command::History {
+            book,
+            path,
+            after_seq,
+            limit,
+        } => {
             let page = client
                 .account_history(&book, &path, Page { after_seq, limit })
                 .await?;
@@ -244,12 +313,20 @@ pub async fn execute(cli: Cli) -> ApiResult<Option<serde_json::Value>> {
         }
         Command::Tx { tx_id } => {
             let view = client.transaction(&tx_id).await?;
-            Ok(Some(serde_json::to_value(view).expect("TransactionView serializes")))
+            Ok(Some(
+                serde_json::to_value(view).expect("TransactionView serializes"),
+            ))
         }
         Command::TrialBalance { book, as_of } => {
-            let as_of = as_of.as_deref().map(parse::parse_rfc3339).transpose().map_err(invalid)?;
+            let as_of = as_of
+                .as_deref()
+                .map(parse::parse_rfc3339)
+                .transpose()
+                .map_err(invalid)?;
             let tb = client.trial_balance(&book, as_of).await?;
-            Ok(Some(serde_json::to_value(tb).expect("TrialBalance serializes")))
+            Ok(Some(
+                serde_json::to_value(tb).expect("TrialBalance serializes"),
+            ))
         }
         // run() handles Tail before calling execute(); a typed error (not a
         // panic) for library callers that reach this directly
@@ -266,7 +343,10 @@ pub async fn run(cli: Cli) -> ApiResult<()> {
         let mut stream = client.subscribe(&book, from).await?;
         while let Some(item) = stream.next().await {
             match item {
-                Ok(env) => println!("{}", serde_json::to_string(&env).expect("envelope serializes")),
+                Ok(env) => println!(
+                    "{}",
+                    serde_json::to_string(&env).expect("envelope serializes")
+                ),
                 Err(e) => eprintln!("{}", serde_json::to_string(&e).expect("error serializes")),
             }
         }

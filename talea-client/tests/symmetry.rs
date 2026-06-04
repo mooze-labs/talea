@@ -45,12 +45,18 @@ async fn exercise(api: &impl LedgerApi) {
             postings: vec![
                 PostingDraft {
                     account: "deposits".into(),
-                    amount: WireAmount { minor: 500, asset: "USD".into() },
+                    amount: WireAmount {
+                        minor: 500,
+                        asset: "USD".into(),
+                    },
                     direction: Direction::Credit,
                 },
                 PostingDraft {
                     account: "cash".into(),
-                    amount: WireAmount { minor: 500, asset: "USD".into() },
+                    amount: WireAmount {
+                        minor: 500,
+                        asset: "USD".into(),
+                    },
                     direction: Direction::Debit,
                 },
             ],

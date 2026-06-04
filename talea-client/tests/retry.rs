@@ -61,7 +61,10 @@ fn fast_retry(max_attempts: u32) -> RetryPolicy {
 #[tokio::test]
 async fn retries_503_until_success() {
     let (url, count) = spawn_flaky(2).await;
-    let client = TaleaClient::builder(&url).retry(fast_retry(3)).build().unwrap();
+    let client = TaleaClient::builder(&url)
+        .retry(fast_retry(3))
+        .build()
+        .unwrap();
     client.register_asset(usd()).await.unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 3); // 2 failures + 1 success
 }
@@ -69,7 +72,10 @@ async fn retries_503_until_success() {
 #[tokio::test]
 async fn exhausted_budget_surfaces_transport() {
     let (url, count) = spawn_flaky(u32::MAX).await;
-    let client = TaleaClient::builder(&url).retry(fast_retry(2)).build().unwrap();
+    let client = TaleaClient::builder(&url)
+        .retry(fast_retry(2))
+        .build()
+        .unwrap();
     match client.register_asset(usd()).await {
         Err(ApiError::Transport { .. }) => {}
         other => panic!("expected Transport, got {other:?}"),
@@ -80,7 +86,10 @@ async fn exhausted_budget_surfaces_transport() {
 #[tokio::test]
 async fn no_retry_policy_fails_immediately() {
     let (url, count) = spawn_flaky(u32::MAX).await;
-    let client = TaleaClient::builder(&url).retry(RetryPolicy::none()).build().unwrap();
+    let client = TaleaClient::builder(&url)
+        .retry(RetryPolicy::none())
+        .build()
+        .unwrap();
     assert!(client.register_asset(usd()).await.is_err());
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }

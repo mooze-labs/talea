@@ -25,7 +25,11 @@ pub async fn register_asset(
     State(state): State<AppState>,
     Json(draft): Json<AssetDraft>,
 ) -> Result<StatusCode, ApiFailure> {
-    state.service.register_asset(draft).await.map_err(ApiFailure)?;
+    state
+        .service
+        .register_asset(draft)
+        .await
+        .map_err(ApiFailure)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -33,7 +37,11 @@ pub async fn open_account(
     State(state): State<AppState>,
     Json(draft): Json<AccountDraft>,
 ) -> Result<StatusCode, ApiFailure> {
-    state.service.open_account(draft).await.map_err(ApiFailure)?;
+    state
+        .service
+        .open_account(draft)
+        .await
+        .map_err(ApiFailure)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -49,7 +57,13 @@ pub async fn get_balance(
     Path((book, path)): Path<(String, String)>,
     Query(q): Query<AsOfQuery>,
 ) -> Result<Json<BalanceView>, ApiFailure> {
-    Ok(Json(state.service.balance(&book, &path, q.as_of).await.map_err(ApiFailure)?))
+    Ok(Json(
+        state
+            .service
+            .balance(&book, &path, q.as_of)
+            .await
+            .map_err(ApiFailure)?,
+    ))
 }
 
 pub async fn get_history(
@@ -61,14 +75,26 @@ pub async fn get_history(
         after_seq: q.after_seq,
         limit: q.limit.unwrap_or(100).min(1000),
     };
-    Ok(Json(state.service.account_history(&book, &path, page).await.map_err(ApiFailure)?))
+    Ok(Json(
+        state
+            .service
+            .account_history(&book, &path, page)
+            .await
+            .map_err(ApiFailure)?,
+    ))
 }
 
 pub async fn get_transaction(
     State(state): State<AppState>,
     Path(tx_id): Path<String>,
 ) -> Result<Json<TransactionView>, ApiFailure> {
-    Ok(Json(state.service.transaction(&tx_id).await.map_err(ApiFailure)?))
+    Ok(Json(
+        state
+            .service
+            .transaction(&tx_id)
+            .await
+            .map_err(ApiFailure)?,
+    ))
 }
 
 pub async fn get_trial_balance(
@@ -76,5 +102,11 @@ pub async fn get_trial_balance(
     Path(book): Path<String>,
     Query(q): Query<AsOfQuery>,
 ) -> Result<Json<TrialBalance>, ApiFailure> {
-    Ok(Json(state.service.trial_balance(&book, q.as_of).await.map_err(ApiFailure)?))
+    Ok(Json(
+        state
+            .service
+            .trial_balance(&book, q.as_of)
+            .await
+            .map_err(ApiFailure)?,
+    ))
 }

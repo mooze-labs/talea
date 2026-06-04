@@ -34,7 +34,12 @@ pub fn account_id(book: &str, path: &str) -> AccountId {
     }
 }
 
-pub fn open_spec(book: &str, path: &str, asset_id: &str, kind: AccountKind) -> (AccountDef, AccountCfg) {
+pub fn open_spec(
+    book: &str,
+    path: &str,
+    asset_id: &str,
+    kind: AccountKind,
+) -> (AccountDef, AccountCfg) {
     let cfg = AccountCfg {
         normal_side: kind.normal_side(),
         min_balance: None,
@@ -48,7 +53,14 @@ pub fn open_spec(book: &str, path: &str, asset_id: &str, kind: AccountKind) -> (
 }
 
 /// A balanced two-posting transaction: credit `from`, debit `to`.
-pub fn transfer(book: &str, idem: &str, from: &str, to: &str, asset_id: &str, minor: i64) -> Transaction {
+pub fn transfer(
+    book: &str,
+    idem: &str,
+    from: &str,
+    to: &str,
+    asset_id: &str,
+    minor: i64,
+) -> Transaction {
     Transaction {
         id: TxId(Uuid::new_v4()),
         book: Book(book.to_string()),
@@ -182,9 +194,18 @@ pub async fn asset_mismatch_rejected(store: &impl Store) {
 pub async fn seq_is_per_book_and_gapless(store: &impl Store) {
     let (book_a, asset_a) = setup_book(store).await;
     let (book_b, asset_b) = setup_book(store).await;
-    let a1 = store.commit(&transfer(&book_a, "a1", "deposits", "cash", &asset_a, 1)).await.unwrap();
-    let b1 = store.commit(&transfer(&book_b, "b1", "deposits", "cash", &asset_b, 1)).await.unwrap();
-    let a2 = store.commit(&transfer(&book_a, "a2", "deposits", "cash", &asset_a, 1)).await.unwrap();
+    let a1 = store
+        .commit(&transfer(&book_a, "a1", "deposits", "cash", &asset_a, 1))
+        .await
+        .unwrap();
+    let b1 = store
+        .commit(&transfer(&book_b, "b1", "deposits", "cash", &asset_b, 1))
+        .await
+        .unwrap();
+    let a2 = store
+        .commit(&transfer(&book_a, "a2", "deposits", "cash", &asset_a, 1))
+        .await
+        .unwrap();
     assert_eq!((a1.seq, a2.seq), (3, 4));
     assert_eq!(b1.seq, 3);
 }
@@ -198,7 +219,10 @@ pub async fn commit_is_idempotent(store: &impl Store) {
     let second = store.commit(&tx).await.unwrap();
     assert_eq!(first, second);
     // and nothing was double-posted:
-    let bal = store.balance(&account_id(&book, "cash"), None).await.unwrap();
+    let bal = store
+        .balance(&account_id(&book, "cash"), None)
+        .await
+        .unwrap();
     assert_eq!(bal.amount.minor(), 500);
 }
 
@@ -211,7 +235,10 @@ pub async fn concurrent_same_key_commits_once(store: &impl Store) {
     let (a, b) = futures::join!(store.commit(&tx), store.commit(&tx));
     let (a, b) = (a.unwrap(), b.unwrap());
     assert_eq!(a.seq, b.seq);
-    let bal = store.balance(&account_id(&book, "cash"), None).await.unwrap();
+    let bal = store
+        .balance(&account_id(&book, "cash"), None)
+        .await
+        .unwrap();
     assert_eq!(bal.amount.minor(), 250);
 }
 
@@ -232,7 +259,10 @@ pub async fn min_balance_blocks_overdraft(store: &impl Store) {
         other => panic!("expected ConstraintViolation, got {other:?}"),
     }
     // the whole commit rolled back — nothing was written:
-    let bal = store.balance(&account_id(&book, "expenses"), None).await.unwrap();
+    let bal = store
+        .balance(&account_id(&book, "expenses"), None)
+        .await
+        .unwrap();
     assert_eq!(bal.amount.minor(), 0);
 }
 
@@ -247,8 +277,14 @@ pub async fn min_balance_is_normal_side_adjusted(store: &impl Store) {
     store.open_account(&dep_def, &dep_cfg).await.unwrap();
 
     // funding deposits (credit-normal): raw -100, effective +100 — allowed
-    store.commit(&transfer(&book, "fund", "deposits", "cash", &asset_id, 100)).await.unwrap();
-    let bal = store.balance(&account_id(&book, "deposits"), None).await.unwrap();
+    store
+        .commit(&transfer(&book, "fund", "deposits", "cash", &asset_id, 100))
+        .await
+        .unwrap();
+    let bal = store
+        .balance(&account_id(&book, "deposits"), None)
+        .await
+        .unwrap();
     assert_eq!(bal.amount.minor(), 100);
 
     // over-withdrawing 200: effective would be -100 < 0 — blocked
@@ -266,23 +302,45 @@ pub async fn min_balance_is_normal_side_adjusted(store: &impl Store) {
 /// could place `mid` on the wrong side of a commit.
 pub async fn balance_as_of_point_in_time(store: &impl Store) {
     let (book, asset_id) = setup_book(store).await;
-    store.commit(&transfer(&book, "p1", "deposits", "cash", &asset_id, 100)).await.unwrap();
+    store
+        .commit(&transfer(&book, "p1", "deposits", "cash", &asset_id, 100))
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     let mid = Utc::now();
     tokio::time::sleep(Duration::from_millis(20)).await;
-    store.commit(&transfer(&book, "p2", "deposits", "cash", &asset_id, 50)).await.unwrap();
+    store
+        .commit(&transfer(&book, "p2", "deposits", "cash", &asset_id, 50))
+        .await
+        .unwrap();
 
-    let now_bal = store.balance(&account_id(&book, "cash"), None).await.unwrap();
+    let now_bal = store
+        .balance(&account_id(&book, "cash"), None)
+        .await
+        .unwrap();
     assert_eq!(now_bal.amount.minor(), 150);
     assert_eq!(now_bal.amount.asset().as_str(), asset_id);
-    let then_bal = store.balance(&account_id(&book, "cash"), Some(mid)).await.unwrap();
+    let then_bal = store
+        .balance(&account_id(&book, "cash"), Some(mid))
+        .await
+        .unwrap();
     assert_eq!(then_bal.amount.minor(), 100);
 }
 
 pub async fn read_events_paginates_inclusively(store: &impl Store) {
     let (book, asset_id) = setup_book(store).await;
     for i in 0..3 {
-        store.commit(&transfer(&book, &format!("e{i}"), "deposits", "cash", &asset_id, 10)).await.unwrap();
+        store
+            .commit(&transfer(
+                &book,
+                &format!("e{i}"),
+                "deposits",
+                "cash",
+                &asset_id,
+                10,
+            ))
+            .await
+            .unwrap();
     }
     let b = Book(book.clone());
     // seqs: 1,2 account_opened; 3,4,5 transaction_posted
@@ -290,7 +348,10 @@ pub async fn read_events_paginates_inclusively(store: &impl Store) {
     assert_eq!(page.len(), 2);
     assert_eq!(page[0].seq, 1); // `from` is inclusive
     assert!(matches!(page[0].event, LedgerEvent::AccountOpened { .. }));
-    let next = store.read_events(&b, page.last().unwrap().seq + 1, 10).await.unwrap();
+    let next = store
+        .read_events(&b, page.last().unwrap().seq + 1, 10)
+        .await
+        .unwrap();
     assert_eq!(next.len(), 3);
     assert!(matches!(next[0].event, LedgerEvent::TransactionPosted(_)));
     assert_eq!(next.last().unwrap().seq, 5);
@@ -309,10 +370,12 @@ pub async fn system_book_is_reserved(store: &impl Store) {
         if page.is_empty() {
             break;
         }
-        if page.iter().any(|e| matches!(
-            &e.event,
-            LedgerEvent::AssetRegistered(a) if a.id.as_str() == asset_id
-        )) {
+        if page.iter().any(|e| {
+            matches!(
+                &e.event,
+                LedgerEvent::AssetRegistered(a) if a.id.as_str() == asset_id
+            )
+        }) {
             found = true;
             break;
         }
@@ -339,21 +402,31 @@ pub async fn system_book_is_reserved(store: &impl Store) {
 
 pub async fn subscribe_catches_up_then_tails(store: &impl Store) {
     let (book, asset_id) = setup_book(store).await;
-    store.commit(&transfer(&book, "s1", "deposits", "cash", &asset_id, 10)).await.unwrap();
+    store
+        .commit(&transfer(&book, "s1", "deposits", "cash", &asset_id, 10))
+        .await
+        .unwrap();
 
     // from = 3 skips the two account_opened events; seq 3 already exists (catch-up)
     let mut stream = store.subscribe(&Book(book.clone()), 3);
     let first = tokio::time::timeout(Duration::from_secs(5), stream.next())
-        .await.expect("timed out waiting for catch-up event")
-        .expect("stream ended").unwrap();
+        .await
+        .expect("timed out waiting for catch-up event")
+        .expect("stream ended")
+        .unwrap();
     assert_eq!(first.seq, 3);
     assert!(matches!(first.event, LedgerEvent::TransactionPosted(_)));
 
     // a commit made while subscribed must be delivered live
-    store.commit(&transfer(&book, "s2", "deposits", "cash", &asset_id, 20)).await.unwrap();
+    store
+        .commit(&transfer(&book, "s2", "deposits", "cash", &asset_id, 20))
+        .await
+        .unwrap();
     let second = tokio::time::timeout(Duration::from_secs(5), stream.next())
-        .await.expect("timed out waiting for live event")
-        .expect("stream ended").unwrap();
+        .await
+        .expect("timed out waiting for live event")
+        .expect("stream ended")
+        .unwrap();
     assert_eq!(second.seq, 4);
 }
 
@@ -368,26 +441,47 @@ pub async fn asset_lookup(store: &impl Store) {
         .unwrap()
         .expect("registered asset must be found");
     assert_eq!(found, asset(&id));
-    assert!(store.asset(&AssetId::new(unique("NOPE"))).await.unwrap().is_none());
+    assert!(
+        store
+            .asset(&AssetId::new(unique("NOPE")))
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 pub async fn balance_snapshot_updated_seq(store: &impl Store) {
     let (book, asset_id) = setup_book(store).await;
     // never posted: zero balance, seq 0
-    let empty = store.balance(&account_id(&book, "cash"), None).await.unwrap();
+    let empty = store
+        .balance(&account_id(&book, "cash"), None)
+        .await
+        .unwrap();
     assert_eq!(empty.amount.minor(), 0);
     assert_eq!(empty.updated_seq, 0);
 
-    store.commit(&transfer(&book, "u1", "deposits", "cash", &asset_id, 100)).await.unwrap();
+    store
+        .commit(&transfer(&book, "u1", "deposits", "cash", &asset_id, 100))
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     let mid = Utc::now();
     tokio::time::sleep(Duration::from_millis(20)).await;
-    store.commit(&transfer(&book, "u2", "deposits", "cash", &asset_id, 50)).await.unwrap();
+    store
+        .commit(&transfer(&book, "u2", "deposits", "cash", &asset_id, 50))
+        .await
+        .unwrap();
 
     // seqs 1,2 = account_opened; 3,4 = the two commits
-    let now = store.balance(&account_id(&book, "cash"), None).await.unwrap();
+    let now = store
+        .balance(&account_id(&book, "cash"), None)
+        .await
+        .unwrap();
     assert_eq!(now.updated_seq, 4);
-    let then = store.balance(&account_id(&book, "cash"), Some(mid)).await.unwrap();
+    let then = store
+        .balance(&account_id(&book, "cash"), Some(mid))
+        .await
+        .unwrap();
     assert_eq!(then.updated_seq, 3);
     assert_eq!(then.amount.minor(), 100);
 }
@@ -396,7 +490,14 @@ pub async fn account_history_pages_exclusively(store: &impl Store) {
     let (book, asset_id) = setup_book(store).await;
     for i in 0..3i64 {
         store
-            .commit(&transfer(&book, &format!("h{i}"), "deposits", "cash", &asset_id, 10 + i))
+            .commit(&transfer(
+                &book,
+                &format!("h{i}"),
+                "deposits",
+                "cash",
+                &asset_id,
+                10 + i,
+            ))
             .await
             .unwrap();
     }
@@ -408,16 +509,25 @@ pub async fn account_history_pages_exclusively(store: &impl Store) {
     assert_eq!(first[0].direction, Direction::Debit);
     assert_eq!(first[0].account, cash);
     // after_seq is exclusive: resume with the last seen seq
-    let rest = store.account_history(&cash, Some(first[1].seq), 10).await.unwrap();
+    let rest = store
+        .account_history(&cash, Some(first[1].seq), 10)
+        .await
+        .unwrap();
     assert_eq!(rest.len(), 1);
     assert_eq!(rest[0].seq, 5);
     assert_eq!(rest[0].amount.minor(), 12);
     // the credit side sees its own postings
-    let dep = store.account_history(&account_id(&book, "deposits"), None, 10).await.unwrap();
+    let dep = store
+        .account_history(&account_id(&book, "deposits"), None, 10)
+        .await
+        .unwrap();
     assert_eq!(dep.len(), 3);
     assert_eq!(dep[0].direction, Direction::Credit);
     // unknown account is an error, not an empty page
-    match store.account_history(&account_id(&book, "ghost"), None, 10).await {
+    match store
+        .account_history(&account_id(&book, "ghost"), None, 10)
+        .await
+    {
         Err(StoreError::UnknownAccount(acc)) => assert_eq!(acc.path, "ghost"),
         other => panic!("expected UnknownAccount, got {other:?}"),
     }
@@ -454,12 +564,19 @@ pub async fn account_history_never_splits_a_transaction(store: &impl Store) {
         occurred_at: Utc::now(),
     };
     store.commit(&split).await.unwrap(); // seq 3, two cash rows
-    store.commit(&transfer(&book, "after", "deposits", "cash", &asset_id, 5)).await.unwrap(); // seq 4
+    store
+        .commit(&transfer(&book, "after", "deposits", "cash", &asset_id, 5))
+        .await
+        .unwrap(); // seq 4
 
     let cash = account_id(&book, "cash");
     // limit = 1 means one transaction (seq 3) — including BOTH its cash rows
     let page = store.account_history(&cash, None, 1).await.unwrap();
-    assert_eq!(page.len(), 2, "page must include all rows of the boundary seq");
+    assert_eq!(
+        page.len(),
+        2,
+        "page must include all rows of the boundary seq"
+    );
     assert_eq!((page[0].seq, page[1].seq), (3, 3));
     assert_eq!(page[0].amount.minor() + page[1].amount.minor(), 100);
     let rest = store.account_history(&cash, Some(3), 10).await.unwrap();
@@ -498,13 +615,29 @@ pub async fn trial_balance_sums_per_asset(store: &impl Store) {
     let (dep_b, dep_b_cfg) = open_spec(&book, "deposits-eur", &asset_b, AccountKind::Liability);
     store.open_account(&dep_b, &dep_b_cfg).await.unwrap();
 
-    store.commit(&transfer(&book, "ta", "deposits", "cash", &asset_a, 100)).await.unwrap();
+    store
+        .commit(&transfer(&book, "ta", "deposits", "cash", &asset_a, 100))
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     let mid = Utc::now();
     tokio::time::sleep(Duration::from_millis(20)).await;
-    store.commit(&transfer(&book, "tb", "deposits-eur", "cash-eur", &asset_b, 40)).await.unwrap();
+    store
+        .commit(&transfer(
+            &book,
+            "tb",
+            "deposits-eur",
+            "cash-eur",
+            &asset_b,
+            40,
+        ))
+        .await
+        .unwrap();
 
-    let all = store.trial_balance(&Book(book.clone()), None).await.unwrap();
+    let all = store
+        .trial_balance(&Book(book.clone()), None)
+        .await
+        .unwrap();
     assert_eq!(all.len(), 2);
     let row_a = all.iter().find(|r| r.asset.as_str() == asset_a).unwrap();
     assert_eq!((row_a.debits, row_a.credits), (100, 100));
@@ -512,7 +645,10 @@ pub async fn trial_balance_sums_per_asset(store: &impl Store) {
     assert_eq!((row_b.debits, row_b.credits), (40, 40));
 
     // as_of cuts the second commit off
-    let early = store.trial_balance(&Book(book.clone()), Some(mid)).await.unwrap();
+    let early = store
+        .trial_balance(&Book(book.clone()), Some(mid))
+        .await
+        .unwrap();
     assert_eq!(early.len(), 1);
     assert_eq!(early[0].asset.as_str(), asset_a);
 }

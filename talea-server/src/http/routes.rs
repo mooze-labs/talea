@@ -52,9 +52,18 @@ pub fn router(service: Arc<LedgerService>, auth: AuthConfig, max_inflight: usize
         .route("/accounts", post(handlers::open_account))
         .route("/transactions", post(handlers::post_transaction))
         .route("/transactions/{tx_id}", get(handlers::get_transaction))
-        .route("/books/{book}/accounts/{path}/balance", get(handlers::get_balance))
-        .route("/books/{book}/accounts/{path}/history", get(handlers::get_history))
-        .route("/books/{book}/trial-balance", get(handlers::get_trial_balance))
+        .route(
+            "/books/{book}/accounts/{path}/balance",
+            get(handlers::get_balance),
+        )
+        .route(
+            "/books/{book}/accounts/{path}/history",
+            get(handlers::get_history),
+        )
+        .route(
+            "/books/{book}/trial-balance",
+            get(handlers::get_trial_balance),
+        )
         .layer(
             ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(handle_middleware_error))
@@ -65,7 +74,10 @@ pub fn router(service: Arc<LedgerService>, auth: AuthConfig, max_inflight: usize
 
     let api = rest
         .merge(streaming)
-        .layer(axum::middleware::from_fn_with_state(auth, auth::require_bearer))
+        .layer(axum::middleware::from_fn_with_state(
+            auth,
+            auth::require_bearer,
+        ))
         .with_state(state);
 
     Router::new()

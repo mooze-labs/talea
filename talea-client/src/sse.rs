@@ -17,7 +17,8 @@ use crate::http::{Http, decode_error};
 
 pub(crate) fn subscribe(http: &Http, book: &str, from: Seq) -> ApiResult<EventStream> {
     let mut url = http.url(&["books", book, "events"])?;
-    url.query_pairs_mut().append_pair("from", &(from - 1).to_string());
+    url.query_pairs_mut()
+        .append_pair("from", &(from - 1).to_string());
     let client = http.client.clone();
     let token = http.token.clone();
     let retry = http.retry.clone();

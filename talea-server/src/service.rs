@@ -24,7 +24,10 @@ impl LedgerService {
 // --- draft parsing --------------------------------------------------------
 
 fn invalid(field: &str, reason: impl Into<String>) -> ApiError {
-    ApiError::InvalidDraft { field: field.into(), reason: reason.into() }
+    ApiError::InvalidDraft {
+        field: field.into(),
+        reason: reason.into(),
+    }
 }
 
 /// Writes reject reserved books; reads use parse_book_lax (events of _system
@@ -51,18 +54,26 @@ fn parse_asset_draft(draft: AssetDraft) -> ApiResult<AssetDef> {
     let class = match draft.class.as_str() {
         "fiat" => {
             if draft.network.is_some() || draft.native_id.is_some() {
-                return Err(invalid("network", "fiat assets have no network or native_id"));
+                return Err(invalid(
+                    "network",
+                    "fiat assets have no network or native_id",
+                ));
             }
             AssetClass::Fiat
         }
         "crypto" => AssetClass::Crypto {
             network: Network::new(
-                draft.network.ok_or_else(|| invalid("network", "crypto assets require a network"))?,
+                draft
+                    .network
+                    .ok_or_else(|| invalid("network", "crypto assets require a network"))?,
             ),
             native_id: draft.native_id,
         },
         other => {
-            return Err(invalid("class", format!("unknown asset class '{other}' (expected 'fiat' or 'crypto')")));
+            return Err(invalid(
+                "class",
+                format!("unknown asset class '{other}' (expected 'fiat' or 'crypto')"),
+            ));
         }
     };
     Ok(AssetDef {
@@ -87,7 +98,10 @@ fn parse_account_draft(draft: AccountDraft) -> ApiResult<(AccountDef, AccountCfg
         min_balance: draft.min_balance,
     };
     let def = AccountDef {
-        id: AccountId { book, path: draft.path },
+        id: AccountId {
+            book,
+            path: draft.path,
+        },
         asset: AssetId::new(draft.asset),
         kind,
     };
@@ -98,12 +112,26 @@ fn parse_account_draft(draft: AccountDraft) -> ApiResult<(AccountDef, AccountCfg
 
 fn map_store_err(e: StoreError) -> ApiError {
     match e {
-        StoreError::ConstraintViolation { account, min_balance, would_be } => {
-            ApiError::ConstraintViolation { account: account.to_key(), min_balance, would_be }
-        }
-        StoreError::UnknownAccount(a) => ApiError::UnknownAccount { account: a.to_key() },
-        StoreError::UnknownAsset(a) => ApiError::UnknownAsset { asset: a.as_str().to_string() },
-        StoreError::AssetMismatch { account, account_asset, asset } => ApiError::AssetMismatch {
+        StoreError::ConstraintViolation {
+            account,
+            min_balance,
+            would_be,
+        } => ApiError::ConstraintViolation {
+            account: account.to_key(),
+            min_balance,
+            would_be,
+        },
+        StoreError::UnknownAccount(a) => ApiError::UnknownAccount {
+            account: a.to_key(),
+        },
+        StoreError::UnknownAsset(a) => ApiError::UnknownAsset {
+            asset: a.as_str().to_string(),
+        },
+        StoreError::AssetMismatch {
+            account,
+            account_asset,
+            asset,
+        } => ApiError::AssetMismatch {
             account: account.to_key(),
             account_asset: account_asset.as_str().to_string(),
             asset: asset.as_str().to_string(),
@@ -112,7 +140,9 @@ fn map_store_err(e: StoreError) -> ApiError {
         StoreError::InvalidBook(b) => invalid("book", format!("book {:?} is reserved", b.0)),
         StoreError::Io(e) => {
             tracing::error!(error = %e, "store backend error");
-            ApiError::Internal { message: "storage backend error".into() }
+            ApiError::Internal {
+                message: "storage backend error".into(),
+            }
         }
     }
 }
@@ -126,7 +156,10 @@ impl LedgerApi for LedgerService {
 
     async fn open_account(&self, draft: AccountDraft) -> ApiResult<()> {
         let (def, cfg) = parse_account_draft(draft)?;
-        self.store.open_account(&def, &cfg).await.map_err(map_store_err)
+        self.store
+            .open_account(&def, &cfg)
+            .await
+            .map_err(map_store_err)
     }
 
     async fn post(&self, draft: TransactionDraft) -> ApiResult<Posted> {
@@ -142,7 +175,9 @@ impl LedgerApi for LedgerService {
         let mut totals: HashMap<String, (i64, i64)> = HashMap::new(); // asset -> (debits, credits)
         for p in &draft.postings {
             if p.amount.minor <= 0 {
-                return Err(ApiError::InvalidAmount { amount: p.amount.minor });
+                return Err(ApiError::InvalidAmount {
+                    amount: p.amount.minor,
+                });
             }
             if p.account.is_empty() {
                 return Err(invalid("postings.account", "must not be empty"));
@@ -154,16 +189,25 @@ impl LedgerApi for LedgerService {
             };
             *side = side
                 .checked_add(p.amount.minor)
-                .ok_or(ApiError::InvalidAmount { amount: p.amount.minor })?;
+                .ok_or(ApiError::InvalidAmount {
+                    amount: p.amount.minor,
+                })?;
             postings.push(Posting {
-                account: AccountId { book: book.clone(), path: p.account.clone() },
+                account: AccountId {
+                    book: book.clone(),
+                    path: p.account.clone(),
+                },
                 amount: Amount::new(p.amount.minor, AssetId::new(&p.amount.asset)),
                 direction: p.direction.clone(),
             });
         }
         for (asset, (debit, credit)) in &totals {
             if debit != credit {
-                return Err(ApiError::Unbalanced { asset: asset.clone(), debit: *debit, credit: *credit });
+                return Err(ApiError::Unbalanced {
+                    asset: asset.clone(),
+                    debit: *debit,
+                    credit: *credit,
+                });
             }
         }
 
@@ -177,7 +221,11 @@ impl LedgerApi for LedgerService {
             metadata: draft.metadata,
             occurred_at: draft.occurred_at.unwrap_or_else(Utc::now),
         };
-        let committed = self.store.commit(&transaction).await.map_err(map_store_err)?;
+        let committed = self
+            .store
+            .commit(&transaction)
+            .await
+            .map_err(map_store_err)?;
         Ok(Posted {
             tx_id: committed.txid.0.to_string(),
             seq: committed.seq,
@@ -193,8 +241,15 @@ impl LedgerApi for LedgerService {
         path: &str,
         as_of: Option<DateTime<Utc>>,
     ) -> ApiResult<BalanceView> {
-        let account = AccountId { book: parse_book_lax(book)?, path: path.to_string() };
-        let snapshot = self.store.balance(&account, as_of).await.map_err(map_store_err)?;
+        let account = AccountId {
+            book: parse_book_lax(book)?,
+            path: path.to_string(),
+        };
+        let snapshot = self
+            .store
+            .balance(&account, as_of)
+            .await
+            .map_err(map_store_err)?;
         let asset = self
             .store
             .asset(snapshot.amount.asset())
@@ -206,7 +261,9 @@ impl LedgerApi for LedgerService {
                     account = account.to_key(),
                     "account references an unregistered asset"
                 );
-                ApiError::Internal { message: "ledger inconsistency".into() }
+                ApiError::Internal {
+                    message: "ledger inconsistency".into(),
+                }
             })?;
         Ok(BalanceView {
             account: account.to_key(),
@@ -223,7 +280,10 @@ impl LedgerApi for LedgerService {
         path: &str,
         page: Page,
     ) -> ApiResult<Paged<PostingView>> {
-        let account = AccountId { book: parse_book_lax(book)?, path: path.to_string() };
+        let account = AccountId {
+            book: parse_book_lax(book)?,
+            path: path.to_string(),
+        };
         let limit = (page.limit as usize).clamp(1, 1000);
         let records = self
             .store
@@ -232,7 +292,11 @@ impl LedgerApi for LedgerService {
             .map_err(map_store_err)?;
         // limit counts distinct seqs; fewer rows than limit can still mean a
         // full page, so the cursor closes only when the page came back short
-        let next = if records.len() < limit { None } else { records.last().map(|r| r.seq) };
+        let next = if records.len() < limit {
+            None
+        } else {
+            records.last().map(|r| r.seq)
+        };
         let items = records
             .into_iter()
             .map(|r| PostingView {
@@ -251,14 +315,16 @@ impl LedgerApi for LedgerService {
     }
 
     async fn transaction(&self, tx_id: &str) -> ApiResult<TransactionView> {
-        let id = Uuid::parse_str(tx_id)
-            .map_err(|e| invalid("tx_id", format!("not a uuid: {e}")))?;
+        let id =
+            Uuid::parse_str(tx_id).map_err(|e| invalid("tx_id", format!("not a uuid: {e}")))?;
         let stored = self
             .store
             .transaction(&TxId(id))
             .await
             .map_err(map_store_err)?
-            .ok_or_else(|| ApiError::NotFound { what: format!("transaction {tx_id}") })?;
+            .ok_or_else(|| ApiError::NotFound {
+                what: format!("transaction {tx_id}"),
+            })?;
         let t = stored.transaction;
         Ok(TransactionView {
             tx_id: t.id.0.to_string(),
@@ -291,7 +357,11 @@ impl LedgerApi for LedgerService {
         as_of: Option<DateTime<Utc>>,
     ) -> ApiResult<TrialBalance> {
         let b = parse_book_lax(book)?;
-        let rows = self.store.trial_balance(&b, as_of).await.map_err(map_store_err)?;
+        let rows = self
+            .store
+            .trial_balance(&b, as_of)
+            .await
+            .map_err(map_store_err)?;
         Ok(TrialBalance {
             book: b.0,
             as_of,
@@ -314,9 +384,16 @@ impl LedgerApi for LedgerService {
             let kind = s.event.kind().to_string();
             let payload = serde_json::to_value(&s.event).map_err(|e| {
                 tracing::error!(error = %e, "event serialization failed");
-                ApiError::Internal { message: "event serialization failed".into() }
+                ApiError::Internal {
+                    message: "event serialization failed".into(),
+                }
             })?;
-            Ok(EventEnvelope { seq: s.seq, at: s.at, kind, payload })
+            Ok(EventEnvelope {
+                seq: s.seq,
+                at: s.at,
+                kind,
+                payload,
+            })
         });
         // Both store streams self-terminate after yielding an Err, but that
         // is their implementation detail — fuse here so a future backend

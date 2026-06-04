@@ -74,7 +74,9 @@ mod tests {
         };
         let json = serde_json::to_string(&opened).unwrap();
         let back: LedgerEvent = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, LedgerEvent::AccountOpened { cfg, .. } if cfg.min_balance == Some(0)));
+        assert!(
+            matches!(back, LedgerEvent::AccountOpened { cfg, .. } if cfg.min_balance == Some(0))
+        );
 
         let registered = LedgerEvent::AssetRegistered(AssetDef {
             id: AssetId::new("L-USDT"),
@@ -98,8 +100,14 @@ mod tests {
         assert_eq!(Direction::from_db("D"), Some(Direction::Debit));
         assert_eq!(Direction::from_db("C"), Some(Direction::Credit));
         assert_eq!(Direction::from_db("x"), None);
-        assert_eq!(AccountKind::from_db("liability"), Some(AccountKind::Liability));
-        assert_eq!(AccountKind::from_db(AccountKind::Clearing.as_str()), Some(AccountKind::Clearing));
+        assert_eq!(
+            AccountKind::from_db("liability"),
+            Some(AccountKind::Liability)
+        );
+        assert_eq!(
+            AccountKind::from_db(AccountKind::Clearing.as_str()),
+            Some(AccountKind::Clearing)
+        );
         assert!(Book("_system".into()).is_reserved());
         assert!(!Book("onramp".into()).is_reserved());
     }

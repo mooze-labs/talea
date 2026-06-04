@@ -29,7 +29,11 @@ mod tests {
     fn env_file_fills_gaps_but_does_not_override() {
         let dir = tempfile::tempdir().unwrap();
         let env_path = dir.path().join(".env");
-        std::fs::write(&env_path, "TALEA_DB_URL=sqlite://from-file.db\nTALEA_DB_POOL=7\n").unwrap();
+        std::fs::write(
+            &env_path,
+            "TALEA_DB_URL=sqlite://from-file.db\nTALEA_DB_POOL=7\n",
+        )
+        .unwrap();
 
         // Process env (simulated) already sets TALEA_DB_URL — file must not override it.
         let config = load_config(Some(&env_path), |k| {

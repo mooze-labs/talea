@@ -20,7 +20,10 @@ pub fn parse_posting(s: &str, direction: Direction) -> Result<PostingDraft, Stri
     let minor: i64 = minor.parse().map_err(|e| format!("minor units: {e}"))?;
     Ok(PostingDraft {
         account: account.to_string(),
-        amount: WireAmount { minor, asset: asset.to_string() },
+        amount: WireAmount {
+            minor,
+            asset: asset.to_string(),
+        },
         direction,
     })
 }
@@ -137,6 +140,17 @@ mod tests {
     fn missing_required_fields_error() {
         assert!(build_draft(None, None, Some("k".into()), vec![], vec![], None, None).is_err());
         assert!(build_draft(None, Some("b".into()), None, vec![], vec![], None, None).is_err());
-        assert!(build_draft(None, Some("b".into()), Some("k".into()), vec![], vec![], None, None).is_err());
+        assert!(
+            build_draft(
+                None,
+                Some("b".into()),
+                Some("k".into()),
+                vec![],
+                vec![],
+                None,
+                None
+            )
+            .is_err()
+        );
     }
 }

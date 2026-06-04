@@ -25,7 +25,10 @@ impl Default for RetryPolicy {
 impl RetryPolicy {
     /// No retries: every failure surfaces immediately.
     pub fn none() -> Self {
-        Self { max_attempts: 1, ..Self::default() }
+        Self {
+            max_attempts: 1,
+            ..Self::default()
+        }
     }
 
     /// Backoff before retry number `attempt` (0-based). A server-provided
@@ -56,8 +59,14 @@ mod tests {
     #[test]
     fn retry_after_overrides_but_caps() {
         let p = RetryPolicy::default();
-        assert_eq!(p.delay_for(0, Some(Duration::from_secs(1))), Duration::from_secs(1));
-        assert_eq!(p.delay_for(0, Some(Duration::from_secs(60))), Duration::from_secs(5));
+        assert_eq!(
+            p.delay_for(0, Some(Duration::from_secs(1))),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            p.delay_for(0, Some(Duration::from_secs(60))),
+            Duration::from_secs(5)
+        );
     }
 
     #[test]

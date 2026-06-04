@@ -19,7 +19,9 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let service = Arc::new(LedgerService::new(store));
     let app = router(
         service,
-        AuthConfig { token: config.api_token.clone() },
+        AuthConfig {
+            token: config.api_token.clone(),
+        },
         config.max_inflight,
     );
 

@@ -110,11 +110,17 @@ mod tests {
     fn garbage_values_are_rejected() {
         assert!(matches!(
             cfg(&[("TALEA_DB_URL", "sqlite://x.db"), ("TALEA_BIND", "nope")]),
-            Err(ConfigError::Invalid { var: "TALEA_BIND", .. })
+            Err(ConfigError::Invalid {
+                var: "TALEA_BIND",
+                ..
+            })
         ));
         assert!(matches!(
             cfg(&[("TALEA_DB_URL", "sqlite://x.db"), ("TALEA_DB_POOL", "many")]),
-            Err(ConfigError::Invalid { var: "TALEA_DB_POOL", .. })
+            Err(ConfigError::Invalid {
+                var: "TALEA_DB_POOL",
+                ..
+            })
         ));
     }
 }
