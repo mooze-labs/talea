@@ -10,6 +10,27 @@ use talea_server::http::routes::router;
 use talea_server::service::LedgerService;
 use talea_store_sqlite::SqliteTaleaStore;
 
+/// Spawns the REAL talea-server router over Postgres on an ephemeral port,
+/// with its own connection pool — one call per "instance"; two calls give
+/// two instances sharing one database. `PgTaleaStore::connect` runs
+/// migrations. Same teardown model as `spawn_server`.
+// Not every test binary that compiles this harness uses the PG variant.
+#[allow(dead_code)]
+pub async fn spawn_pg_server(pg_url: &str) -> String {
+    let store = talea_store_postgres::PgTaleaStore::connect(pg_url)
+        .await
+        .unwrap();
+    let service = Arc::new(LedgerService::new(Arc::new(store)));
+    let app = router(service, AuthConfig { token: None }, 256);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    format!("http://{addr}")
+}
+
 pub async fn spawn_server(token: Option<&str>) -> String {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)

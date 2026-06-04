@@ -34,3 +34,4 @@ axum = "0.8.9"
 sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
 talea-server = { path = "../talea-server/" }
 talea-store-sqlite = { path = "../talea-store-sqlite/" }
+talea_store_postgres = { path = "../talea-store-postgres/" }

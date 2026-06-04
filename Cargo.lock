@@ -2543,6 +2543,7 @@ dependencies = [
  "talea-server",
  "talea-store-sqlite",
  "talea_core",
+ "talea_store_postgres",
  "tokio",
  "tracing",
 ]
