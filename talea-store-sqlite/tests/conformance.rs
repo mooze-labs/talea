@@ -42,5 +42,6 @@ sqlite_test!(subscribe_catches_up_then_tails);
 sqlite_test!(asset_lookup);
 sqlite_test!(balance_snapshot_updated_seq);
 sqlite_test!(account_history_pages_exclusively);
+sqlite_test!(account_history_never_splits_a_transaction);
 sqlite_test!(transaction_round_trip);
 sqlite_test!(trial_balance_sums_per_asset);

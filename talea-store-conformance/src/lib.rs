@@ -418,6 +418,50 @@ pub async fn account_history_pages_exclusively(store: &impl Store) {
     assert_eq!(dep[0].direction, Direction::Credit);
 }
 
+/// A transaction can post to the same account more than once; those rows
+/// share one seq. `limit` counts distinct seqs, so a page must carry ALL
+/// rows of its boundary seq — a naive row-LIMIT implementation fails this.
+pub async fn account_history_never_splits_a_transaction(store: &impl Store) {
+    let (book, asset_id) = setup_book(store).await;
+    let split = Transaction {
+        id: TxId(Uuid::new_v4()),
+        book: Book(book.clone()),
+        postings: vec![
+            Posting {
+                account: account_id(&book, "cash"),
+                amount: Amount::new(30, AssetId::new(&asset_id)),
+                direction: Direction::Debit,
+            },
+            Posting {
+                account: account_id(&book, "cash"),
+                amount: Amount::new(70, AssetId::new(&asset_id)),
+                direction: Direction::Debit,
+            },
+            Posting {
+                account: account_id(&book, "deposits"),
+                amount: Amount::new(100, AssetId::new(&asset_id)),
+                direction: Direction::Credit,
+            },
+        ],
+        idempotency_key: IdempotencyKey("split".to_string()),
+        external_refs: vec![],
+        metadata: serde_json::json!({}),
+        occurred_at: Utc::now(),
+    };
+    store.commit(&split).await.unwrap(); // seq 3, two cash rows
+    store.commit(&transfer(&book, "after", "deposits", "cash", &asset_id, 5)).await.unwrap(); // seq 4
+
+    let cash = account_id(&book, "cash");
+    // limit = 1 means one transaction (seq 3) — including BOTH its cash rows
+    let page = store.account_history(&cash, None, 1).await.unwrap();
+    assert_eq!(page.len(), 2, "page must include all rows of the boundary seq");
+    assert_eq!((page[0].seq, page[1].seq), (3, 3));
+    assert_eq!(page[0].amount.minor() + page[1].amount.minor(), 100);
+    let rest = store.account_history(&cash, Some(3), 10).await.unwrap();
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].seq, 4);
+}
+
 pub async fn transaction_round_trip(store: &impl Store) {
     let (book, asset_id) = setup_book(store).await;
     let tx = transfer(&book, "tr1", "deposits", "cash", &asset_id, 777);
