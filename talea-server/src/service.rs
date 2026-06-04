@@ -237,6 +237,9 @@ impl LedgerApi for LedgerService {
             occurred_at: draft.occurred_at.unwrap_or_else(Utc::now),
         };
         let started = std::time::Instant::now();
+        // A submitter that gives up (request timeout) abandons its job; the
+        // commit may still land but is not counted in talea_commits_total —
+        // the counter tracks answered requests, not committer outcomes.
         let committed = match self.writes.submit(transaction).await {
             Ok(committed) => committed,
             Err(SubmitError::Overloaded) => {

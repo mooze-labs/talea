@@ -123,7 +123,17 @@ Server (`talead serve` / `talea-server`, via env or `.env`):
 | `TALEA_API_TOKEN` | unset | Bearer token; unset means OPEN dev mode (logged loudly) |
 | `TALEA_DB_POOL` | `10` | Connection pool size. On Postgres each SSE subscriber pins one connection: size for subscribers + workers |
 | `TALEA_MAX_INFLIGHT` | `256` | In-flight request cap; excess sheds as 503 |
+| `TALEA_WRITE_QUEUE_DEPTH` | `256` | Per-book write queue length; a full queue answers 429 + `Retry-After` |
+| `TALEA_WRITE_BATCH_MAX` | `64` | Max drafts group-committed in one DB transaction per book |
 | `TALEA_METRICS_BIND` | unset | Optional Prometheus listener (e.g. `127.0.0.1:9100`); unset = no metrics endpoint |
+
+SQLite runs WAL with `synchronous=NORMAL`: durable against process crash; an
+OS/power crash can lose the most recent commit(s) but never corrupts the
+database. Writes to one book group-commit through a per-book queue — a full
+queue answers `429` with `Retry-After`, and retrying with the same
+idempotency key can never double-post. On shutdown, queued writes that have
+not yet committed are dropped (never half-applied); a client that got no
+response retries its idempotency key.
 
 Client (`talea` CLI): `TALEA_URL`, `TALEA_TOKEN`.
 
@@ -135,8 +145,11 @@ Set `TALEA_METRICS_BIND` to expose Prometheus metrics on a separate listener (`G
 |---|---|---|
 | `talea_http_requests_total` | counter | `method`, `route`, `status` |
 | `talea_http_request_duration_seconds` | histogram | `method`, `route` |
-| `talea_commits_total` | counter | `result` = `committed` \| `deduplicated` \| `rejected` |
+| `talea_commits_total` | counter | `result` = `committed` \| `deduplicated` \| `rejected` \| `overloaded` |
 | `talea_commit_duration_seconds` | histogram | — |
+| `talea_write_batch_size` | histogram | — (drafts per group commit) |
+| `talea_write_active_books` | gauge | — (live per-book committer tasks) |
+| `talea_write_queue_depth` | gauge | — (queued drafts, summed across books) |
 | `talea_shed_total` | counter | — (503s from admission control) |
 | `talea_sse_subscribers` | gauge | — (live event-stream connections; each pins a DB connection on Postgres) |
 | `talea_db_pool_connections` | gauge | `state` = `size` \| `idle` |
