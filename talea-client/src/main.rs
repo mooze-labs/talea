@@ -1,3 +1,3 @@
 fn main() {
-    println!("Hello, world!");
+    println!("talea: wiring lands in a later task");
 }
