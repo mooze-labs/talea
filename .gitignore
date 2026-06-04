@@ -5,3 +5,4 @@ talea.db-shm
 talea.db-wal
 
 .DS_Store
+bench-results/

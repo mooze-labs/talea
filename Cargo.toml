@@ -1,5 +1,5 @@
 [workspace]
-members = ["talea-client", "talea-core", "talea-server", "talea-store-postgres", "talea-store-sqlite", "talea-store-conformance", "talead"]
+members = ["talea-bench", "talea-client", "talea-core", "talea-server", "talea-store-postgres", "talea-store-sqlite", "talea-store-conformance", "talead"]
 resolver = "3"
 
 [workspace.package]
