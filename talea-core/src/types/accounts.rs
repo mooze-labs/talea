@@ -58,6 +58,8 @@ impl AccountKind {
         }
     }
 
+    /// DB column codes — these coincide with the serde snake_case wire form
+    /// today, but they are separate encodings: change one deliberately.
     pub fn as_str(&self) -> &str {
         match self {
             AccountKind::Asset => "asset",

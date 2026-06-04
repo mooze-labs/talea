@@ -31,6 +31,8 @@ pub enum Direction {
 }
 
 impl Direction {
+    /// Compact DB column codes ("D"/"C") — distinct from the serde wire
+    /// form ("debit"/"credit") used in event JSON payloads.
     pub fn as_str(&self) -> &str {
         match self {
             Direction::Debit => "D",

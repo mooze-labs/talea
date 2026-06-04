@@ -75,6 +75,22 @@ mod tests {
         let json = serde_json::to_string(&opened).unwrap();
         let back: LedgerEvent = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, LedgerEvent::AccountOpened { cfg, .. } if cfg.min_balance == Some(0)));
+
+        let registered = LedgerEvent::AssetRegistered(AssetDef {
+            id: AssetId::new("L-USDT"),
+            class: AssetClass::Crypto {
+                network: Network::new("liquid"),
+                native_id: Some("ce091c99...".into()),
+            },
+            precision: 8,
+            name: "Liquid Tether".into(),
+        });
+        let json = serde_json::to_string(&registered).unwrap();
+        let back: LedgerEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            LedgerEvent::AssetRegistered(a) if a.id.as_str() == "L-USDT" && a.precision == 8
+        ));
     }
 
     #[test]
