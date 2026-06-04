@@ -1,1 +1,3 @@
-//! Implemented in a later task.
+//! The `talea` CLI: command tree and dispatch. Implemented in a later task.
+
+pub mod parse;
