@@ -55,6 +55,8 @@ pub enum SeedError {
     MissingAsset { account: String, asset: String },
     #[error("asset {id:?} already registered with a different definition ({diff})")]
     AssetConflict { id: String, diff: String },
+    #[error("{entry} {field} cannot be blank")]
+    BlankField { entry: &'static str, field: &'static str },
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -69,12 +71,27 @@ pub fn parse(input: &str) -> Result<SeedFile, SeedError> {
 fn validate(seed: &SeedFile) -> Result<(), SeedError> {
     let mut asset_ids = HashSet::new();
     for asset in &seed.assets {
+        if asset.id.trim().is_empty() {
+            return Err(SeedError::BlankField { entry: "asset", field: "id" });
+        }
+        if asset.name.trim().is_empty() {
+            return Err(SeedError::BlankField { entry: "asset", field: "name" });
+        }
         if !asset_ids.insert(asset.id.as_str()) {
             return Err(SeedError::DuplicateAsset(asset.id.clone()));
         }
     }
     let mut account_keys = HashSet::new();
     for account in &seed.accounts {
+        if account.book.trim().is_empty() {
+            return Err(SeedError::BlankField { entry: "account", field: "book" });
+        }
+        if account.path.trim().is_empty() {
+            return Err(SeedError::BlankField { entry: "account", field: "path" });
+        }
+        if account.asset.trim().is_empty() {
+            return Err(SeedError::BlankField { entry: "account", field: "asset" });
+        }
         if account.book.starts_with('_') {
             return Err(SeedError::ReservedBook(account.book.clone()));
         }
@@ -190,5 +207,21 @@ kind = "income"
     fn rejects_reserved_book() {
         let input = VALID.replace("book = \"onramp\"", "book = \"_system\"");
         assert!(matches!(parse(&input), Err(SeedError::ReservedBook(b)) if b == "_system"));
+    }
+
+    #[test]
+    fn rejects_blank_asset_fields() {
+        let blank_id = VALID.replace("id = \"USD\"", "id = \" \"");
+        assert!(matches!(parse(&blank_id), Err(SeedError::BlankField { .. })));
+        let blank_name = VALID.replace("name = \"US Dollar\"", "name = \"\"");
+        assert!(matches!(parse(&blank_name), Err(SeedError::BlankField { .. })));
+    }
+
+    #[test]
+    fn rejects_blank_account_fields() {
+        let blank_book = VALID.replacen("book = \"onramp\"", "book = \"\"", 1);
+        assert!(matches!(parse(&blank_book), Err(SeedError::BlankField { field: "book", .. })));
+        let blank_path = VALID.replacen("path = \"treasury:usd\"", "path = \"  \"", 1);
+        assert!(matches!(parse(&blank_path), Err(SeedError::BlankField { field: "path", .. })));
     }
 }
