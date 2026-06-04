@@ -30,6 +30,9 @@ impl IntoResponse for ApiFailure {
             ApiError::AlreadyExists { .. } | ApiError::ConstraintViolation { .. } => {
                 StatusCode::CONFLICT
             }
+            // Client-side-only variant; never constructed server-side.
+            // Defensive mapping for exhaustiveness.
+            ApiError::Transport { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(self.0)).into_response()
@@ -51,6 +54,7 @@ mod tests {
                 ApiError::ConstraintViolation { account: "a".into(), min_balance: 0, would_be: -1 },
                 StatusCode::CONFLICT,
             ),
+            (ApiError::Transport { message: "m".into() }, StatusCode::INTERNAL_SERVER_ERROR),
             (ApiError::Internal { message: "m".into() }, StatusCode::INTERNAL_SERVER_ERROR),
         ];
         for (err, expected) in cases {
