@@ -39,3 +39,8 @@ sqlite_test!(balance_as_of_point_in_time);
 sqlite_test!(read_events_paginates_inclusively);
 sqlite_test!(system_book_is_reserved);
 sqlite_test!(subscribe_catches_up_then_tails);
+sqlite_test!(asset_lookup);
+sqlite_test!(balance_snapshot_updated_seq);
+sqlite_test!(account_history_pages_exclusively);
+sqlite_test!(transaction_round_trip);
+sqlite_test!(trial_balance_sums_per_asset);
