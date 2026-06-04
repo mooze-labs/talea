@@ -93,7 +93,9 @@ async fn connect_store(
         store.migrate().await.map_err(box_store_err)?;
         Ok((Arc::new(store), sampler))
     } else if config.db_url.starts_with("sqlite:") {
-        use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+        use sqlx::sqlite::{
+            SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
+        };
         use std::str::FromStr;
 
         // A pooled bare :memory: URL would give every connection its OWN
@@ -108,6 +110,10 @@ async fn connect_store(
         let opts = SqliteConnectOptions::from_str(&config.db_url)?
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
+            // NORMAL is the standard WAL pairing: one fsync less per commit.
+            // Durable against process crash; an OS/power crash can lose the
+            // most recent commit(s), never corrupt the database.
+            .synchronous(SqliteSynchronous::Normal)
             .busy_timeout(std::time::Duration::from_secs(5))
             .foreign_keys(true);
         let pool = SqlitePoolOptions::new()

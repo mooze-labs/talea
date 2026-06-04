@@ -29,13 +29,19 @@ impl SqliteTaleaStore {
 
     /// Open (creating if missing) a SQLite database, apply pragmas, run migrations.
     pub async fn connect(url: &str) -> Result<Self, StoreError> {
-        use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+        use sqlx::sqlite::{
+            SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
+        };
         use std::str::FromStr;
 
         let opts = SqliteConnectOptions::from_str(url)
             .map_err(io_err)?
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
+            // NORMAL is the standard WAL pairing: one fsync less per commit.
+            // Durable against process crash; an OS/power crash can lose the
+            // most recent commit(s), never corrupt the database.
+            .synchronous(SqliteSynchronous::Normal)
             .busy_timeout(std::time::Duration::from_secs(5))
             .foreign_keys(true);
         let pool = SqlitePoolOptions::new()
