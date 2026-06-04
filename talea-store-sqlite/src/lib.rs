@@ -492,7 +492,7 @@ impl Store for SqliteTaleaStore {
         &self,
         account: &AccountId,
         as_of: Option<DateTime<Utc>>,
-    ) -> Result<Amount, StoreError> {
+    ) -> Result<BalanceSnapshot, StoreError> {
         let key = account.to_key();
         // Two pool reads without a transaction: safe because account metadata
         // (asset, normal_side) is immutable after open_account and the balance
@@ -501,29 +501,62 @@ impl Store for SqliteTaleaStore {
             .await?
             .ok_or_else(|| StoreError::UnknownAccount(account.clone()))?;
 
-        let raw: i64 = match as_of {
+        let (raw, updated_seq): (i64, i64) = match as_of {
             // current balance: the projection row (0 if never posted to)
-            None => sqlx::query("SELECT balance FROM balances WHERE account_key = ?1")
-                .bind(&key)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(io_err)?
-                .map(|r| r.get("balance"))
-                .unwrap_or(0),
-            // point-in-time: aggregate the postings projection by commit time
-            Some(t) => sqlx::query(
-                "SELECT COALESCE(SUM(CASE WHEN direction = 'D' THEN minor ELSE -minor END), 0) AS raw
-                 FROM postings WHERE account_key = ?1 AND committed_at <= ?2",
+            None => sqlx::query(
+                "SELECT balance, updated_seq FROM balances WHERE account_key = ?1",
             )
             .bind(&key)
-            .bind(t)
-            .fetch_one(&self.pool)
+            .fetch_optional(&self.pool)
             .await
             .map_err(io_err)?
-            .get("raw"),
+            .map(|r| (r.get("balance"), r.get("updated_seq")))
+            .unwrap_or((0, 0)),
+            // point-in-time: aggregate the postings projection by commit time
+            Some(t) => {
+                let r = sqlx::query(
+                    "SELECT COALESCE(SUM(CASE WHEN direction = 'D' THEN minor ELSE -minor END), 0) AS raw,
+                            COALESCE(MAX(seq), 0) AS updated_seq
+                     FROM postings WHERE account_key = ?1 AND committed_at <= ?2",
+                )
+                .bind(&key)
+                .bind(t)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(io_err)?;
+                (r.get("raw"), r.get("updated_seq"))
+            }
         };
 
-        Ok(Amount::new(effective(raw, &acct.normal_side), acct.asset))
+        Ok(BalanceSnapshot {
+            amount: Amount::new(effective(raw, &acct.normal_side), acct.asset),
+            updated_seq,
+        })
+    }
+
+    async fn asset(&self, id: &AssetId) -> Result<Option<AssetDef>, StoreError> {
+        todo!()
+    }
+
+    async fn account_history(
+        &self,
+        account: &AccountId,
+        after_seq: Option<Seq>,
+        limit: usize,
+    ) -> Result<Vec<PostingRecord>, StoreError> {
+        todo!()
+    }
+
+    async fn transaction(&self, txid: &TxId) -> Result<Option<StoredTransaction>, StoreError> {
+        todo!()
+    }
+
+    async fn trial_balance(
+        &self,
+        book: &Book,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<Vec<TrialBalanceRow>, StoreError> {
+        todo!()
     }
 
     async fn read_events(

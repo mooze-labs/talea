@@ -199,7 +199,7 @@ pub async fn commit_is_idempotent(store: &impl Store) {
     assert_eq!(first, second);
     // and nothing was double-posted:
     let bal = store.balance(&account_id(&book, "cash"), None).await.unwrap();
-    assert_eq!(bal.minor(), 500);
+    assert_eq!(bal.amount.minor(), 500);
 }
 
 /// Interleaved (single-task `join!`) duplicate commits — an idempotency-under-
@@ -212,7 +212,7 @@ pub async fn concurrent_same_key_commits_once(store: &impl Store) {
     let (a, b) = (a.unwrap(), b.unwrap());
     assert_eq!(a.seq, b.seq);
     let bal = store.balance(&account_id(&book, "cash"), None).await.unwrap();
-    assert_eq!(bal.minor(), 250);
+    assert_eq!(bal.amount.minor(), 250);
 }
 
 pub async fn min_balance_blocks_overdraft(store: &impl Store) {
@@ -233,7 +233,7 @@ pub async fn min_balance_blocks_overdraft(store: &impl Store) {
     }
     // the whole commit rolled back — nothing was written:
     let bal = store.balance(&account_id(&book, "expenses"), None).await.unwrap();
-    assert_eq!(bal.minor(), 0);
+    assert_eq!(bal.amount.minor(), 0);
 }
 
 pub async fn min_balance_is_normal_side_adjusted(store: &impl Store) {
@@ -249,7 +249,7 @@ pub async fn min_balance_is_normal_side_adjusted(store: &impl Store) {
     // funding deposits (credit-normal): raw -100, effective +100 — allowed
     store.commit(&transfer(&book, "fund", "deposits", "cash", &asset_id, 100)).await.unwrap();
     let bal = store.balance(&account_id(&book, "deposits"), None).await.unwrap();
-    assert_eq!(bal.minor(), 100);
+    assert_eq!(bal.amount.minor(), 100);
 
     // over-withdrawing 200: effective would be -100 < 0 — blocked
     let over = transfer(&book, "over", "cash", "deposits", &asset_id, 200);
@@ -273,10 +273,10 @@ pub async fn balance_as_of_point_in_time(store: &impl Store) {
     store.commit(&transfer(&book, "p2", "deposits", "cash", &asset_id, 50)).await.unwrap();
 
     let now_bal = store.balance(&account_id(&book, "cash"), None).await.unwrap();
-    assert_eq!(now_bal.minor(), 150);
-    assert_eq!(now_bal.asset().as_str(), asset_id);
+    assert_eq!(now_bal.amount.minor(), 150);
+    assert_eq!(now_bal.amount.asset().as_str(), asset_id);
     let then_bal = store.balance(&account_id(&book, "cash"), Some(mid)).await.unwrap();
-    assert_eq!(then_bal.minor(), 100);
+    assert_eq!(then_bal.amount.minor(), 100);
 }
 
 pub async fn read_events_paginates_inclusively(store: &impl Store) {
