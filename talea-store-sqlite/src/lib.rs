@@ -533,6 +533,41 @@ impl Store for SqliteTaleaStore {
     }
 
     fn subscribe(&self, book: &Book, from: Seq) -> EventStream {
-        todo!()
+        let pool = self.pool.clone();
+        let book = book.clone();
+        let mut wakeups = self.publisher.subscribe();
+        Box::pin(async_stream::stream! {
+            let mut next = from;
+            loop {
+                // catch up from the log until dry
+                loop {
+                    let batch = match fetch_events(&pool, &book, next, 256).await {
+                        Ok(batch) => batch,
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
+                    };
+                    if batch.is_empty() {
+                        break;
+                    }
+                    for ev in batch {
+                        next = ev.seq + 1;
+                        yield Ok(ev);
+                    }
+                }
+                // wait for a write to this book
+                loop {
+                    match wakeups.recv().await {
+                        Ok(w) if w.book == book => break,
+                        Ok(_) => continue,
+                        // we fell behind on wake-ups; the log has everything
+                        Err(broadcast::error::RecvError::Lagged(_)) => break,
+                        // store dropped: no more writes can happen
+                        Err(broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+            }
+        })
     }
 }

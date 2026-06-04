@@ -38,3 +38,4 @@ sqlite_test!(min_balance_is_normal_side_adjusted);
 sqlite_test!(balance_as_of_point_in_time);
 sqlite_test!(read_events_paginates_inclusively);
 sqlite_test!(system_book_is_reserved);
+sqlite_test!(subscribe_catches_up_then_tails);
