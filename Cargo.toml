@@ -1,0 +1,3 @@
+[workspace]
+members = ["talea-client","talea-core", "talea-server", "talea-store-postgres", "talea-store-sqlite"]
+resolver = "3"
