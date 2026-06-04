@@ -4,6 +4,7 @@
 
 pub mod report;
 pub mod runner;
+pub mod seed;
 pub mod workload;
 
 use std::time::Duration;
