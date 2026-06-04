@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use metrics::gauge;
 use talea_core::store::{Store, StoreError};
 
 use crate::config::Config;
@@ -11,10 +12,32 @@ use crate::service::LedgerService;
 
 /// Connect to the store, bind, and serve until ctrl-c.
 pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    let store = connect_store(&config).await?;
+    let _metrics_handle = crate::metrics::install();
+
+    let (store, pool_sampler) = connect_store(&config).await?;
+
     if config.api_token.is_none() {
         tracing::warn!("TALEA_API_TOKEN not set - the API is OPEN (dev mode)");
     }
+
+    if let Some(bind) = config.metrics_bind {
+        let metrics_app = crate::metrics::router(_metrics_handle.clone());
+        let listener = tokio::net::TcpListener::bind(bind).await?;
+        tracing::info!(bind = %bind, "metrics listener up");
+        tokio::spawn(async move {
+            axum::serve(listener, metrics_app).await.ok();
+        });
+    }
+
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            tick.tick().await;
+            let (size, idle) = pool_sampler();
+            gauge!("talea_db_pool_connections", "state" => "size").set(size as f64);
+            gauge!("talea_db_pool_connections", "state" => "idle").set(idle as f64);
+        }
+    });
 
     let service = Arc::new(LedgerService::new(store));
     let app = router(
@@ -38,7 +61,12 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 
 /// URL-scheme store selection. The server owns pool sizing so admission
 /// control (acquire_timeout -> 503) is configurable in one place.
-async fn connect_store(config: &Config) -> Result<Arc<dyn Store>, Box<dyn std::error::Error>> {
+///
+/// (store, pool_sampler): the sampler reads pool stats for the gauges —
+/// captured as a closure because the two backends have different pool types.
+async fn connect_store(
+    config: &Config,
+) -> Result<(Arc<dyn Store>, Box<dyn Fn() -> (u32, usize) + Send>), Box<dyn std::error::Error>> {
     if config.db_url.starts_with("postgres://") || config.db_url.starts_with("postgresql://") {
         // Each active SSE subscription pins one pool connection for its whole
         // lifetime (PgListener). With max_inflight admitting far more requests
@@ -58,9 +86,12 @@ async fn connect_store(config: &Config) -> Result<Arc<dyn Store>, Box<dyn std::e
             .acquire_timeout(Config::DB_ACQUIRE_TIMEOUT)
             .connect(&config.db_url)
             .await?;
+        let sampler_pool = pool.clone();
+        let sampler: Box<dyn Fn() -> (u32, usize) + Send> =
+            Box::new(move || (sampler_pool.size(), sampler_pool.num_idle()));
         let store = talea_store_postgres::PgTaleaStore::new(pool);
         store.migrate().await.map_err(box_store_err)?;
-        Ok(Arc::new(store))
+        Ok((Arc::new(store), sampler))
     } else if config.db_url.starts_with("sqlite:") {
         use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
         use std::str::FromStr;
@@ -84,9 +115,12 @@ async fn connect_store(config: &Config) -> Result<Arc<dyn Store>, Box<dyn std::e
             .acquire_timeout(Config::DB_ACQUIRE_TIMEOUT)
             .connect_with(opts)
             .await?;
+        let sampler_pool = pool.clone();
+        let sampler: Box<dyn Fn() -> (u32, usize) + Send> =
+            Box::new(move || (sampler_pool.size(), sampler_pool.num_idle()));
         let store = talea_store_sqlite::SqliteTaleaStore::new(pool);
         store.migrate().await.map_err(box_store_err)?;
-        Ok(Arc::new(store))
+        Ok((Arc::new(store), sampler))
     } else {
         Err(format!(
             "unsupported TALEA_DB_URL scheme: {} (expected postgres://... or sqlite://...)",
