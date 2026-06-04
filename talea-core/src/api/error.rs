@@ -11,7 +11,7 @@ pub enum ApiError {
     AssetMismatch {
         account: String,
         account_asset: String,
-        amount: i64,
+        asset: String,
     },
     InvalidAmount {
         amount: i64,
@@ -28,6 +28,13 @@ pub enum ApiError {
         would_be: i64,
     },
     AlreadyExists {
+        what: String,
+    },
+    InvalidDraft {
+        field: String,
+        reason: String,
+    },
+    NotFound {
         what: String,
     },
     Unauthorized,
