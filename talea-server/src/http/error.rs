@@ -17,6 +17,8 @@ impl From<ApiError> for ApiFailure {
 impl IntoResponse for ApiFailure {
     fn into_response(self) -> Response {
         let status = match &self.0 {
+            // AssetMismatch is 400 by choice (unlisted in the spec's status
+            // table): the request itself names the wrong asset for the account.
             ApiError::Unbalanced { .. }
             | ApiError::InvalidAmount { .. }
             | ApiError::InvalidDraft { .. }

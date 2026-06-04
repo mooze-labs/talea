@@ -416,6 +416,11 @@ pub async fn account_history_pages_exclusively(store: &impl Store) {
     let dep = store.account_history(&account_id(&book, "deposits"), None, 10).await.unwrap();
     assert_eq!(dep.len(), 3);
     assert_eq!(dep[0].direction, Direction::Credit);
+    // unknown account is an error, not an empty page
+    match store.account_history(&account_id(&book, "ghost"), None, 10).await {
+        Err(StoreError::UnknownAccount(acc)) => assert_eq!(acc.path, "ghost"),
+        other => panic!("expected UnknownAccount, got {other:?}"),
+    }
 }
 
 /// A transaction can post to the same account more than once; those rows
