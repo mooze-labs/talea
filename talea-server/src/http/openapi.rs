@@ -28,7 +28,8 @@ use talea_core::api::*;
         Posted, BalanceView, PostingView, TransactionView, TrialBalanceLine,
         TrialBalance, EventEnvelope, ApiError,
         talea_core::types::Direction, talea_core::types::ExternalRef,
-        Paged<PostingView>,
+        // Paged<PostingView> is NOT registered: the history path inlines it
+        // (utoipa 5 removed #[aliases]); a registered copy would be dead weight
     )),
     modifiers(&BearerAuth),
 )]
