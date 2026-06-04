@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use serde::Deserialize;
-use talea_core::store::{AccountCfg, StoreError};
+use talea_core::store::{AccountCfg, Store, StoreError};
 use talea_core::types::{
     AccountDef, AccountId, AccountKind, AssetClass, AssetDef, AssetId, Book, Direction,
 };
@@ -101,6 +101,66 @@ fn validate(seed: &SeedFile) -> Result<(), SeedError> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ApplySummary {
+    pub assets_created: usize,
+    pub assets_existing: usize,
+    /// open_account has tolerate-identical semantics but no read API, so
+    /// created-vs-existing can't be distinguished for accounts.
+    pub accounts_ensured: usize,
+}
+
+/// Idempotent: identical re-application is a no-op; a conflicting def errors.
+pub async fn apply(store: &dyn Store, seed: &SeedFile) -> Result<ApplySummary, SeedError> {
+    let mut summary = ApplySummary::default();
+    let file_assets: HashSet<&str> = seed.assets.iter().map(|a| a.id.as_str()).collect();
+
+    for asset in &seed.assets {
+        let def = asset.to_def();
+        match store.asset(&def.id).await? {
+            Some(existing) if existing == def => summary.assets_existing += 1,
+            Some(existing) => {
+                return Err(SeedError::AssetConflict {
+                    id: asset.id.clone(),
+                    diff: diff_assets(&existing, &def),
+                });
+            }
+            None => {
+                store.register_asset(&def).await?;
+                summary.assets_created += 1;
+            }
+        }
+    }
+
+    for account in &seed.accounts {
+        let (def, cfg) = account.to_def();
+        if !file_assets.contains(account.asset.as_str()) && store.asset(&def.asset).await?.is_none()
+        {
+            return Err(SeedError::MissingAsset {
+                account: def.id.to_key(),
+                asset: account.asset.clone(),
+            });
+        }
+        store.open_account(&def, &cfg).await?;
+        summary.accounts_ensured += 1;
+    }
+    Ok(summary)
+}
+
+fn diff_assets(existing: &AssetDef, new: &AssetDef) -> String {
+    let mut diffs = Vec::new();
+    if existing.precision != new.precision {
+        diffs.push(format!("precision {} vs {}", existing.precision, new.precision));
+    }
+    if existing.name != new.name {
+        diffs.push(format!("name {:?} vs {:?}", existing.name, new.name));
+    }
+    if existing.class != new.class {
+        diffs.push("class differs".to_string());
+    }
+    diffs.join(", ")
 }
 
 impl SeedAsset {
