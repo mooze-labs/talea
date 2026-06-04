@@ -2,7 +2,7 @@
 //! (already a tagged serde enum: {"error": "unbalanced", ...}).
 
 use axum::Json;
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use talea_core::api::ApiError;
 
@@ -24,6 +24,7 @@ impl IntoResponse for ApiFailure {
             | ApiError::InvalidDraft { .. }
             | ApiError::AssetMismatch { .. } => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
+            ApiError::Overloaded => StatusCode::TOO_MANY_REQUESTS,
             ApiError::UnknownAsset { .. }
             | ApiError::UnknownAccount { .. }
             | ApiError::NotFound { .. } => StatusCode::NOT_FOUND,
@@ -35,7 +36,13 @@ impl IntoResponse for ApiFailure {
             ApiError::Transport { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (status, Json(self.0)).into_response()
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            // mirror of the load-shed layer's contract: back off briefly and
+            // retry with the same idempotency key
+            (status, [(header::RETRY_AFTER, "1")], Json(self.0)).into_response()
+        } else {
+            (status, Json(self.0)).into_response()
+        }
     }
 }
 
@@ -82,9 +89,23 @@ mod tests {
                 },
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
+            (ApiError::Overloaded, StatusCode::TOO_MANY_REQUESTS),
         ];
         for (err, expected) in cases {
             assert_eq!(ApiFailure(err).into_response().status(), expected);
         }
+    }
+
+    #[test]
+    fn overloaded_carries_retry_after() {
+        let response = ApiFailure(ApiError::Overloaded).into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
     }
 }
