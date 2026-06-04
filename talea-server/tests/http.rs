@@ -236,11 +236,19 @@ async fn auth_gate() {
     assert_eq!(s, StatusCode::OK);
 }
 
+/// talea_sse_subscribers is a process-global gauge and tests in this binary
+/// run in parallel: any two tests that hold SSE streams open will race the
+/// gauge test's exact-value assertions (observed on CI: gauge read 2).
+/// Every stream-holding test must take this lock. Counters are exempt —
+/// they're monotonic, so presence assertions can't race.
+static SSE_GAUGE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn sse_streams_envelopes_with_ids() {
     use futures::StreamExt;
     use std::time::Duration;
 
+    let _gauge_isolation = SSE_GAUGE_LOCK.lock().await;
     let app = app(None).await;
     setup(&app).await;
     let (s, _) = send(
@@ -437,6 +445,7 @@ async fn sse_gauge_returns_to_zero_after_disconnect() {
     use futures::StreamExt;
     use std::time::Duration;
 
+    let _gauge_isolation = SSE_GAUGE_LOCK.lock().await;
     let handle = metrics_handle();
     let app = app(None).await;
     setup(&app).await;
