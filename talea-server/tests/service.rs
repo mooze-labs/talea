@@ -299,6 +299,32 @@ async fn account_history_pages() {
     assert!(rest.next.is_none()); // short page => no further cursor
 }
 
+fn metrics_handle() -> &'static metrics_exporter_prometheus::PrometheusHandle {
+    use std::sync::OnceLock;
+    static HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
+    HANDLE.get_or_init(talea_server::metrics::install)
+}
+
+#[tokio::test]
+async fn commit_metrics_classify_results() {
+    let handle = metrics_handle();
+    let svc = funded_svc().await;
+    let draft = tx_draft("onramp", "metrics-dup", balanced(100));
+    svc.post(draft.clone()).await.unwrap();
+    svc.post(draft).await.unwrap(); // replay -> deduplicated
+
+    let text = handle.render();
+    assert!(
+        text.contains(r#"talea_commits_total{result="committed"}"#),
+        "committed counter missing:\n{text}"
+    );
+    assert!(
+        text.contains(r#"talea_commits_total{result="deduplicated"}"#),
+        "deduplicated counter missing:\n{text}"
+    );
+    assert!(text.contains("talea_commit_duration_seconds"));
+}
+
 #[tokio::test]
 async fn transaction_view_and_not_found() {
     let svc = funded_svc().await;

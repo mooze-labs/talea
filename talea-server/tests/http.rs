@@ -330,3 +330,132 @@ async fn load_shed_sheds_when_saturated() {
     assert_eq!(a.unwrap().status(), StatusCode::OK);
     assert_eq!(b.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+/// One process-global recorder shared by every test in this binary
+/// (install_recorder is once-per-process). Assert presence/deltas only —
+/// never exact totals — so tests stay parallel-safe.
+fn metrics_handle() -> &'static metrics_exporter_prometheus::PrometheusHandle {
+    use std::sync::OnceLock;
+    static HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
+    HANDLE.get_or_init(talea_server::metrics::install)
+}
+
+#[tokio::test]
+async fn http_metrics_record_route_templates() {
+    let handle = metrics_handle();
+    let app = app(None).await;
+    setup(&app).await;
+    let (s, _) = send(
+        &app,
+        "GET",
+        "/v1/books/onramp/accounts/cash/balance",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    let text = handle.render();
+    assert!(
+        text.contains("talea_http_requests_total"),
+        "missing counter:\n{text}"
+    );
+    // the label must be a ROUTE TEMPLATE, not the concrete path
+    assert!(
+        text.contains("{book}") && text.contains("balance"),
+        "route template label missing:\n{text}"
+    );
+    assert!(
+        !text.contains("/books/onramp/"),
+        "raw path leaked into labels (cardinality bug):\n{text}"
+    );
+    assert!(text.contains("talea_http_request_duration_seconds"));
+}
+
+#[tokio::test]
+async fn sse_gauge_returns_to_zero_after_disconnect() {
+    use futures::StreamExt;
+    use std::time::Duration;
+
+    let handle = metrics_handle();
+    let app = app(None).await;
+    setup(&app).await;
+
+    {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/books/onramp/events?from=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let mut body = res.into_body().into_data_stream();
+        // read one chunk so the stream (and guard) is definitely live
+        let _ = tokio::time::timeout(Duration::from_secs(5), body.next())
+            .await
+            .expect("timed out")
+            .expect("body ended");
+        let live = handle.render();
+        assert!(
+            live.contains("talea_sse_subscribers 1"),
+            "gauge not incremented:\n{live}"
+        );
+    } // response dropped -> stream dropped -> guard dropped
+
+    let mut zeroed = false;
+    for _ in 0..50 {
+        if handle.render().contains("talea_sse_subscribers 0") {
+            zeroed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(zeroed, "gauge did not return to 0:\n{}", handle.render());
+}
+
+#[tokio::test]
+async fn shed_increments_counter() {
+    use std::time::Duration;
+    use tower::{Service, ServiceBuilder, ServiceExt, service_fn};
+
+    let handle = metrics_handle();
+    let svc = ServiceBuilder::new()
+        .layer(axum::error_handling::HandleErrorLayer::new(
+            talea_server::http::routes::handle_middleware_error,
+        ))
+        .load_shed()
+        .concurrency_limit(1)
+        .service(service_fn(|_req: Request<Body>| async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok::<_, std::convert::Infallible>(axum::response::Response::new(Body::empty()))
+        }));
+
+    let slow = {
+        let mut svc = svc.clone();
+        async move {
+            svc.ready().await.unwrap();
+            svc.call(Request::builder().body(Body::empty()).unwrap())
+                .await
+        }
+    };
+    let shed = {
+        let mut svc = svc.clone();
+        async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            svc.ready().await.unwrap();
+            svc.call(Request::builder().body(Body::empty()).unwrap())
+                .await
+        }
+    };
+    let (_, b) = tokio::join!(slow, shed);
+    assert_eq!(b.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        handle.render().contains("talea_shed_total"),
+        "shed counter missing:\n{}",
+        handle.render()
+    );
+}

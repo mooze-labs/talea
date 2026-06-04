@@ -35,7 +35,9 @@ pub async fn events(
         .subscribe(&book, from)
         .await
         .map_err(ApiFailure)?;
+    let guard = crate::metrics::SseSubscriberGuard::new();
     let stream = async_stream::stream! {
+        let _guard = guard; // lives exactly as long as the connection
         while let Some(item) = inner.next().await {
             match item {
                 Ok(env) => match Event::default().id(env.seq.to_string()).json_data(&env) {

@@ -27,6 +27,7 @@ pub struct AppState {
 
 pub async fn handle_middleware_error(err: tower::BoxError) -> Response {
     if err.is::<tower::load_shed::error::Overloaded>() {
+        metrics::counter!("talea_shed_total").increment(1);
         (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "1")],
@@ -64,13 +65,16 @@ pub fn router(service: Arc<LedgerService>, auth: AuthConfig, max_inflight: usize
             "/books/{book}/trial-balance",
             get(handlers::get_trial_balance),
         )
+        .route_layer(axum::middleware::from_fn(crate::metrics::track_http))
         .layer(
             ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(handle_middleware_error))
                 .timeout(Config::REQUEST_TIMEOUT),
         );
 
-    let streaming = Router::new().route("/books/{book}/events", get(crate::http::sse::events));
+    let streaming = Router::new()
+        .route("/books/{book}/events", get(crate::http::sse::events))
+        .route_layer(axum::middleware::from_fn(crate::metrics::track_http));
 
     let api = rest
         .merge(streaming)
