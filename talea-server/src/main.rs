@@ -1,6 +1,3 @@
-mod api;
-mod server;
-
 fn main() {
-    println!("Hello, world!");
+    println!("talea-server: wiring lands in a later task");
 }
