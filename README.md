@@ -141,6 +141,14 @@ Set `TALEA_METRICS_BIND` to expose Prometheus metrics on a separate listener (`G
 | `talea_sse_subscribers` | gauge | — (live event-stream connections; each pins a DB connection on Postgres) |
 | `talea_db_pool_connections` | gauge | `state` = `size` \| `idle` |
 
+To scrape locally, the compose file ships an opt-in Prometheus (config in `prometheus.yml`):
+
+```bash
+TALEA_METRICS_BIND=0.0.0.0:9100 cargo run -p talead -- serve   # 0.0.0.0 so the container can reach the host - dev only
+docker compose --profile metrics up -d                          # plain `up` still starts only postgres
+open http://localhost:9090                                      # query any talea_* series
+```
+
 ## Development
 
 ```bash

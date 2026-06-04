@@ -1,0 +1,11 @@
+# Scrape config for the docker-compose `metrics` profile.
+# The talea server runs on the HOST; expose its metrics with
+#   TALEA_METRICS_BIND=0.0.0.0:9100
+# (0.0.0.0 so the container can reach it through the docker bridge — dev only).
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: talea
+    static_configs:
+      - targets: ["host.docker.internal:9100"]
