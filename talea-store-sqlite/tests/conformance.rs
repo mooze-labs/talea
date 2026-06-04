@@ -45,3 +45,4 @@ sqlite_test!(account_history_pages_exclusively);
 sqlite_test!(account_history_never_splits_a_transaction);
 sqlite_test!(transaction_round_trip);
 sqlite_test!(trial_balance_sums_per_asset);
+sqlite_test!(committed_at_is_monotonic_per_book);
