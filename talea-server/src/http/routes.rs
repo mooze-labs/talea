@@ -26,6 +26,7 @@ pub fn router(service: Arc<LedgerService>, auth: AuthConfig, max_inflight: usize
         .route("/books/{book}/accounts/{path}/balance", get(handlers::get_balance))
         .route("/books/{book}/accounts/{path}/history", get(handlers::get_history))
         .route("/books/{book}/trial-balance", get(handlers::get_trial_balance))
+        .route("/books/{book}/events", get(crate::http::sse::events))
         .layer(axum::middleware::from_fn_with_state(auth, auth::require_bearer))
         .with_state(AppState { service });
 

@@ -177,3 +177,41 @@ async fn auth_gate() {
     let (s, _) = send(&app, "GET", "/health", None, None).await;
     assert_eq!(s, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn sse_streams_envelopes_with_ids() {
+    use futures::StreamExt;
+    use std::time::Duration;
+
+    let app = app(None).await;
+    setup(&app).await;
+    let (s, _) = send(&app, "POST", "/v1/transactions", None, Some(transfer_body("sse1", 100))).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // from=2 means "last seen seq 2": stream starts at 3 (the transaction)
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/books/onramp/events?from=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()[header::CONTENT_TYPE].to_str().unwrap(),
+        "text/event-stream"
+    );
+
+    let mut body = res.into_body().into_data_stream();
+    let first = tokio::time::timeout(Duration::from_secs(5), body.next())
+        .await
+        .expect("timed out waiting for first SSE chunk")
+        .expect("body ended")
+        .unwrap();
+    let text = String::from_utf8(first.to_vec()).unwrap();
+    assert!(text.contains("id: 3"), "got: {text}");
+    assert!(text.contains("transaction_posted"), "got: {text}");
+}
