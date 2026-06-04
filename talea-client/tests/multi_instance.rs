@@ -106,7 +106,6 @@ async fn two_instances() -> Option<(TaleaClient, TaleaClient, String, String)> {
     Some((a, b, book, asset_id))
 }
 
-#[allow(dead_code)] // used by tests added in follow-up commits
 async fn next_event(stream: &mut EventStream) -> EventEnvelope {
     tokio::time::timeout(Duration::from_secs(10), stream.next())
         .await
@@ -179,4 +178,22 @@ async fn idempotency_dedups_across_instances() {
     // posted exactly once each: 500 + 250 minor at precision 2
     let bal = a.balance(&book, "cash", None).await.unwrap();
     assert_eq!(bal.balance, "7.50");
+}
+
+#[tokio::test]
+async fn subscriber_on_a_sees_commits_via_b() {
+    let Some((a, b, book, asset_id)) = two_instances().await else {
+        return;
+    };
+    // from=3 skips the two setup events. Race-free by design: if the commit
+    // lands before the subscription is established, catch-up reads it from
+    // the log; if after, LISTEN/NOTIFY delivers the wake-up across pools.
+    let mut stream = a.subscribe(&book, 3).await.unwrap();
+    let posted = b
+        .post(transfer(&book, &asset_id, "via-b", 100))
+        .await
+        .unwrap();
+    let env = next_event(&mut stream).await;
+    assert_eq!(env.seq, posted.seq);
+    assert_eq!(env.kind, "transaction_posted");
 }
