@@ -528,3 +528,138 @@ async fn shed_increments_counter() {
         handle.render()
     );
 }
+
+mod overload {
+    use super::*;
+    use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
+    use talea_core::events::LedgerEvent;
+    use talea_core::store::*;
+    use talea_core::types::*;
+    use talea_server::write_router::WriteConfig;
+
+    /// Every commit hangs forever: the committer parks on the first job, the
+    /// depth-1 queue fills with the second, the third gets 429.
+    struct StuckStore;
+
+    #[async_trait]
+    impl Store for StuckStore {
+        async fn commit_batch(&self, _: &[Transaction]) -> Vec<Result<Committed, StoreError>> {
+            futures::future::pending().await
+        }
+        async fn commit(&self, _: &Transaction) -> Result<Committed, StoreError> {
+            futures::future::pending().await
+        }
+        async fn register_asset(&self, _: &AssetDef) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn open_account(&self, _: &AccountDef, _: &AccountCfg) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn balance(
+            &self,
+            _: &AccountId,
+            _: Option<DateTime<Utc>>,
+        ) -> Result<BalanceSnapshot, StoreError> {
+            unimplemented!()
+        }
+        async fn asset(&self, _: &AssetId) -> Result<Option<AssetDef>, StoreError> {
+            unimplemented!()
+        }
+        async fn account_history(
+            &self,
+            _: &AccountId,
+            _: Option<Seq>,
+            _: usize,
+        ) -> Result<Vec<PostingRecord>, StoreError> {
+            unimplemented!()
+        }
+        async fn transaction(&self, _: &TxId) -> Result<Option<StoredTransaction>, StoreError> {
+            unimplemented!()
+        }
+        async fn trial_balance(
+            &self,
+            _: &Book,
+            _: Option<DateTime<Utc>>,
+        ) -> Result<Vec<TrialBalanceRow>, StoreError> {
+            unimplemented!()
+        }
+        async fn read_events(
+            &self,
+            _: &Book,
+            _: Seq,
+            _: usize,
+        ) -> Result<Vec<Sequenced<LedgerEvent>>, StoreError> {
+            unimplemented!()
+        }
+        fn subscribe(&self, _: &Book, _: Seq) -> EventStream {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn full_write_queue_answers_429_with_retry_after() {
+        let service = Arc::new(LedgerService::with_write_config(
+            Arc::new(StuckStore),
+            WriteConfig {
+                queue_depth: 1,
+                ..Default::default()
+            },
+        ));
+        let app = talea_server::http::routes::router(service, AuthConfig { token: None }, 256);
+
+        // first request: committer takes it and hangs
+        {
+            let app = app.clone();
+            let body = transfer_body("a", 100);
+            tokio::spawn(async move {
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/v1/transactions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap();
+                let _ = app.oneshot(req).await;
+            });
+        }
+        // Let "a"'s task run (sends to channel + spawns committer) then let the
+        // committer run (takes "a" and parks in the stuck store).
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        // second request: fills the now-empty queue slot
+        {
+            let app = app.clone();
+            let body = transfer_body("b", 100);
+            tokio::spawn(async move {
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/v1/transactions")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap();
+                let _ = app.oneshot(req).await;
+            });
+        }
+        // give "b"'s task time to reach try_send and fill the queue slot
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/transactions")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(transfer_body("c", 100).to_string()))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            res.headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "overloaded");
+    }
+}

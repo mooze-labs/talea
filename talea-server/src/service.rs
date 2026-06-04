@@ -11,13 +11,28 @@ use talea_core::store::{AccountCfg, Store, StoreError};
 use talea_core::types::*;
 use uuid::Uuid;
 
+use crate::write_router::{SubmitError, WriteConfig, WriteRouter};
+
 pub struct LedgerService {
     store: Arc<dyn Store>,
+    writes: WriteRouter,
 }
 
 impl LedgerService {
     pub fn new(store: Arc<dyn Store>) -> Self {
-        Self { store }
+        Self::with_write_config(store, WriteConfig::default())
+    }
+
+    pub fn with_write_config(store: Arc<dyn Store>, cfg: WriteConfig) -> Self {
+        Self {
+            writes: WriteRouter::new(Arc::clone(&store), cfg),
+            store,
+        }
+    }
+
+    /// Router introspection for the metrics sampler.
+    pub fn write_queue_stats(&self) -> (usize, usize) {
+        (self.writes.active_books(), self.writes.queued_jobs())
     }
 }
 
@@ -222,10 +237,24 @@ impl LedgerApi for LedgerService {
             occurred_at: draft.occurred_at.unwrap_or_else(Utc::now),
         };
         let started = std::time::Instant::now();
-        let committed = self.store.commit(&transaction).await.map_err(|e| {
-            metrics::counter!("talea_commits_total", "result" => "rejected").increment(1);
-            map_store_err(e)
-        })?;
+        let committed = match self.writes.submit(transaction).await {
+            Ok(committed) => committed,
+            Err(SubmitError::Overloaded) => {
+                metrics::counter!("talea_commits_total", "result" => "overloaded").increment(1);
+                return Err(ApiError::Overloaded);
+            }
+            Err(SubmitError::CommitterGone) => {
+                metrics::counter!("talea_commits_total", "result" => "rejected").increment(1);
+                tracing::error!("write committer dropped the reply channel");
+                return Err(ApiError::Internal {
+                    message: "commit outcome unknown; retry with the same idempotency key".into(),
+                });
+            }
+            Err(SubmitError::Store(e)) => {
+                metrics::counter!("talea_commits_total", "result" => "rejected").increment(1);
+                return Err(map_store_err(e));
+            }
+        };
         metrics::histogram!("talea_commit_duration_seconds")
             .record(started.elapsed().as_secs_f64());
         let deduplicated = committed.txid != id;

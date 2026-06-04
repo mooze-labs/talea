@@ -102,6 +102,7 @@ impl WriteRouter {
     /// Jobs currently queued across all books (for the sampled gauge).
     /// Cardinality rule: book names never become labels, so this is a
     /// global sum rather than a per-book breakdown.
+    /// Approximate: counts buffered jobs, sampled without synchronization.
     pub fn queued_jobs(&self) -> usize {
         self.books
             .lock()
@@ -113,6 +114,10 @@ impl WriteRouter {
 
     fn sender_for(&self, book_key: &str) -> mpsc::Sender<Job> {
         let mut books = self.books.lock().expect("write-router mutex poisoned");
+        // is_closed() catches both a cleanly reaped committer and a sender
+        // orphaned by a panicked committer — a panic doesn't remove the map
+        // entry, so the channel closes but the stale sender stays in the map
+        // until the next submit for that book respawns a fresh committer here.
         if let Some(sender) = books.get(book_key)
             && !sender.is_closed()
         {
@@ -370,6 +375,9 @@ mod tests {
 
         // Let them queue up
         tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // b/c/d are buffered in the channel; A is in flight inside commit_batch
+        assert_eq!(router.queued_jobs(), 3);
 
         // Release A's commit; committer will immediately drain b/c/d
         gate.add_permits(1);

@@ -29,6 +29,16 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    let service = Arc::new(LedgerService::with_write_config(
+        store,
+        crate::write_router::WriteConfig {
+            queue_depth: config.write_queue_depth,
+            batch_max: config.write_batch_max,
+            ..Default::default()
+        },
+    ));
+
+    let sampler_service = Arc::clone(&service);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
@@ -36,10 +46,11 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
             let (size, idle) = pool_sampler();
             gauge!("talea_db_pool_connections", "state" => "size").set(size as f64);
             gauge!("talea_db_pool_connections", "state" => "idle").set(idle as f64);
+            let (books, queued) = sampler_service.write_queue_stats();
+            gauge!("talea_write_active_books").set(books as f64);
+            gauge!("talea_write_queue_depth").set(queued as f64);
         }
     });
-
-    let service = Arc::new(LedgerService::new(store));
     let app = router(
         service,
         AuthConfig {
