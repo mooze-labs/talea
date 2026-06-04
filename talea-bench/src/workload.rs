@@ -9,6 +9,7 @@ pub const ASSET: &str = "USD";
 pub const CASH: &str = "cash";
 pub const EQUITY: &str = "equity";
 
+/// Benchmark books are named bench-0..bench-{n-1}; scenarios and seeding agree on this convention.
 pub fn book_name(i: usize) -> String {
     format!("bench-{i}")
 }
@@ -18,6 +19,7 @@ pub fn book_name(i: usize) -> String {
 /// SDK-internal retries (same draft) always dedup safely. A scope that
 /// embeds the run_id is unique per run; a fixed scope (depth seeding)
 /// makes re-runs free via dedup.
+/// Each posting pair moves 100 minor units of [`ASSET`].
 pub fn transfer_draft(
     book: &str,
     scope: &str,
@@ -62,6 +64,7 @@ pub enum MixOp {
 
 /// Integer weights; ops are dealt by cycling `seq` through the weight
 /// ranges, so every full cycle hits the ratios exactly (no RNG drift).
+/// At least one weight must be non-zero; `op_for` panics otherwise.
 #[derive(Debug, Clone, Serialize)]
 pub struct MixWeights {
     pub post: u32,
@@ -76,6 +79,7 @@ impl MixWeights {
     }
 
     pub fn op_for(&self, seq: u64) -> MixOp {
+        assert!(self.total() > 0, "MixWeights must have a positive total");
         let r = (seq % u64::from(self.total())) as u32;
         if r < self.post {
             MixOp::Post
@@ -132,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "must be even and >= 2")]
     fn transfer_draft_rejects_odd_posting_counts() {
         transfer_draft("b", "s", 0, 0, 3);
     }
@@ -163,6 +167,12 @@ mod tests {
             }
         }
         assert_eq!(counts, [60, 25, 10, 5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "positive total")]
+    fn mix_weights_reject_all_zero() {
+        MixWeights { post: 0, balance: 0, history: 0, trial: 0 }.op_for(0);
     }
 
     #[test]
