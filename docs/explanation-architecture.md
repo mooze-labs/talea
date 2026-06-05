@@ -33,9 +33,9 @@ You get event-sourced auditability without read-your-writes anomalies: the momen
 
 **Trade-off:** projections-in-transaction serializes writes per book and makes commits heavier than a bare append. talea accepts the write ceiling and addresses it with group commit (below) rather than giving up immediate consistency.
 
-### Gapless per-book sequences via a counter-row lock
+### Gapless per-book sequences via a single write arbiter
 
-Each book has a dense sequence `1..N` with no gaps, ever. The implementation is a per-book counter row that the committing transaction locks and increments. That row lock is the **write arbiter**: it serializes commits to a book across threads, processes, *and server instances*, because the database is the single point of coordination.
+Each book has a dense sequence `1..N` with no gaps, ever. On the database backends, the implementation is a per-book counter row that the committing transaction locks and increments. That row lock is the **write arbiter**: it serializes commits to a book across threads, processes, *and server instances*, because the database is the single point of coordination. The embedded append-log backend gets the same property from a different arbiter: one in-process writer task per book assigns sequences (single-process by construction, enforced with a directory lock).
 
 **Trade-off:** one hot book = one lock = a throughput ceiling per book. This is deliberate — gaplessness is an audit property worth more than write parallelism within a book. Books are the scaling unit: different books commit fully in parallel.
 
@@ -73,9 +73,9 @@ A full queue is backpressure, not failure. Validation rejections inside a batch 
 
 A global in-flight limit (`TALEA_MAX_INFLIGHT`, default 256) sheds excess load immediately as `503` + `Retry-After: 1` instead of queueing toward collapse. `/health` deliberately sits **inside** that limit: a 503 from `/health` is a real load signal. Wire it to load-balancer *readiness* (stop sending traffic) and not *liveness* (restart the instance), or saturation will eject healthy instances exactly when you need them.
 
-### Two stores, one executable contract
+### Three stores, one executable contract
 
-`Store` is the persistence trait; Postgres (production, LISTEN/NOTIFY subscriptions) and SQLite (embedded, in-process broadcast) both implement it. One backend-agnostic conformance suite runs against both — idempotency, gapless sequences, constraint enforcement, pagination, subscribe catch-up — so "the stores behave identically" is a tested claim, not a hope. The known divergence is documented: SQLite subscriptions only see commits from the same process.
+`Store` is the persistence trait; Postgres (production, LISTEN/NOTIFY subscriptions), SQLite (embedded, in-process broadcast), and the append-log store (embedded, group commit with strict ack-after-fsync — see [`talea-store-log`](../talea-store-log/README.md)) all implement it. One backend-agnostic conformance suite runs against all three — idempotency, gapless sequences, constraint enforcement, pagination, subscribe catch-up — so "the stores behave identically" is a tested claim, not a hope. The known divergence is documented: the embedded backends' subscriptions only see commits from the same process.
 
 ### Trait symmetry: `LedgerService` and `TaleaClient`
 
@@ -91,4 +91,5 @@ A global in-flight limit (`TALEA_MAX_INFLIGHT`, default 256) sheds excess load i
 
 - [HTTP API reference](reference-http-api.md) — the wire contract these decisions produce
 - [How to run on Postgres](howto-run-on-postgres.md) — the operational consequences (LB config, PgBouncer, pool sizing)
+- [Why the append-log store works this way](explanation-log-store.md) — how the embedded backend meets the same invariants without a database
 - [README — Design notes and limits](../README.md#design-notes-and-limits) — accepted limitations in brief

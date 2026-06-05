@@ -45,6 +45,7 @@ cargo run -p talead -- serve
 |---|---|
 | [Tutorial: your first ledger](docs/tutorial-first-ledger.md) | Zero to a funded, streaming ledger in seven steps (SQLite, no Docker) |
 | [How to run on Postgres](docs/howto-run-on-postgres.md) | Production deployment: auth, LB readiness, multi-instance, metrics |
+| [How to run on the append-log store](docs/howto-run-on-the-log-store.md) | Single-node deployment with no database: embedded log storage, backups |
 | [How to use the Rust SDK](docs/howto-use-the-sdk.md) | `TaleaClient` integration: retries, idempotency, streaming |
 | [HTTP API reference](docs/reference-http-api.md) | The full wire contract: routes, shapes, errors, configuration |
 | [Architecture & design](docs/explanation-architecture.md) | Why: gapless sequences, group commit, the failure story |
@@ -58,7 +59,8 @@ Or browse [`docs/`](docs/README.md). A running instance serves its own interacti
 | `talea-core` | Domain types (books, accounts, assets, transactions), the `Store` trait (persistence contract), and the `LedgerApi` trait (server/client contract) |
 | `talea-store-postgres` | `Store` over Postgres. LISTEN/NOTIFY for live subscriptions |
 | `talea-store-sqlite` | `Store` over SQLite (WAL). In-process broadcast for subscriptions |
-| `talea-store-conformance` | One backend-agnostic test suite both stores must pass; the contract in executable form |
+| `talea-store-log` | `Store` over an append-only CRC-framed JSON event log. No external services; single-writer per book, group commit, fsync-per-batch |
+| `talea-store-conformance` | One backend-agnostic test suite all stores must pass; the contract in executable form |
 | `talea-server` | `LedgerService` (implements `LedgerApi` over any `Store`) + axum REST/SSE transport with bearer auth and admission control |
 | `talead` | Daemon binary: `init` (migrate, token, seed, `.env`) and `serve` |
 | `talea-client` | `TaleaClient` SDK (also implements `LedgerApi`) + the `talea` CLI binary |
@@ -133,7 +135,7 @@ Server (`talead serve` / `talea-server`, via env or `.env`):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TALEA_DB_URL` | required | `postgres://...` or `sqlite://path.db` (`:memory:` is rejected) |
+| `TALEA_DB_URL` | required | `postgres://...`, `sqlite://path.db` (`:memory:` is rejected), or `log://<dir>` |
 | `TALEA_BIND` | `127.0.0.1:8080` | Listen address |
 | `TALEA_API_TOKEN` | unset | Bearer token; unset means OPEN dev mode (logged loudly) |
 | `TALEA_TOKENS_FILE` | unset | Path to a TOML file of scoped bearer tokens (see below). Additive with `TALEA_API_TOKEN`, which stays equivalent to an unnamed all-books `rw` entry |

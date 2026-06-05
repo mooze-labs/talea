@@ -17,7 +17,7 @@ pub struct Cli {
 pub enum Command {
     /// First-run setup: migrate the database, generate a token, seed, write .env
     Init {
-        /// Database URL (postgres://... or sqlite://...)
+        /// Database URL (postgres://..., sqlite://..., or log://<dir>)
         #[arg(long, default_value = "sqlite://talea.db")]
         db_url: String,
         /// Seed file (default: talea.seed.toml, used only when present)

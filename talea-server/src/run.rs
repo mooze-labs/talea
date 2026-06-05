@@ -173,9 +173,31 @@ async fn connect_store(
         let store = talea_store_sqlite::SqliteTaleaStore::new(pool);
         store.migrate().await.map_err(box_store_err)?;
         Ok((Arc::new(store), sampler, "sqlite"))
+    } else if let Some(path) = config.db_url.strip_prefix("log://") {
+        let log_opts = if config.log_snapshot_every.is_some()
+            || config.log_idem_hot_cap.is_some()
+            || config.log_segment_max.is_some()
+        {
+            let defaults = talea_store_log::LogStoreOptions::default();
+            talea_store_log::LogStoreOptions {
+                snapshot_every: config.log_snapshot_every.unwrap_or(defaults.snapshot_every),
+                idem_hot_cap: config.log_idem_hot_cap.unwrap_or(defaults.idem_hot_cap),
+                segment_max: config.log_segment_max.unwrap_or(defaults.segment_max),
+            }
+        } else {
+            talea_store_log::LogStoreOptions::default()
+        };
+        let store = talea_store_log::LogTaleaStore::open_with(std::path::Path::new(path), log_opts)
+            .await
+            .map_err(box_store_err)?;
+        // The log store has no connection pool; report zeros for the pool gauges.
+        // The dashboard tolerates zero-valued series and the metrics are labelled
+        // with the backend name, so consumers can distinguish pool-less backends.
+        let sampler: Box<dyn Fn() -> (u32, usize) + Send> = Box::new(|| (0, 0));
+        Ok((Arc::new(store), sampler, "log"))
     } else {
         Err(format!(
-            "unsupported TALEA_DB_URL scheme: {} (expected postgres://... or sqlite://...)",
+            "unsupported TALEA_DB_URL scheme: {} (expected postgres://..., sqlite://..., or log://<dir>)",
             config.db_url
         )
         .into())
