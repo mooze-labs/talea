@@ -311,6 +311,10 @@ pub struct SegmentSet {
     active_len: u64,
     /// Rotate when active_len reaches this threshold.
     segment_max: u64,
+    /// Test-only hook invoked inside `sync()` BEFORE the real `sync_all`.
+    /// Returning `Err` simulates an fsync failure (the real sync is skipped).
+    #[cfg(test)]
+    pub sync_hook: Option<std::sync::Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>>,
 }
 
 impl SegmentSet {
@@ -404,6 +408,8 @@ impl SegmentSet {
             active,
             active_len,
             segment_max,
+            #[cfg(test)]
+            sync_hook: None,
         })
     }
 
@@ -425,7 +431,23 @@ impl SegmentSet {
 
     /// fsync the active segment. Call once per commit batch.
     pub async fn sync(&mut self) -> std::io::Result<()> {
+        #[cfg(test)]
+        if let Some(h) = &self.sync_hook {
+            h()?;
+        }
         self.active.sync_all().await
+    }
+
+    /// Install a test-only sync hook.
+    ///
+    /// The hook is invoked at the start of every [`sync`] call.  Returning
+    /// `Err` simulates an fsync failure and skips the real `sync_all`.
+    #[cfg(test)]
+    pub fn set_sync_hook(
+        &mut self,
+        hook: Option<std::sync::Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>>,
+    ) {
+        self.sync_hook = hook;
     }
 
     /// Rotate to a new segment named by `next_seq` if `active_len >= segment_max`.

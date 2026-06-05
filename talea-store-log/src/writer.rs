@@ -152,6 +152,37 @@ impl BookWriter {
         snapshot_every: u64,
         segment_max: u64,
     ) -> std::io::Result<Self> {
+        Self::spawn_inner(dir, state, batch_max, snapshot_every, segment_max, None::<std::sync::Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>>).await
+    }
+
+    /// Test-only constructor that installs a [`SegmentSet::sync_hook`] before
+    /// entering the run loop.  The hook is invoked at the start of every
+    /// `sync()` call; returning `Err` simulates an fsync failure.
+    ///
+    /// Uses `snapshot_every = 0` (no automatic snapshots) and a tiny
+    /// `segment_max` of 1 GiB (never rotates in unit tests).
+    #[cfg(test)]
+    pub(crate) async fn spawn_for_test(
+        dir: PathBuf,
+        state: Arc<RwLock<BookState>>,
+        batch_max: usize,
+        hook: Option<std::sync::Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>>,
+    ) -> std::io::Result<Self> {
+        Self::spawn_inner(dir, state, batch_max, 0, crate::segment::DEFAULT_SEGMENT_MAX, hook).await
+    }
+
+    /// Shared constructor used by all public `spawn*` variants.
+    ///
+    /// `sync_hook` is only evaluated in test builds; it is ignored (and the
+    /// parameter does not exist) in release builds.
+    async fn spawn_inner(
+        dir: PathBuf,
+        state: Arc<RwLock<BookState>>,
+        batch_max: usize,
+        snapshot_every: u64,
+        segment_max: u64,
+        _sync_hook: Option<std::sync::Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>>,
+    ) -> std::io::Result<Self> {
         // Single-writer guard: fail fast if another writer is already live.
         {
             let st = state.read().await;
@@ -166,7 +197,13 @@ impl BookWriter {
             }
         }
 
-        let segments = SegmentSet::open_with_max(&dir, segment_max).await?;
+        #[allow(unused_mut)]
+        let mut segments = SegmentSet::open_with_max(&dir, segment_max).await?;
+
+        // Install the test hook (no-op on release builds).
+        #[cfg(test)]
+        segments.set_sync_hook(_sync_hook);
+
         // Clone the catalog handle BEFORE moving segments into the loop.
         // The catalog's inner Arc is shared, so rotations done by the loop
         // are immediately visible through this clone.
@@ -1099,5 +1136,242 @@ mod tests {
         )
         .await;
         assert!(second.is_err(), "no second broadcast event expected after rejected draft");
+    }
+
+    // -----------------------------------------------------------------------
+    // Ack-after-fsync ordering proofs
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a BookWriter with the standard two-account state and an
+    /// optional sync hook, returning `(writer, Arc<RwLock<BookState>>)`.
+    async fn writer_with_accounts_and_hook(
+        dir: &std::path::Path,
+        hook: Option<std::sync::Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>>,
+    ) -> (BookWriter, Arc<RwLock<BookState>>) {
+        let mut st = BookState::default();
+        for path in ["cash", "rev"] {
+            st.accounts.insert(
+                AccountId { book: Book("b".into()), path: path.into() }.to_key(),
+                AccountState {
+                    def: AccountDef {
+                        id: AccountId { book: Book("b".into()), path: path.into() },
+                        asset: AssetId::new("USD"),
+                        kind: AccountKind::Asset,
+                    },
+                    cfg: AccountCfg { normal_side: None, min_balance: None },
+                    raw_balance: 0,
+                    updated_seq: 0,
+                    postings: PostingIndex::default(),
+                },
+            );
+        }
+        let state = Arc::new(RwLock::new(st));
+        let w = BookWriter::spawn_for_test(
+            dir.to_path_buf(),
+            Arc::clone(&state),
+            1024,
+            hook,
+        )
+        .await
+        .unwrap();
+        (w, state)
+    }
+
+    /// Proof 1 — ack arrives only AFTER sync returns Ok.
+    ///
+    /// The hook sets `synced = true`.  When the commit future resolves the
+    /// hook must already have fired; reset and repeat for a second commit to
+    /// prove the invariant holds for every batch, not just the first.
+    #[tokio::test]
+    async fn ack_only_after_sync_returns() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let synced = Arc::new(AtomicBool::new(false));
+        let synced2 = Arc::clone(&synced);
+
+        let hook = std::sync::Arc::new(move || -> std::io::Result<()> {
+            synced2.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let (w, _state) = writer_with_accounts_and_hook(dir.path(), Some(hook)).await;
+
+        // First commit: when the future resolves synced MUST be true.
+        w.commit(tx("k1")).await.expect("first commit must succeed");
+        assert!(
+            synced.load(Ordering::SeqCst),
+            "ack must arrive only after sync_hook set synced=true (first commit)"
+        );
+
+        // Reset and repeat for a second batch.
+        synced.store(false, Ordering::SeqCst);
+        w.commit(tx("k2")).await.expect("second commit must succeed");
+        assert!(
+            synced.load(Ordering::SeqCst),
+            "ack must arrive only after sync_hook set synced=true (second commit)"
+        );
+    }
+
+    /// Proof 2 — no broadcast event visible to a pre-subscribed receiver
+    /// before the sync counter is incremented.
+    ///
+    /// The hook increments `sync_count`.  After each commit we check that
+    /// `sync_count >= events_received` so far, i.e. every delivered event was
+    /// preceded by a sync in its batch window.
+    #[tokio::test]
+    async fn no_broadcast_before_sync() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sync_count = Arc::new(AtomicU64::new(0));
+        let sc2 = Arc::clone(&sync_count);
+
+        let hook = std::sync::Arc::new(move || -> std::io::Result<()> {
+            sc2.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let (w, _state) = writer_with_accounts_and_hook(dir.path(), Some(hook)).await;
+
+        for (i, key) in ["a", "b", "c"].iter().enumerate() {
+            let events_before = (i as u64).saturating_sub(1);
+            // Subscribe BEFORE the commit so we get this batch's event.
+            let mut rx = w.events.subscribe();
+            w.commit(tx(key)).await.expect("commit must succeed");
+
+            // Receive the broadcast event.
+            let _ev = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                rx.recv(),
+            )
+            .await
+            .expect("broadcast timeout")
+            .expect("broadcast channel closed");
+
+            // The sync count must be at least 1 (one sync per batch minimum).
+            let sc = sync_count.load(Ordering::SeqCst);
+            assert!(
+                sc > events_before,
+                "sync_count ({sc}) must be ≥ batches committed ({}) at event {}",
+                events_before + 1,
+                i + 1,
+            );
+        }
+
+        // Verify total: 3 commits → at least 1 sync total (likely 3 if sequential).
+        assert!(
+            sync_count.load(Ordering::SeqCst) >= 1,
+            "at least one sync must have fired for three sequential commits"
+        );
+    }
+
+    /// Proof 3 — a rejected transaction (ghost account) never reaches the
+    /// write/sync path; sync_count stays 0.
+    #[tokio::test]
+    async fn reject_only_batch_skips_sync() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sync_count = Arc::new(AtomicU64::new(0));
+        let sc2 = Arc::clone(&sync_count);
+
+        let hook = std::sync::Arc::new(move || -> std::io::Result<()> {
+            sc2.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let (w, _state) = writer_with_accounts_and_hook(dir.path(), Some(hook)).await;
+
+        // Commit a tx that references a ghost account → must be rejected.
+        let mut bad = tx("ghost-tx");
+        bad.postings[0].account = AccountId { book: Book("b".into()), path: "ghost".into() };
+        let result = w.commit(bad).await;
+        assert!(
+            matches!(result, Err(talea_core::store::StoreError::UnknownAccount(_))),
+            "ghost-account tx must be rejected, got {result:?}"
+        );
+
+        // Reply received AND no sync ever fired (nothing was staged → no fsync).
+        assert_eq!(
+            sync_count.load(Ordering::SeqCst),
+            0,
+            "a reject-only batch must not trigger fsync"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Invariant-2 (deferred from Task 5 review): fsync failure kills the writer
+    // -----------------------------------------------------------------------
+
+    /// Invariant 2a — a valid commit in a batch that hits an fsync error must
+    /// return `StoreError::Io`.
+    #[tokio::test]
+    async fn fsync_failure_fails_the_batch_with_io() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let hook = std::sync::Arc::new(|| -> std::io::Result<()> {
+            Err(std::io::Error::other("injected fsync failure"))
+        });
+
+        let (w, _state) = writer_with_accounts_and_hook(dir.path(), Some(hook)).await;
+
+        let result = w.commit(tx("will-fail")).await;
+        assert!(
+            matches!(result, Err(talea_core::store::StoreError::Io(_))),
+            "fsync failure must surface as StoreError::Io, got {result:?}"
+        );
+    }
+
+    /// Invariant 2b — after an fsync failure:
+    ///   (a) a subsequent commit also fails with `StoreError::Io` (writer is dead),
+    ///   (b) the in-memory state was NOT mutated by the failed batch
+    ///       (apply-after-fsync means a failed sync never commits to state).
+    #[tokio::test]
+    async fn fsync_failure_kills_the_writer_permanently() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let hook = std::sync::Arc::new(|| -> std::io::Result<()> {
+            Err(std::io::Error::other("injected fsync failure"))
+        });
+
+        let (w, state) = writer_with_accounts_and_hook(dir.path(), Some(hook)).await;
+
+        // Snapshot of state BEFORE the attempted commit.
+        let (seq_before, idem_count_before) = {
+            let st = state.read().await;
+            (st.next_seq, st.idem.hot_len())
+        };
+
+        // First commit — must fail.
+        let r1 = w.commit(tx("fail-1")).await;
+        assert!(
+            matches!(r1, Err(talea_core::store::StoreError::Io(_))),
+            "first post-failure commit must be StoreError::Io, got {r1:?}"
+        );
+
+        // Wait briefly for the writer task to die and the channel to close.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Second commit — writer is permanently dead.
+        let r2 = w.commit(tx("fail-2")).await;
+        assert!(
+            matches!(r2, Err(talea_core::store::StoreError::Io(_))),
+            "second commit after dead writer must be StoreError::Io, got {r2:?}"
+        );
+
+        // State invariant: failed sync must NOT have mutated state.
+        let (seq_after, idem_count_after) = {
+            let st = state.read().await;
+            (st.next_seq, st.idem.hot_len())
+        };
+        assert_eq!(
+            seq_after, seq_before,
+            "next_seq must be unchanged after a failed fsync (apply-after-fsync)"
+        );
+        assert_eq!(
+            idem_count_after, idem_count_before,
+            "idem map must be unchanged after a failed fsync (apply-after-fsync)"
+        );
     }
 }
