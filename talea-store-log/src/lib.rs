@@ -2,4 +2,5 @@
 //! writer task per book over in-memory state, strict fsync-per-batch.
 
 pub mod frame;
+pub mod segment;
 pub use frame::WireEvent;
