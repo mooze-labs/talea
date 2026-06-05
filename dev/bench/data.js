@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780632122136,
+  "lastUpdate": 1780632831671,
   "repoUrl": "https://github.com/mooze-labs/talea",
   "entries": {
     "bench-push-bigger": [
@@ -43,6 +43,50 @@ window.BENCHMARK_DATA = {
           {
             "name": "reads/postgres/peak-throughput",
             "value": 2776.1,
+            "unit": "ops/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "h4vismat@mooze.app",
+            "name": "havis",
+            "username": "h4vismat"
+          },
+          "committer": {
+            "email": "h4vismat@mooze.app",
+            "name": "havis",
+            "username": "h4vismat"
+          },
+          "distinct": true,
+          "id": "9bd29b1b50c9b6eb286c44dac809c36931aa21cc",
+          "message": "feat(ci): sync docs/ to gh-pages so Pages serves docs and bench charts together",
+          "timestamp": "2026-06-05T01:07:28-03:00",
+          "tree_id": "3122b81a16416d0e2d7a23107841dafaa86d57db",
+          "url": "https://github.com/mooze-labs/talea/commit/9bd29b1b50c9b6eb286c44dac809c36931aa21cc"
+        },
+        "date": 1780632830923,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "post-one-book/sqlite/peak-throughput",
+            "value": 2071.3,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/sqlite/peak-throughput",
+            "value": 14940.7,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/postgres/peak-throughput",
+            "value": 700.1,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/postgres/peak-throughput",
+            "value": 4266.6,
             "unit": "ops/s"
           }
         ]
