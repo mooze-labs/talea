@@ -37,7 +37,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::DateTime;
 use chrono::Utc;
@@ -161,8 +161,9 @@ impl BookWriter {
 
         let state2 = Arc::clone(&state);
         let ev_tx2 = ev_tx.clone();
+        let snap_inflight: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
-        let handle = tokio::spawn(run_loop(rx, segments, state2, ev_tx2, batch_max, dir, snapshot_every));
+        let handle = tokio::spawn(run_loop(rx, segments, state2, ev_tx2, batch_max, dir, snapshot_every, snap_inflight));
 
         Ok(Self {
             tx,
@@ -258,6 +259,7 @@ struct Staged {
 // Writer loop
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_loop(
     mut rx: mpsc::Receiver<Job>,
     mut segments: SegmentSet,
@@ -266,6 +268,11 @@ async fn run_loop(
     batch_max: usize,
     dir: PathBuf,
     snapshot_every: u64,
+    // Guard shared with spawned snapshot tasks. Set to `true` when a
+    // background snapshot is in flight; cleared by the task on completion
+    // (success or failure). The writer skips a new periodic snapshot if this
+    // is `true` — only one background snapshot at a time.
+    snap_inflight: Arc<AtomicBool>,
 ) {
     // Number of events applied since the last snapshot (periodic trigger).
     let mut events_since_snap: u64 = 0;
@@ -658,12 +665,18 @@ async fn run_loop(
         // ----------------------------------------------------------------
         // 6.5 Handle Snapshot jobs + periodic auto-snapshot.
         //
-        // Snapshot writes happen AFTER all other replies so callers
-        // are not delayed by snapshot I/O.  State is consistent post-apply.
-        //
         // Two triggers:
-        //  a) Explicit Job::Snapshot in this batch.
+        //  a) Explicit Job::Snapshot in this batch — synchronous, in-loop,
+        //     replies only after the write completes. Tests rely on this
+        //     guarantee (snapshot_now resolves when the file is durable).
         //  b) Periodic: applied_count pushed events_since_snap >= snapshot_every.
+        //     The (now-cheap) clone is taken under a short read lock here on
+        //     the writer loop, then the actual serialize+write is offloaded to
+        //     a detached `tokio::spawn` task so the writer loop is not stalled
+        //     by disk I/O. An `Arc<AtomicBool>` `snap_inflight` prevents
+        //     concurrent background snapshots: if one is already running the
+        //     periodic trigger is skipped (events_since_snap is NOT reset so
+        //     the check fires again next batch).
         // ----------------------------------------------------------------
         let has_explicit_snap = !snap_job_idxs.is_empty();
         let hit_periodic = snapshot_every > 0 && applied_count > 0 && {
@@ -671,9 +684,8 @@ async fn run_loop(
             events_since_snap >= snapshot_every
         };
 
-        if has_explicit_snap || hit_periodic {
-            // Clone state under a short read lock.
-            // next_seq - 1 is the seq of the last applied event.
+        // --- a) Explicit Job::Snapshot: synchronous in-loop write ---
+        if has_explicit_snap {
             let (snap_state, snap_seq) = {
                 let st = state.read().await;
                 let last = st.next_seq.saturating_sub(1);
@@ -683,26 +695,18 @@ async fn run_loop(
             let snap_result = if snap_seq > 0 {
                 let r = snapshot::write_snapshot(&dir, &snap_state, snap_seq).await;
                 match &r {
-                    Ok(()) => {
-                        tracing::debug!(seq = snap_seq, "snapshot written");
-                        events_since_snap = 0;
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            seq = snap_seq,
-                            "snapshot write failed (non-fatal; log is truth)"
-                        );
-                        // Don't reset events_since_snap — retry next batch.
-                    }
+                    Ok(()) => tracing::debug!(seq = snap_seq, "snapshot written (explicit)"),
+                    Err(e) => tracing::error!(
+                        error = %e,
+                        seq = snap_seq,
+                        "explicit snapshot write failed (non-fatal; log is truth)"
+                    ),
                 }
                 r
             } else {
-                // Nothing applied yet; snapshot is a no-op.
                 Ok(())
             };
 
-            // Reply to all explicit Snapshot jobs with the write result.
             for idx in snap_job_idxs {
                 if let Some(Job::Snapshot(reply_tx)) = jobs[idx].take() {
                     let send_val = snap_result
@@ -712,6 +716,40 @@ async fn run_loop(
                     let _ = reply_tx.send(send_val);
                 }
             }
+        }
+
+        // --- b) Periodic snapshot: clone here, write off the loop ---
+        if hit_periodic && !snap_inflight.load(Ordering::Acquire) {
+            let (snap_state, snap_seq) = {
+                let st = state.read().await;
+                let last = st.next_seq.saturating_sub(1);
+                (st.clone(), last)
+            };
+
+            if snap_seq > 0 {
+                // Mark inflight BEFORE spawning so the next batch sees the flag.
+                snap_inflight.store(true, Ordering::Release);
+                events_since_snap = 0;
+
+                let dir2 = dir.clone();
+                let flag = Arc::clone(&snap_inflight);
+                tokio::spawn(async move {
+                    match snapshot::write_snapshot(&dir2, &snap_state, snap_seq).await {
+                        Ok(()) => tracing::debug!(seq = snap_seq, "periodic snapshot written"),
+                        Err(e) => tracing::error!(
+                            error = %e,
+                            seq = snap_seq,
+                            "periodic snapshot write failed (non-fatal; log is truth)"
+                        ),
+                    }
+                    // Clear the inflight flag regardless of success/failure.
+                    flag.store(false, Ordering::Release);
+                });
+            }
+        } else if hit_periodic {
+            // A background snapshot is already running; don't reset the counter
+            // so we try again next batch once it clears.
+            tracing::debug!("periodic snapshot skipped: background snapshot already in flight");
         }
     }
 }
@@ -731,7 +769,7 @@ fn io_kill_batch(jobs: Vec<Option<Job>>, e: std::io::Error) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{AccountState, BookState};
+    use crate::state::{AccountState, BookState, PostingIndex};
     use std::sync::Arc;
     use talea_core::store::AccountCfg;
     use talea_core::types::*;
@@ -751,7 +789,7 @@ mod tests {
                     cfg: AccountCfg { normal_side: None, min_balance: None },
                     raw_balance: 0,
                     updated_seq: 0,
-                    postings: vec![],
+                    postings: PostingIndex::default(),
                 },
             );
         }

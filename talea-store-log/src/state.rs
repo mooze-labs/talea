@@ -38,13 +38,187 @@ pub struct PostingEntry {
     pub raw_after: i64,
 }
 
+/// Chunk size for [`PostingIndex`] sealed chunks.
+pub const CHUNK: usize = 4096;
+
+/// A chunked, Arc-shared posting history for one account.
+///
+/// # Invariant
+///
+/// Entries are ordered by `(seq, at)` in globally non-decreasing order — the
+/// same order they are appended by the single writer. This invariant is
+/// maintained by calling [`PostingIndex::push`] only from within
+/// [`BookState::try_apply_transaction`], which receives events in seq order.
+///
+/// # Clone cost
+///
+/// Cloning bumps the `Arc` refcount on each sealed chunk (O(sealed.len()))
+/// and deep-copies only the active tail (at most `CHUNK` entries). Over a long
+/// book lifetime, sealed grows logarithmically in event count while the per-
+/// clone memcpy stays bounded at `CHUNK * size_of::<PostingEntry>()` ≈ 256 KiB.
+///
+/// # Serde
+///
+/// Serialised as a flat `Vec<PostingEntry>` for forward compatibility with
+/// snapshot files. On deserialisation the flat list is re-chunked using the
+/// same `CHUNK` constant. Pre-release snapshots with the old `Vec<PostingEntry>`
+/// field are NOT compatible (the field name changed from `postings: Vec<…>` to
+/// `postings: PostingIndex`).
+#[derive(Debug, Clone, Default)]
+pub struct PostingIndex {
+    /// Sealed, immutable chunks — Arc-shared so cloning bumps refcounts instead
+    /// of copying history. Each holds exactly `CHUNK` entries.
+    sealed: Vec<Arc<Vec<PostingEntry>>>,
+    /// Active tail: at most `CHUNK` entries; the only part deep-copied by `clone`.
+    tail: Vec<PostingEntry>,
+}
+
+impl PostingIndex {
+    /// Append a new entry. When the tail reaches `CHUNK` entries it is sealed
+    /// (wrapped in an `Arc` and pushed to `sealed`) and a fresh tail is started.
+    pub fn push(&mut self, e: PostingEntry) {
+        self.tail.push(e);
+        if self.tail.len() == CHUNK {
+            let chunk = Arc::new(std::mem::take(&mut self.tail));
+            self.sealed.push(chunk);
+        }
+    }
+
+    /// Total number of entries across sealed chunks and the tail.
+    pub fn len(&self) -> usize {
+        self.sealed.len() * CHUNK + self.tail.len()
+    }
+
+    /// True when no entries have been pushed.
+    pub fn is_empty(&self) -> bool {
+        self.sealed.is_empty() && self.tail.is_empty()
+    }
+
+    /// Global index of the first entry with `at > t` (entries are ordered by
+    /// non-decreasing `at`). Equivalent to `Vec::partition_point(|e| e.at <= t)`.
+    ///
+    /// Binary searches chunk boundaries first, then within the relevant chunk.
+    pub fn partition_point_at(&self, t: DateTime<Utc>) -> usize {
+        // Determine which chunk contains the boundary.
+        // Each sealed chunk's last entry is the candidate for the boundary check.
+        let n_sealed = self.sealed.len();
+
+        // Find the first sealed chunk whose last entry has `at > t`.
+        let chunk_idx = self.sealed.partition_point(|chunk| {
+            chunk.last().map(|e| e.at <= t).unwrap_or(false)
+        });
+
+        if chunk_idx < n_sealed {
+            // Boundary is inside sealed[chunk_idx].
+            let chunk = &self.sealed[chunk_idx];
+            let local = chunk.partition_point(|e| e.at <= t);
+            chunk_idx * CHUNK + local
+        } else {
+            // Boundary is in the tail (or past the end).
+            let tail_local = self.tail.partition_point(|e| e.at <= t);
+            n_sealed * CHUNK + tail_local
+        }
+    }
+
+    /// Global index of the first entry with `seq > after`.
+    /// Equivalent to `Vec::partition_point(|e| e.seq <= after)`.
+    pub fn partition_point_seq(&self, after: Seq) -> usize {
+        let n_sealed = self.sealed.len();
+
+        let chunk_idx = self.sealed.partition_point(|chunk| {
+            chunk.last().map(|e| e.seq <= after).unwrap_or(false)
+        });
+
+        if chunk_idx < n_sealed {
+            let chunk = &self.sealed[chunk_idx];
+            let local = chunk.partition_point(|e| e.seq <= after);
+            chunk_idx * CHUNK + local
+        } else {
+            let tail_local = self.tail.partition_point(|e| e.seq <= after);
+            n_sealed * CHUNK + tail_local
+        }
+    }
+
+    /// Return the entry at global index `idx`, or `None` if out of bounds.
+    pub fn get(&self, idx: usize) -> Option<&PostingEntry> {
+        let n_sealed = self.sealed.len();
+        if idx < n_sealed * CHUNK {
+            let chunk_i = idx / CHUNK;
+            let local = idx % CHUNK;
+            self.sealed.get(chunk_i)?.get(local)
+        } else {
+            self.tail.get(idx - n_sealed * CHUNK)
+        }
+    }
+
+    /// Iterator over entries starting at global index `idx`.
+    pub fn iter_from(&self, idx: usize) -> impl Iterator<Item = &PostingEntry> {
+        let n_sealed = self.sealed.len();
+        let sealed_total = n_sealed * CHUNK;
+
+        // Collect sealed entries starting at `idx`.
+        let sealed_iter: Box<dyn Iterator<Item = &PostingEntry>> = if idx < sealed_total {
+            let chunk_start = idx / CHUNK;
+            let local_start = idx % CHUNK;
+            Box::new(
+                self.sealed[chunk_start..]
+                    .iter()
+                    .enumerate()
+                    .flat_map(move |(ci, chunk)| {
+                        let start = if ci == 0 { local_start } else { 0 };
+                        chunk[start..].iter()
+                    }),
+            )
+        } else {
+            Box::new(std::iter::empty())
+        };
+
+        let tail_start = idx.saturating_sub(sealed_total);
+        let tail_iter = self.tail[tail_start.min(self.tail.len())..].iter();
+
+        sealed_iter.chain(tail_iter)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Serde: serialise as flat Vec<PostingEntry>, deserialise by re-chunking.
+// ---------------------------------------------------------------------------
+
+impl serde::Serialize for PostingIndex {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let total = self.len();
+        let mut seq = ser.serialize_seq(Some(total))?;
+        for chunk in &self.sealed {
+            for e in chunk.as_ref() {
+                seq.serialize_element(e)?;
+            }
+        }
+        for e in &self.tail {
+            seq.serialize_element(e)?;
+        }
+        seq.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PostingIndex {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let flat: Vec<PostingEntry> = Vec::deserialize(de)?;
+        let mut idx = PostingIndex::default();
+        for e in flat {
+            idx.push(e);
+        }
+        Ok(idx)
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AccountState {
     pub def: AccountDef,
     pub cfg: AccountCfg,
     pub raw_balance: i64,
     pub updated_seq: Seq,
-    pub postings: Vec<PostingEntry>,
+    pub postings: PostingIndex,
 }
 
 /// Serde-able mirror of core's [`Committed`] (which doesn't derive serde).
@@ -406,7 +580,7 @@ impl BookState {
             cfg: cfg.clone(),
             raw_balance: 0,
             updated_seq: 0,
-            postings: vec![],
+            postings: PostingIndex::default(),
         });
         self.next_seq = seq + 1;
         self.last_at = Some(at);
@@ -442,7 +616,7 @@ mod tests {
                     cfg: AccountCfg { normal_side: normal, min_balance: min },
                     raw_balance: 0,
                     updated_seq: 0,
-                    postings: vec![],
+                    postings: PostingIndex::default(),
                 },
             );
         }
@@ -526,7 +700,7 @@ mod tests {
         assert_eq!(cash.raw_balance, 100);
         assert_eq!(cash.updated_seq, 1);
         assert_eq!(cash.postings.len(), 1);
-        assert_eq!(cash.postings[0].raw_after, 100);
+        assert_eq!(cash.postings.get(0).unwrap().raw_after, 100);
         assert_eq!(st.sums[&AssetId::new("USD")], (100, 100));
         assert!(st.idem.hot.contains_key("k1"));
         assert!(st.txids.contains_key(&t.id.0));
@@ -546,7 +720,7 @@ mod tests {
                 cfg: AccountCfg { normal_side: Some(Direction::Debit), min_balance: None },
                 raw_balance: i64::MAX,
                 updated_seq: 0,
-                postings: vec![],
+                postings: PostingIndex::default(),
             },
         );
         let mut scratch = Scratch::default();
@@ -624,5 +798,113 @@ mod tests {
         // txids has a Uuid key — verify it round-trips
         assert_eq!(rt.txids.len(), 1);
         assert!(rt.txids.contains_key(&t.id.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // PostingIndex tests
+    // -----------------------------------------------------------------------
+
+    fn make_entry(seq: Seq, at: DateTime<Utc>) -> PostingEntry {
+        PostingEntry {
+            seq,
+            at,
+            txid: TxId(uuid::Uuid::now_v7()),
+            minor: 1,
+            direction: Direction::Debit,
+            raw_after: seq,
+        }
+    }
+
+    #[test]
+    fn posting_index_chunking_preserves_order_and_search() {
+        use std::sync::Arc;
+
+        let base = chrono::DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let total = CHUNK * 2 + 100;
+        let mut idx = PostingIndex::default();
+
+        for i in 0..total {
+            let seq = (i + 1) as Seq;
+            let at = base + chrono::Duration::seconds(i as i64);
+            idx.push(make_entry(seq, at));
+        }
+
+        // Length is correct.
+        assert_eq!(idx.len(), total);
+        assert!(!idx.is_empty());
+
+        // Exactly two sealed chunks were created (the third batch is in the tail).
+        assert_eq!(idx.sealed.len(), 2);
+
+        // partition_point_seq at chunk boundaries, mid-chunk, 0, len.
+        assert_eq!(idx.partition_point_seq(0), 0);
+        assert_eq!(idx.partition_point_seq(CHUNK as Seq), CHUNK);
+        assert_eq!(idx.partition_point_seq((CHUNK * 2) as Seq), CHUNK * 2);
+        assert_eq!(idx.partition_point_seq(total as Seq), total);
+        // Mid first chunk.
+        let mid = CHUNK / 2;
+        assert_eq!(idx.partition_point_seq(mid as Seq), mid);
+        // One past sealed boundary.
+        assert_eq!(idx.partition_point_seq((CHUNK + 1) as Seq), CHUNK + 1);
+
+        // partition_point_at mirrors partition_point_seq (seq and at both advance together).
+        let t_chunk_boundary = base + chrono::Duration::seconds((CHUNK - 1) as i64);
+        let pp_at = idx.partition_point_at(t_chunk_boundary);
+        assert_eq!(pp_at, CHUNK, "partition_point_at at chunk boundary must equal CHUNK");
+
+        // get: first, last, cross-chunk.
+        assert_eq!(idx.get(0).unwrap().seq, 1);
+        assert_eq!(idx.get(CHUNK - 1).unwrap().seq, CHUNK as Seq);
+        assert_eq!(idx.get(CHUNK).unwrap().seq, (CHUNK + 1) as Seq);
+        assert_eq!(idx.get(total - 1).unwrap().seq, total as Seq);
+        assert!(idx.get(total).is_none());
+
+        // iter_from: starts at correct entry and crosses chunk boundary.
+        let cross_start = CHUNK - 2;
+        let items: Vec<Seq> = idx.iter_from(cross_start).take(5).map(|e| e.seq).collect();
+        let expected: Vec<Seq> = ((cross_start + 1) as Seq..=(cross_start + 5) as Seq).collect();
+        assert_eq!(items, expected, "iter_from must cross chunk boundary seamlessly");
+
+        // Clone shares sealed chunks via Arc::ptr_eq.
+        let clone = idx.clone();
+        assert_eq!(clone.sealed.len(), idx.sealed.len());
+        for (orig, cloned) in idx.sealed.iter().zip(clone.sealed.iter()) {
+            assert!(Arc::ptr_eq(orig, cloned), "sealed chunks must be Arc-shared after clone");
+        }
+    }
+
+    #[test]
+    fn posting_index_serde_round_trips() {
+        let base = chrono::DateTime::parse_from_rfc3339("2025-06-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let total = CHUNK + 50; // spans one full sealed chunk + tail
+        let mut idx = PostingIndex::default();
+        for i in 0..total {
+            let seq = (i + 1) as Seq;
+            let at = base + chrono::Duration::milliseconds(i as i64);
+            idx.push(make_entry(seq, at));
+        }
+
+        let json = serde_json::to_string(&idx).expect("serialize PostingIndex");
+        let rt: PostingIndex = serde_json::from_str(&json).expect("deserialize PostingIndex");
+
+        assert_eq!(rt.len(), idx.len(), "round-trip must preserve entry count");
+        // Re-chunking: first chunk must be sealed.
+        assert_eq!(rt.sealed.len(), 1, "one full sealed chunk expected after re-chunk");
+        assert_eq!(rt.tail.len(), 50, "tail must contain the 50 partial entries");
+
+        // All entries in the same order.
+        for i in 0..total {
+            let orig = idx.get(i).unwrap();
+            let got = rt.get(i).unwrap();
+            assert_eq!(orig.seq, got.seq, "seq mismatch at index {i}");
+            assert_eq!(orig.at, got.at, "at mismatch at index {i}");
+            assert_eq!(orig.raw_after, got.raw_after, "raw_after mismatch at index {i}");
+        }
     }
 }

@@ -694,7 +694,7 @@ impl Store for LogTaleaStore {
             }
             Some(t) => {
                 // Binary search: committed_at is non-decreasing vs seq within a book.
-                let idx = acct.postings.partition_point(|e| e.at <= t);
+                let idx = acct.postings.partition_point_at(t);
                 if idx == 0 {
                     // No postings at or before the cutoff.
                     Ok(BalanceSnapshot {
@@ -702,7 +702,7 @@ impl Store for LogTaleaStore {
                         updated_seq: 0,
                     })
                 } else {
-                    let entry = &acct.postings[idx - 1];
+                    let entry = acct.postings.get(idx - 1).expect("partition_point_at guaranteed in-range");
                     let eff = effective(entry.raw_after, &acct.cfg.normal_side);
                     Ok(BalanceSnapshot {
                         amount: Amount::new(eff, acct.def.asset.clone()),
@@ -751,15 +751,14 @@ impl Store for LogTaleaStore {
 
         let after = after_seq.unwrap_or(0);
         // Start at the first entry with seq > after.
-        let start = acct.postings.partition_point(|e| e.seq <= after);
-        let entries = &acct.postings[start..];
+        let start = acct.postings.partition_point_seq(after);
 
         // Walk counting DISTINCT seqs, stopping before exceeding `limit`.
         let mut records: Vec<PostingRecord> = Vec::new();
         let mut distinct_seqs: usize = 0;
         let mut last_seq: Seq = 0;
 
-        for entry in entries {
+        for entry in acct.postings.iter_from(start) {
             if entry.seq != last_seq {
                 if distinct_seqs >= limit {
                     break;

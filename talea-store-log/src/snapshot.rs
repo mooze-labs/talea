@@ -204,7 +204,7 @@ pub async fn prune_old(dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{AccountState, BookState, CommittedRec};
+    use crate::state::{AccountState, BookState, CommittedRec, PostingIndex};
     use talea_core::store::AccountCfg;
     use talea_core::types::*;
 
@@ -225,7 +225,7 @@ mod tests {
                 cfg: AccountCfg { normal_side: Some(Direction::Debit), min_balance: Some(0) },
                 raw_balance: 42,
                 updated_seq: 1,
-                postings: vec![],
+                postings: PostingIndex::default(),
             },
         );
         let txid = uuid::Uuid::now_v7();
