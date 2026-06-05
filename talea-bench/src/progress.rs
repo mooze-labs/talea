@@ -196,10 +196,20 @@ impl SeedBar {
         }
     }
 
-    pub fn finish(self) {
-        if let Some(b) = &self.bar {
+    pub fn finish(mut self) {
+        self.close();
+    }
+
+    fn close(&mut self) {
+        if let Some(b) = self.bar.take() {
             b.finish_and_clear();
         }
+    }
+}
+
+impl Drop for SeedBar {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
