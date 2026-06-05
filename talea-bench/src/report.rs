@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use hdrhistogram::Histogram;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::runner::StepReport;
 
@@ -33,7 +33,7 @@ CAVEATS:
     out
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct LatencyJson {
     pub count: u64,
     pub p50_us: u64,
@@ -54,7 +54,7 @@ pub fn latency_json(h: &Histogram<u64>) -> LatencyJson {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct StepJson {
     pub label: String,
     pub workers: usize,
@@ -159,7 +159,7 @@ pub fn step_line(s: &StepJson) -> String {
     )
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RunJson {
     pub scenario: String,
     /// Store backend the target server reported ("postgres" | "sqlite" |
@@ -289,5 +289,27 @@ mod tests {
         // the single-writer note appears only for sqlite
         assert!(lite.contains("single WAL writer"));
         assert!(!pg.contains("single WAL writer"));
+    }
+
+    #[test]
+    fn run_json_deserializes_back() {
+        let run = RunJson {
+            scenario: "unit".into(),
+            backend: "sqlite".into(),
+            git_sha: git_sha(),
+            started_at: chrono::Utc::now(),
+            config: serde_json::json!({"k": 1}),
+            steps: vec![summarize("c4", &sample_report(0))],
+        };
+        let body = serde_json::to_string(&run).unwrap();
+        let parsed: RunJson = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed.scenario, "unit");
+        assert_eq!(parsed.backend, "sqlite");
+        assert_eq!(parsed.steps.len(), 1);
+        assert_eq!(parsed.steps[0].successes, run.steps[0].successes);
+        assert_eq!(
+            parsed.steps[0].latency["post"].p99_us,
+            run.steps[0].latency["post"].p99_us
+        );
     }
 }
