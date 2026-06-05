@@ -1,11 +1,18 @@
 //! Property: commit_batch == sequential commit, observably.
 //! Seeded PRNG, fixed iteration count — deterministic in CI.
+//!
+//! Round structure:
+//!   Even rounds — SAFE shape: opens with a 1000-unit funding deposit so the
+//!   worst-case spend (7 × 75 = 525) can never overdraft. These MUST take
+//!   BatchPath::Fast.
+//!   Odd rounds — MIXED shape: four-arm generator that can produce ghost-account
+//!   or overdraft drafts. Either path is legitimate.
 
 use sqlx::postgres::PgPoolOptions;
 use talea_core::store::Store;
 use talea_core::types::AccountKind;
 use talea_store_conformance as conformance;
-use talea_store_postgres::PgTaleaStore;
+use talea_store_postgres::{BatchPath, PgTaleaStore};
 
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -55,40 +62,108 @@ async fn constrained_book(store: &PgTaleaStore) -> (String, String) {
 async fn commit_batch_equals_sequential_commit() {
     let Some(store) = store().await else { return };
     let mut rng: u64 = 0x7A1E_A001;
+    let mut fast_count = 0usize;
+    let mut fallback_count = 0usize;
 
     for round in 0..25 {
         let (book_a, asset_a) = constrained_book(&store).await;
         let (book_b, asset_b) = constrained_book(&store).await;
 
+        let is_safe = round % 2 == 0;
+
         // One batch shape, instantiated against both books.
-        let size = 2 + (splitmix64(&mut rng) % 7) as usize; // 2..=8
         let mut drafts_a = Vec::new();
         let mut drafts_b = Vec::new();
         let mut used_keys: Vec<String> = Vec::new();
-        for j in 0..size {
-            let roll = splitmix64(&mut rng) % 10;
-            let key = if roll == 0 && !used_keys.is_empty() {
-                used_keys[(splitmix64(&mut rng) as usize) % used_keys.len()].clone()
-            } else {
-                let k = format!("eq-{round}-{j}");
-                used_keys.push(k.clone());
-                k
-            };
-            let (from, to, amount) = match splitmix64(&mut rng) % 4 {
-                0 => ("deposits", "cash", 100),
-                1 => ("deposits", "cash", 50),
-                2 => ("cash", "expenses", 75), // overdrafts when cash is low
-                _ => ("cash", "ghost", 10),    // unknown account
-            };
+
+        if is_safe {
+            // SAFE round: seed with a large funding deposit so no overdraft is
+            // possible regardless of subsequent draws.
+            let key = format!("eq-{round}-seed");
+            used_keys.push(key.clone());
             drafts_a.push(conformance::transfer(
-                &book_a, &key, from, to, &asset_a, amount,
+                &book_a, &key, "deposits", "cash", &asset_a, 1000,
             ));
             drafts_b.push(conformance::transfer(
-                &book_b, &key, from, to, &asset_b, amount,
+                &book_b, &key, "deposits", "cash", &asset_b, 1000,
             ));
+
+            // ≤7 subsequent drafts; worst case 7 × 75 = 525 < 1000 funding.
+            let extra = (splitmix64(&mut rng) % 7) as usize; // 0..=6
+            for j in 0..extra {
+                let roll = splitmix64(&mut rng) % 10;
+                let key = if roll == 0 && !used_keys.is_empty() {
+                    // the index draw shifts the PRNG, so a reused-key draft's arm
+                    // comes from a different position — intentional.
+                    used_keys[(splitmix64(&mut rng) as usize) % used_keys.len()].clone()
+                } else {
+                    let k = format!("eq-{round}-{j}");
+                    used_keys.push(k.clone());
+                    k
+                };
+                let (from, to, amount) = match splitmix64(&mut rng) % 3 {
+                    0 => ("deposits", "cash", 100),
+                    1 => ("deposits", "cash", 50),
+                    _ => ("cash", "expenses", 75),
+                };
+                drafts_a.push(conformance::transfer(
+                    &book_a, &key, from, to, &asset_a, amount,
+                ));
+                drafts_b.push(conformance::transfer(
+                    &book_b, &key, from, to, &asset_b, amount,
+                ));
+            }
+        } else {
+            // MIXED round: four-arm generator that can produce ghost-account or
+            // overdraft drafts — either batch path is legitimate.
+            let size = 2 + (splitmix64(&mut rng) % 7) as usize; // 2..=8
+            for j in 0..size {
+                let roll = splitmix64(&mut rng) % 10;
+                let key = if roll == 0 && !used_keys.is_empty() {
+                    // the index draw shifts the PRNG, so a reused-key draft's arm
+                    // comes from a different position — intentional.
+                    used_keys[(splitmix64(&mut rng) as usize) % used_keys.len()].clone()
+                } else {
+                    let k = format!("eq-{round}-{j}");
+                    used_keys.push(k.clone());
+                    k
+                };
+                let (from, to, amount) = match splitmix64(&mut rng) % 4 {
+                    0 => ("deposits", "cash", 100),
+                    1 => ("deposits", "cash", 50),
+                    2 => ("cash", "expenses", 75), // overdrafts when cash is low
+                    _ => ("cash", "ghost", 10),    // unknown account
+                };
+                drafts_a.push(conformance::transfer(
+                    &book_a, &key, from, to, &asset_a, amount,
+                ));
+                drafts_b.push(conformance::transfer(
+                    &book_b, &key, from, to, &asset_b, amount,
+                ));
+            }
         }
 
-        let batch_results = store.commit_batch(&drafts_a).await;
+        let (path, batch_results) = store.commit_batch_traced(&drafts_a).await;
+        eprintln!(
+            "round {round} ({shape}): {path:?}  drafts={}",
+            drafts_a.len(),
+            shape = if is_safe { "safe" } else { "mixed" },
+        );
+
+        if is_safe {
+            assert_eq!(
+                path,
+                BatchPath::Fast,
+                "round {round}: safe batch must take the fast path"
+            );
+            fast_count += 1;
+        } else {
+            match path {
+                BatchPath::Fast => fast_count += 1,
+                BatchPath::Fallback => fallback_count += 1,
+            }
+        }
+
         let mut seq_results = Vec::new();
         for d in &drafts_b {
             seq_results.push(store.commit(d).await);
@@ -106,8 +181,10 @@ async fn commit_batch_equals_sequential_commit() {
                 "round {round} draft {i}: batch={b:?} vs sequential={s:?}"
             );
         }
-        // Relative seq order of successes matches (offsets differ only by
-        // each book's setup events — both books have 3).
+
+        // rel() normalizes away per-book seq offsets regardless of setup depth.
+        // Single-success rounds pass rel() trivially; the balance check below is
+        // the load-bearing assertion there.
         let seqs_a: Vec<i64> = batch_results.iter().flatten().map(|c| c.seq).collect();
         let seqs_b: Vec<i64> = seq_results.iter().flatten().map(|c| c.seq).collect();
         let rel = |v: &[i64]| -> Vec<i64> {
@@ -136,4 +213,9 @@ async fn commit_batch_equals_sequential_commit() {
             );
         }
     }
+
+    eprintln!(
+        "equivalence summary: Fast={fast_count} Fallback={fallback_count} total={}",
+        fast_count + fallback_count
+    );
 }
