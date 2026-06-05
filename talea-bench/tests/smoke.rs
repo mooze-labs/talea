@@ -7,6 +7,7 @@ mod harness;
 use std::time::Duration;
 
 use talea_bench::Ctx;
+use talea_bench::progress::Progress;
 use talea_bench::scenarios::{mixed, overload, post_many_books, post_one_book, reads};
 use talea_bench::workload::MixWeights;
 
@@ -17,6 +18,7 @@ fn smoke_ctx(url: String, run_id: &str) -> Ctx {
         run_id: run_id.into(),
         warmup: Duration::ZERO,
         duration: Duration::from_millis(300),
+        progress: Progress::hidden(),
     }
 }
 
@@ -117,4 +119,19 @@ async fn overload_smoke() {
     .unwrap();
     assert_eq!(steps.len(), 2); // raw-503 pass + retry-to-success pass
     assert!(steps[1].successes > 0, "retrying pass must land commits");
+}
+
+#[tokio::test]
+async fn detect_backend_reports_sqlite() {
+    let url = harness::spawn_server(256).await;
+    assert_eq!(talea_bench::detect_backend(&url).await, "sqlite");
+}
+
+#[tokio::test]
+async fn detect_backend_tolerates_trailing_slash() {
+    let url = harness::spawn_server(256).await;
+    assert_eq!(
+        talea_bench::detect_backend(&format!("{url}/")).await,
+        "sqlite"
+    );
 }

@@ -16,6 +16,7 @@ chrono = { version = "0.4.44", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3.32"
 hdrhistogram = "7"
+indicatif = "0.17"
 reqwest = { version = "0.13.4", features = ["json"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"

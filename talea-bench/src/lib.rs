@@ -2,6 +2,7 @@
 //! tests can drive scenarios directly; the `talea-bench` binary is a
 //! thin clap wrapper.
 
+pub mod progress;
 pub mod report;
 pub mod runner;
 pub mod scenarios;
@@ -13,6 +14,8 @@ use std::time::Duration;
 
 use talea_client::{RetryPolicy, TaleaClient};
 
+use crate::progress::Progress;
+
 /// Shared run context: where the server is and how each step is timed.
 pub struct Ctx {
     pub url: String,
@@ -21,6 +24,42 @@ pub struct Ctx {
     pub run_id: String,
     pub warmup: Duration,
     pub duration: Duration,
+    /// Bars + line routing; Progress::hidden() in tests and non-TTY runs.
+    pub progress: Progress,
+}
+
+/// Ask the target server which store backend it runs — the
+/// `x-talea-backend` header on `/health`. Servers older than the header
+/// (or unreachable ones) yield "unknown" with a stderr warning; the run
+/// proceeds, it is just unlabeled.
+/// Sampled once at startup; assumes a stable single backend for the run.
+pub async fn detect_backend(url: &str) -> String {
+    let probe = async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok()?;
+        client
+            .get(format!("{}/health", url.trim_end_matches('/')))
+            .send()
+            .await
+            .ok()?
+            .headers()
+            .get("x-talea-backend")?
+            .to_str()
+            .ok()
+            .map(str::to_string)
+    };
+    match probe.await {
+        Some(backend) => backend,
+        None => {
+            eprintln!(
+                "WARN: server did not report x-talea-backend on /health; \
+                 recording backend=\"unknown\""
+            );
+            "unknown".into()
+        }
+    }
 }
 
 impl Ctx {
@@ -48,6 +87,7 @@ mod tests {
             run_id: "t".into(),
             warmup: Duration::ZERO,
             duration: Duration::ZERO,
+            progress: Progress::hidden(),
         }
     }
 

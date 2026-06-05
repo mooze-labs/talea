@@ -10,12 +10,28 @@ use serde::Serialize;
 
 use crate::runner::StepReport;
 
-pub const CAVEATS: &str = "\
+/// Caveats header printed before every run and useful to embed near
+/// results. The sqlite extension keeps cross-backend comparisons honest:
+/// a SQLite post-many-books knee is the single-writer model, not a
+/// regression.
+pub fn caveats(backend: &str) -> String {
+    let mut out = String::from(
+        "\
 CAVEATS:
   1. Closed-loop load understates latency at saturation (coordinated
      omission). Treat results as ceilings and curve shapes, not SLO evidence.
   2. Postgres under Docker Desktop on macOS skews commit latency (VM +
-     fsync behavior). Treat absolute numbers as indicative only.";
+     fsync behavior). Treat absolute numbers as indicative only.",
+    );
+    if backend == "sqlite" {
+        out.push_str(
+            "\n  3. SQLite has a single WAL writer: cross-book write scaling \
+             (post-many-books) knees early BY DESIGN. Compare SQLite runs only \
+             against other SQLite runs.",
+        );
+    }
+    out
+}
 
 #[derive(Debug, Serialize)]
 pub struct LatencyJson {
@@ -46,7 +62,9 @@ pub struct StepJson {
     /// All successful ops per second across kinds.
     pub throughput_ops_s: f64,
     pub successes: u64,
-    pub saturated_503: u64,
+    /// Shed by backpressure: 503 admission shedding + 429 per-book
+    /// write-queue rejection. Both mean "retry later", never an error.
+    pub saturated: u64,
     pub deduplicated: u64,
     pub errors: HashMap<String, u64>,
     /// Error rate over 1% — numbers from this step are not trustworthy.
@@ -68,7 +86,7 @@ pub fn summarize(label: impl Into<String>, r: &StepReport) -> StepJson {
             0.0
         },
         successes: r.successes,
-        saturated_503: r.saturated,
+        saturated: r.saturated,
         deduplicated: r.deduplicated,
         errors: r.errors.clone(),
         invalid,
@@ -86,7 +104,7 @@ pub fn render_table(steps: &[StepJson]) -> String {
     }
     let mut out = format!(
         "{:<24} {:<14} {:>10} {:>9} {:>9} {:>9} {:>9} {:>10} {:>6} {:>6}\n",
-        "step", "op", "ops/s", "p50ms", "p90ms", "p99ms", "p99.9ms", "maxms", "503s", "errs"
+        "step", "op", "ops/s", "p50ms", "p90ms", "p99ms", "p99.9ms", "maxms", "shed", "errs"
     );
     for s in steps {
         let errs: u64 = s.errors.values().sum();
@@ -114,14 +132,14 @@ pub fn render_table(steps: &[StepJson]) -> String {
                 ms(l.p99_us),
                 ms(l.p999_us),
                 ms(l.max_us),
-                s.saturated_503,
+                s.saturated,
                 errs
             ));
         }
         if s.latency.is_empty() {
             out.push_str(&format!(
-                "{:<24} {:<14} {:>10} (no successful ops; 503s={} errs={})\n",
-                label, "-", "-", s.saturated_503, errs
+                "{:<24} {:<14} {:>10} (no successful ops; shed={} errs={})\n",
+                label, "-", "-", s.saturated, errs
             ));
         }
     }
@@ -132,11 +150,11 @@ pub fn render_table(steps: &[StepJson]) -> String {
 pub fn step_line(s: &StepJson) -> String {
     let p99: u64 = s.latency.values().map(|l| l.p99_us).max().unwrap_or(0);
     format!(
-        "step {} done: {:.1} ops/s, worst p99 {:.1}ms, 503s={}, invalid={}",
+        "step {} done: {:.1} ops/s, worst p99 {:.1}ms, shed={}, invalid={}",
         s.label,
         s.throughput_ops_s,
         p99 as f64 / 1000.0,
-        s.saturated_503,
+        s.saturated,
         s.invalid
     )
 }
@@ -144,6 +162,9 @@ pub fn step_line(s: &StepJson) -> String {
 #[derive(Debug, Serialize)]
 pub struct RunJson {
     pub scenario: String,
+    /// Store backend the target server reported ("postgres" | "sqlite" |
+    /// "unknown" for pre-header servers).
+    pub backend: String,
     pub git_sha: String,
     pub started_at: DateTime<Utc>,
     pub config: serde_json::Value,
@@ -230,6 +251,10 @@ mod tests {
         assert!(t.contains("ops/s"));
         assert!(t.contains("c4"));
         assert!(t.contains("post"));
+        // shed counts BOTH 503 admission shedding and 429 write-queue
+        // rejection — the old "503s" name lied after the write-queue landed
+        assert!(t.contains("shed"));
+        assert!(!t.contains("503s"));
     }
 
     #[test]
@@ -237,6 +262,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("talea-bench-test-{}", std::process::id()));
         let run = RunJson {
             scenario: "unit".into(),
+            backend: "sqlite".into(),
             git_sha: git_sha(),
             started_at: chrono::Utc::now(),
             config: serde_json::json!({"k": 1}),
@@ -246,7 +272,22 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["scenario"], "unit");
+        assert_eq!(parsed["backend"], "sqlite");
         assert_eq!(parsed["steps"][0]["successes"], 5);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn caveats_are_backend_conditional() {
+        let pg = caveats("postgres");
+        let lite = caveats("sqlite");
+        // the two universal caveats appear for every backend
+        for c in [&pg, &lite] {
+            assert!(c.contains("coordinated"));
+            assert!(c.contains("Docker Desktop"));
+        }
+        // the single-writer note appears only for sqlite
+        assert!(lite.contains("single WAL writer"));
+        assert!(!pg.contains("single WAL writer"));
     }
 }

@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hdrhistogram::Histogram;
@@ -141,7 +142,15 @@ impl Local {
     }
 }
 
-pub async fn run_step<F, Fut>(cfg: StepConfig, op: F) -> StepReport
+/// Run a closed-loop benchmark step with N workers.
+///
+/// `live` (when present) is fed once per completed op, warmup included —
+/// display only, never part of measurement.
+pub async fn run_step<F, Fut>(
+    cfg: StepConfig,
+    live: Option<Arc<crate::progress::LiveCounters>>,
+    op: F,
+) -> StepReport
 where
     F: Fn(usize, u64) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = OpOutcome> + Send + 'static,
@@ -153,12 +162,16 @@ where
     let mut handles = Vec::with_capacity(cfg.workers);
     for w in 0..cfg.workers {
         let op = op.clone();
+        let live = live.clone();
         handles.push(tokio::spawn(async move {
             let mut local = Local::new();
             let mut seq: u64 = 0;
             while Instant::now() < deadline {
                 let t0 = Instant::now();
                 let outcome = op(w, seq).await;
+                if let Some(live) = &live {
+                    live.record(&outcome);
+                }
                 local.record(&outcome, t0.elapsed(), t0 >= warmup_end);
                 seq += 1;
             }
@@ -234,6 +247,7 @@ mod tests {
                 warmup: Duration::from_millis(100),
                 duration: Duration::from_millis(200),
             },
+            None,
             move |_, _| {
                 let c = c.clone();
                 async move {
@@ -270,6 +284,7 @@ mod tests {
                 warmup: Duration::ZERO,
                 duration: Duration::from_millis(50),
             },
+            None,
             move |w, _| async move {
                 tokio::time::sleep(Duration::from_millis(2)).await;
                 if w == 0 {
@@ -288,5 +303,39 @@ mod tests {
         // total_ambiguous >= errors["transport"] (it also counts warmup).
         assert_eq!(report.total_ambiguous, report.errors["transport"]);
         assert_eq!(report.successes, 0);
+    }
+
+    #[tokio::test]
+    async fn run_step_feeds_live_counters_including_warmup() {
+        use crate::progress::LiveCounters;
+        let live = Arc::new(LiveCounters::default());
+        let calls = Arc::new(AtomicU64::new(0));
+        let c = calls.clone();
+        let _ = run_step(
+            StepConfig {
+                workers: 2,
+                warmup: Duration::from_millis(50),
+                duration: Duration::from_millis(100),
+            },
+            Some(live.clone()),
+            move |_, _| {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    OpOutcome::Success {
+                        kind: "op",
+                        deduplicated: false,
+                        committed: true,
+                    }
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            live.ops.load(Ordering::Relaxed),
+            calls.load(Ordering::Relaxed),
+            "live counter sees every op, warmup included"
+        );
     }
 }

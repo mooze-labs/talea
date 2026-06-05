@@ -14,7 +14,7 @@ use crate::service::LedgerService;
 pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let _metrics_handle = crate::metrics::install();
 
-    let (store, pool_sampler) = connect_store(&config).await?;
+    let (store, pool_sampler, backend) = connect_store(&config).await?;
 
     if config.api_token.is_none() {
         tracing::warn!("TALEA_API_TOKEN not set - the API is OPEN (dev mode)");
@@ -57,6 +57,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
             token: config.api_token.clone(),
         },
         config.max_inflight,
+        backend,
     );
 
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
@@ -77,7 +78,14 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 /// captured as a closure because the two backends have different pool types.
 async fn connect_store(
     config: &Config,
-) -> Result<(Arc<dyn Store>, Box<dyn Fn() -> (u32, usize) + Send>), Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        Arc<dyn Store>,
+        Box<dyn Fn() -> (u32, usize) + Send>,
+        &'static str,
+    ),
+    Box<dyn std::error::Error>,
+> {
     if config.db_url.starts_with("postgres://") || config.db_url.starts_with("postgresql://") {
         // Each active SSE subscription pins one pool connection for its whole
         // lifetime (PgListener). With max_inflight admitting far more requests
@@ -102,7 +110,7 @@ async fn connect_store(
             Box::new(move || (sampler_pool.size(), sampler_pool.num_idle()));
         let store = talea_store_postgres::PgTaleaStore::new(pool);
         store.migrate().await.map_err(box_store_err)?;
-        Ok((Arc::new(store), sampler))
+        Ok((Arc::new(store), sampler, "postgres"))
     } else if config.db_url.starts_with("sqlite:") {
         use sqlx::sqlite::{
             SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
@@ -137,7 +145,7 @@ async fn connect_store(
             Box::new(move || (sampler_pool.size(), sampler_pool.num_idle()));
         let store = talea_store_sqlite::SqliteTaleaStore::new(pool);
         store.migrate().await.map_err(box_store_err)?;
-        Ok((Arc::new(store), sampler))
+        Ok((Arc::new(store), sampler, "sqlite"))
     } else {
         Err(format!(
             "unsupported TALEA_DB_URL scheme: {} (expected postgres://... or sqlite://...)",
