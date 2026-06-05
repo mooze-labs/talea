@@ -559,6 +559,40 @@ async fn shed_increments_counter() {
 }
 
 #[tokio::test]
+async fn middleware_errors_use_the_envelope() {
+    // (`.oneshot` comes from the file's existing `use tower::ServiceExt;`)
+
+    // load shed -> 503 + Retry-After + overloaded envelope
+    let resp = talea_server::http::routes::handle_middleware_error(Box::new(
+        tower::load_shed::error::Overloaded::new(),
+    ))
+    .await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(resp.headers().contains_key(header::RETRY_AFTER));
+    assert_eq!(body_json(resp).await["error"], "overloaded");
+
+    // timeout -> 408 timeout envelope. A real Elapsed obtained from a real
+    // timeout layer (its constructor isn't part of tower's public API).
+    let svc = tower::ServiceBuilder::new()
+        .timeout(std::time::Duration::from_millis(1))
+        .service(tower::service_fn(|_: ()| async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            Ok::<_, std::convert::Infallible>(())
+        }));
+    let err = svc.oneshot(()).await.unwrap_err();
+    let resp = talea_server::http::routes::handle_middleware_error(err).await;
+    assert_eq!(resp.status(), StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(body_json(resp).await["error"], "timeout");
+
+    // anything else -> 500 internal envelope; the error text is NOT leaked
+    let resp = talea_server::http::routes::handle_middleware_error("secret detail".into()).await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"], "internal");
+    assert_eq!(body["message"], "middleware failure");
+}
+
+#[tokio::test]
 async fn health_reports_backend_header() {
     let app = app(None).await;
     let req = Request::builder()
@@ -713,4 +747,91 @@ mod overload {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"], "overloaded");
     }
+}
+
+/// Decode a response body as JSON (null if empty/undecodable) — for tests
+/// that must build raw requests instead of going through send().
+async fn body_json(res: axum::response::Response) -> serde_json::Value {
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap_or(serde_json::json!(null))
+}
+
+#[tokio::test]
+async fn extractor_rejections_use_the_envelope() {
+    let app = app(None).await;
+    setup(&app).await;
+
+    // malformed JSON syntax -> 400 invalid_draft
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/transactions")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{\"book\":"))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(res).await;
+    assert_eq!(body["error"], "invalid_draft");
+    assert_eq!(body["field"], "body");
+
+    // well-formed JSON, wrong type (string where i64 expected) -> 400, NOT axum's 422
+    let mut bad = transfer_body("etype", 100);
+    bad["postings"][0]["amount"]["minor"] = serde_json::json!("a-string");
+    let (s, body) = send(&app, "POST", "/v1/transactions", None, Some(bad)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_draft");
+    assert_eq!(body["field"], "body");
+    let reason = body["reason"].as_str().unwrap();
+    assert!(
+        !reason.is_empty(),
+        "data-error reason must carry serde's message"
+    );
+
+    // missing content-type -> 415 envelope
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/transactions")
+        .body(Body::from(transfer_body("ect", 100).to_string()))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let body = body_json(res).await;
+    assert_eq!(body["error"], "invalid_draft");
+    assert_eq!(body["field"], "body");
+
+    // bad query param: as_of not a date -> 400 envelope
+    let (s, body) = send(
+        &app,
+        "GET",
+        "/v1/books/onramp/accounts/cash/balance?as_of=yesterday",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_draft");
+    assert_eq!(body["field"], "query");
+
+    // bad query param: limit not a number -> 400 envelope
+    let (s, body) = send(
+        &app,
+        "GET",
+        "/v1/books/onramp/accounts/cash/history?limit=abc",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_draft");
+    assert_eq!(body["field"], "query");
+    assert!(
+        body["reason"].as_str().is_some_and(|r| !r.is_empty()),
+        "query rejection must carry a reason"
+    );
+
+    // SSE query param: from not a number -> 400 envelope
+    let (s, body) = send(&app, "GET", "/v1/books/onramp/events?from=abc", None, None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_draft");
+    assert_eq!(body["field"], "query");
 }

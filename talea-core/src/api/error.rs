@@ -47,6 +47,9 @@ pub enum ApiError {
     /// The per-book write queue is full. Retry with the same idempotency
     /// key — overload degrades to "retry later", never "maybe applied twice".
     Overloaded,
+    /// The request exceeded the server's processing deadline. Safe to retry
+    /// with the same idempotency key.
+    Timeout,
     Internal {
         message: String,
     },

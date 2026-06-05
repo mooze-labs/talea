@@ -8,11 +8,13 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::Router;
 use axum::error_handling::HandleErrorLayer;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use talea_core::api::ApiError;
 use tower::ServiceBuilder;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -30,17 +32,27 @@ pub struct AppState {
 pub async fn handle_middleware_error(err: tower::BoxError) -> Response {
     if err.is::<tower::load_shed::error::Overloaded>() {
         metrics::counter!("talea_shed_total").increment(1);
+        // Same body as the queue-full 429 — same client action either way
+        // (back off, retry with the same idempotency key); the distinction
+        // lives in the status code.
         (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "1")],
-            "overloaded; retry with the same idempotency key",
+            Json(ApiError::Overloaded),
         )
             .into_response()
     } else if err.is::<tower::timeout::error::Elapsed>() {
-        (StatusCode::REQUEST_TIMEOUT, "request timed out").into_response()
+        (StatusCode::REQUEST_TIMEOUT, Json(ApiError::Timeout)).into_response()
     } else {
+        // Log the real error; never leak it to the wire.
         tracing::error!(error = %err, "middleware failure");
-        (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError::Internal {
+                message: "middleware failure".into(),
+            }),
+        )
+            .into_response()
     }
 }
 

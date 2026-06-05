@@ -2,7 +2,10 @@
 //! id: <seq>; reconnects resume via Last-Event-ID (wins) or ?from=,
 //! both meaning "last seen seq" — the stream starts at value + 1.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
+
+// Envelope-rejection wrapper, not stock axum (bad ?from= -> 400 envelope).
+use crate::http::extract::Query;
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::{Stream, StreamExt};
