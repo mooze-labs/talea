@@ -60,6 +60,24 @@ fn summarize_run(run: &RunJson, rep_workers: usize, out: &mut Summary) -> Result
         value: peak,
     });
 
+    if run.scenario == "overload" {
+        // No p99 here: 1024 closed-loop workers far past capacity measure
+        // queueing, not the server. Clean shedding is the signal instead.
+        for s in &valid {
+            let errs: u64 = s.errors.values().sum();
+            let denom = s.successes + s.saturated + errs;
+            if denom == 0 {
+                return Err(format!("{tag}: step {} recorded no operations", s.label));
+            }
+            out.smaller.push(Metric {
+                name: format!("{tag}/error-rate/{}", s.label),
+                unit: "errors/op".into(),
+                value: errs as f64 / denom as f64,
+            });
+        }
+        return Ok(());
+    }
+
     let rep = valid
         .iter()
         .find(|s| s.workers == rep_workers)
@@ -176,6 +194,7 @@ mod tests {
             vec![step("c1", 1, 300.0, 3000), step("c8", 8, 500.0, 9000)],
         )];
         let s = summarize_runs(&runs, 8).unwrap();
+        assert_eq!(s.smaller.len(), 1);
         assert_eq!(
             s.smaller[0],
             Metric {
@@ -191,5 +210,40 @@ mod tests {
         let runs = vec![run("reads", "sqlite", vec![step("c1", 1, 300.0, 3000)])];
         let err = summarize_runs(&runs, 8).unwrap_err();
         assert!(err.contains("workers == 8"), "got: {err}");
+    }
+
+    #[test]
+    fn overload_emits_error_rate_per_step_and_no_p99() {
+        let mut raw = step("raw-503", 1024, 200.0, 50_000);
+        raw.successes = 90;
+        raw.saturated = 900;
+        raw.errors = HashMap::from([("transport".to_string(), 10)]);
+        let mut retry = step("retry-to-success", 1024, 180.0, 60_000);
+        retry.successes = 1000;
+        retry.saturated = 0;
+        let runs = vec![run("overload", "postgres", vec![raw, retry])];
+        let s = summarize_runs(&runs, 8).unwrap();
+        // bigger: just the peak; smaller: one error-rate per step, no p99 entries
+        assert_eq!(s.bigger[0].name, "overload/postgres/peak-throughput");
+        assert_eq!(s.smaller.len(), 2);
+        assert_eq!(s.smaller[0].name, "overload/postgres/error-rate/raw-503");
+        assert!((s.smaller[0].value - 10.0 / 1000.0).abs() < 1e-12);
+        assert_eq!(
+            s.smaller[1],
+            Metric {
+                name: "overload/postgres/error-rate/retry-to-success".into(),
+                unit: "errors/op".into(),
+                value: 0.0,
+            }
+        );
+    }
+
+    #[test]
+    fn overload_step_with_no_operations_is_an_error() {
+        let mut dead = step("raw-503", 1024, 0.0, 0);
+        dead.successes = 0;
+        dead.latency = HashMap::new();
+        let err = summarize_runs(&[run("overload", "sqlite", vec![dead])], 8).unwrap_err();
+        assert!(err.contains("no operations"), "got: {err}");
     }
 }
