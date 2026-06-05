@@ -69,6 +69,9 @@ jobs:
       - name: Bench postgres leg
         run: .github/scripts/bench-leg.sh postgres "postgres://postgres:postgres@localhost:5432/bench"
 
+      - name: Bench log leg
+        run: .github/scripts/bench-leg.sh log "log://bench-log-data"
+
       - name: Upload raw reports (full fidelity)
         uses: actions/upload-artifact@v4
         with:
