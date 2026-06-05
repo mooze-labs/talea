@@ -10,6 +10,7 @@ use std::time::Duration;
 use serde::Serialize;
 use talea_client::{LedgerApi, Posted, RetryPolicy};
 
+use crate::progress::LiveCounters;
 use crate::report::{self, StepJson};
 use crate::runner::{OpOutcome, StepConfig, classify, run_step};
 use crate::{Ctx, seed, verify, workload};
@@ -75,15 +76,22 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
             }
         }
     };
+    let label_a = "raw-503";
+    let counters_a = Arc::new(LiveCounters::default());
+    let bar_a = ctx
+        .progress
+        .step(label_a, ctx.warmup, ctx.duration, counters_a.clone());
     let r_a = run_step(
         StepConfig {
             workers: opts.concurrency,
             warmup: ctx.warmup,
             duration: ctx.duration,
         },
+        Some(counters_a),
         op_a,
     )
     .await;
+    bar_a.finish();
     committed += r_a.total_committed;
     ambiguous += r_a.total_ambiguous;
 
@@ -95,19 +103,20 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
         return Err("503 observed WITHOUT a Retry-After header — shedding contract broken".into());
     }
     if !probe.saw_503 {
-        eprintln!("WARN: raw probe never saw a 503; load may not have saturated admission");
+        ctx.progress
+            .println("WARN: raw probe never saw a 503; load may not have saturated admission");
     }
     if r_a.saturated == 0 {
-        eprintln!(
+        ctx.progress.println(format!(
             "WARN: no 503s in pass A — concurrency {} did not exceed admission capacity",
             opts.concurrency
-        );
+        ));
     }
     if r_a.successes == 0 {
         return Err("goodput collapsed to zero under overload".into());
     }
-    let step = report::summarize("raw-503", &r_a);
-    eprintln!("{}", report::step_line(&step));
+    let step = report::summarize(label_a, &r_a);
+    ctx.progress.println(report::step_line(&step));
     steps.push(step);
 
     // ---- Pass B: default retry; latency includes retry waits. ----
@@ -137,22 +146,29 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
             }
         }
     };
+    let label_b = "retry-to-success";
+    let counters_b = Arc::new(LiveCounters::default());
+    let bar_b = ctx
+        .progress
+        .step(label_b, ctx.warmup, ctx.duration, counters_b.clone());
     let r_b = run_step(
         StepConfig {
             workers: opts.concurrency,
             warmup: ctx.warmup,
             duration: ctx.duration,
         },
+        Some(counters_b),
         op_b,
     )
     .await;
+    bar_b.finish();
     committed += r_b.total_committed;
     ambiguous += r_b.total_ambiguous;
     if r_b.successes == 0 {
         return Err("no successful commits in the retrying pass".into());
     }
-    let step = report::summarize("retry-to-success", &r_b);
-    eprintln!("{}", report::step_line(&step));
+    let step = report::summarize(label_b, &r_b);
+    ctx.progress.println(report::step_line(&step));
     steps.push(step);
 
     let warnings = verify::verify_books(
@@ -165,7 +181,7 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
     )
     .await?;
     for w in &warnings {
-        eprintln!("WARN: {w}");
+        ctx.progress.println(format!("WARN: {w}"));
     }
     Ok(steps)
 }

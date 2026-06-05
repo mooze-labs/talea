@@ -19,7 +19,9 @@ path = "src/main.rs"
 async-stream = "0.3"
 async-trait = "0.1.89"
 chrono = { version = "0.4.44", features = ["serde"] }
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env", "string"] }
+clap_complete = "4"
+clap_mangen = "0.2"
 eventsource-stream = "0.2"
 futures = "0.3.32"
 reqwest = { version = "0.13.4", features = ["json", "stream"] }

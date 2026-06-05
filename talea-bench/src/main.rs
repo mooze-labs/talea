@@ -4,6 +4,7 @@ use std::time::Duration;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use talea_bench::Ctx;
+use talea_bench::progress::Progress;
 use talea_bench::report::{self, RunJson, StepJson};
 use talea_bench::scenarios::{mixed, overload, post_many_books, post_one_book, reads};
 use talea_bench::workload::MixWeights;
@@ -91,7 +92,8 @@ enum Cmd {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    eprintln!("{}\n", report::CAVEATS);
+    let backend = talea_bench::detect_backend(&cli.url).await;
+    eprintln!("{}\n", report::caveats(&backend));
     let started_at = Utc::now();
     let ctx = Ctx {
         url: cli.url,
@@ -99,6 +101,7 @@ async fn main() {
         run_id: started_at.format("%Y%m%dT%H%M%S%.3f").to_string(),
         warmup: Duration::from_secs(cli.warmup_secs),
         duration: Duration::from_secs(cli.duration_secs),
+        progress: Progress::auto(),
     };
 
     let (scenario, config, result): (&str, serde_json::Value, Result<Vec<StepJson>, String>) =
@@ -184,7 +187,7 @@ async fn main() {
             }
         };
 
-    finish(&cli.out_dir, scenario, started_at, config, result);
+    finish(&cli.out_dir, scenario, &backend, started_at, config, result);
 }
 
 fn run_config<T: serde::Serialize>(ctx: &Ctx, opts: &T) -> serde_json::Value {
@@ -199,6 +202,7 @@ fn run_config<T: serde::Serialize>(ctx: &Ctx, opts: &T) -> serde_json::Value {
 fn finish(
     out_dir: &std::path::Path,
     scenario: &str,
+    backend: &str,
     started_at: chrono::DateTime<Utc>,
     config: serde_json::Value,
     result: Result<Vec<StepJson>, String>,
@@ -208,6 +212,7 @@ fn finish(
             println!("\n{}", report::render_table(&steps));
             let run = RunJson {
                 scenario: scenario.into(),
+                backend: backend.into(),
                 git_sha: report::git_sha(),
                 started_at,
                 config,

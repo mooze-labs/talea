@@ -56,7 +56,12 @@ pub async fn handle_middleware_error(err: tower::BoxError) -> Response {
     }
 }
 
-pub fn router(service: Arc<LedgerService>, auth: AuthConfig, max_inflight: usize) -> Router {
+pub fn router(
+    service: Arc<LedgerService>,
+    auth: AuthConfig,
+    max_inflight: usize,
+    backend: &'static str,
+) -> Router {
     let state = AppState { service };
 
     // SSE is long-lived: no request timeout. Everything else gets one.
@@ -100,7 +105,13 @@ pub fn router(service: Arc<LedgerService>, auth: AuthConfig, max_inflight: usize
 
     Router::new()
         .nest("/v1", api)
-        .route("/health", get(|| async { "ok" }))
+        // Body stays exactly "ok" (LB checks compare it verbatim); the
+        // backend tag rides as a header so benchmark results can record
+        // which store they measured.
+        .route(
+            "/health",
+            get(move || async move { ([("x-talea-backend", backend)], "ok") }),
+        )
         .merge(
             SwaggerUi::new("/docs").url("/openapi.json", crate::http::openapi::ApiDoc::openapi()),
         )

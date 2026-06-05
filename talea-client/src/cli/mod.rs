@@ -108,6 +108,35 @@ pub enum Command {
         #[arg(long, default_value_t = 1)]
         from: i64,
     },
+    /// Print shell completions to stdout (e.g. `talea completions zsh`)
+    Completions { shell: clap_complete::Shell },
+    /// Write man pages (talea.1 plus one page per subcommand) to a directory
+    Man {
+        /// Output directory (created if missing)
+        #[arg(long, default_value = ".")]
+        out_dir: std::path::PathBuf,
+    },
+}
+
+/// (file name, roff content) for the command and every visible subcommand,
+/// depth-first: talea.1, talea-asset.1, talea-asset-register.1, ...
+fn man_pages(cmd: &clap::Command) -> Vec<(String, Vec<u8>)> {
+    fn walk(cmd: &clap::Command, name: String, out: &mut Vec<(String, Vec<u8>)>) {
+        let mut buf = Vec::new();
+        clap_mangen::Man::new(cmd.clone().name(name.clone()))
+            .render(&mut buf)
+            .expect("man page renders to memory");
+        out.push((format!("{name}.1"), buf));
+        for sub in cmd.get_subcommands() {
+            if sub.is_hide_set() || sub.get_name() == "help" {
+                continue;
+            }
+            walk(sub, format!("{name}-{}", sub.get_name()), out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(cmd, cmd.get_name().to_string(), &mut out);
+    out
 }
 
 #[derive(Subcommand)]
@@ -328,14 +357,37 @@ pub async fn execute(cli: Cli) -> ApiResult<Option<serde_json::Value>> {
                 serde_json::to_value(tb).expect("TrialBalance serializes"),
             ))
         }
-        // run() handles Tail before calling execute(); a typed error (not a
-        // panic) for library callers that reach this directly
+        // run() handles Tail/Completions/Man before calling execute(); a
+        // typed error (not a panic) for library callers that reach these
+        // directly
         Command::Tail { .. } => Err(invalid("tail is a streaming command; call run()".into())),
+        Command::Completions { .. } | Command::Man { .. } => {
+            Err(invalid("local command; call run()".into()))
+        }
     }
 }
 
 /// Full CLI entry: printing + the streaming tail loop.
 pub async fn run(cli: Cli) -> ApiResult<()> {
+    match &cli.command {
+        Command::Completions { shell } => {
+            let mut cmd = <Cli as clap::CommandFactory>::command();
+            clap_complete::generate(*shell, &mut cmd, "talea", &mut std::io::stdout());
+            return Ok(());
+        }
+        Command::Man { out_dir } => {
+            std::fs::create_dir_all(out_dir)
+                .map_err(|e| invalid(format!("creating {}: {e}", out_dir.display())))?;
+            for (name, page) in man_pages(&<Cli as clap::CommandFactory>::command()) {
+                let path = out_dir.join(name);
+                std::fs::write(&path, page)
+                    .map_err(|e| invalid(format!("writing {}: {e}", path.display())))?;
+                println!("{}", path.display());
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
     if let Command::Tail { book, from } = &cli.command {
         let book = book.clone();
         let from = *from;
@@ -356,4 +408,33 @@ pub async fn run(cli: Cli) -> ApiResult<()> {
         println!("{}", serde_json::to_string_pretty(&value).expect("json"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn completions_render_for_zsh() {
+        let mut buf = Vec::new();
+        let mut cmd = Cli::command();
+        clap_complete::generate(clap_complete::Shell::Zsh, &mut cmd, "talea", &mut buf);
+        let script = String::from_utf8(buf).unwrap();
+        assert!(script.contains("talea"));
+        assert!(script.contains("trial-balance"));
+    }
+
+    #[test]
+    fn man_pages_cover_every_subcommand() {
+        let pages = man_pages(&Cli::command());
+        let names: Vec<&str> = pages.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"talea.1"), "got {names:?}");
+        assert!(names.contains(&"talea-post.1"), "got {names:?}");
+        assert!(names.contains(&"talea-asset-register.1"), "got {names:?}");
+        assert!(!names.iter().any(|n| n.contains("help")), "got {names:?}");
+        for (name, content) in &pages {
+            assert!(!content.is_empty(), "{name} rendered empty");
+        }
+    }
 }

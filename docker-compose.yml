@@ -2,10 +2,11 @@
 #   docker compose up -d
 #   talead init --db-url postgres://talea:talea@localhost:5432/talea
 #
-# Optional Prometheus scraping the server's metrics (see README "Metrics"):
+# Optional Prometheus + Grafana over the server's metrics (see README "Metrics"):
 #   TALEA_METRICS_BIND=0.0.0.0:9100 talead serve
 #   docker compose --profile metrics up -d
-#   open http://localhost:9090
+#   open http://localhost:9090   # Prometheus
+#   open http://localhost:3000   # Grafana, canned "talea" dashboard, no login
 services:
   postgres:
     image: postgres:17
@@ -34,6 +35,21 @@ services:
       # makes host.docker.internal resolve on Linux too (built-in on
       # Docker Desktop); the talea server runs on the HOST, not in compose
       - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    profiles: ["metrics"]
+    ports:
+      - "3000:3000"
+    environment:
+      # dev-only: anonymous admin, straight to the dashboard
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
 
 volumes:
   talea-pg:

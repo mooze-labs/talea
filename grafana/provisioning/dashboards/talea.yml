@@ -1,0 +1,10 @@
+# Loads the canned dashboards baked into the compose volume mount.
+apiVersion: 1
+
+providers:
+  - name: talea
+    folder: ""
+    type: file
+    allowUiUpdates: true # dev-only stack; let people tweak panels live
+    options:
+      path: /var/lib/grafana/dashboards

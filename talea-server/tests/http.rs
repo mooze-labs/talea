@@ -24,6 +24,7 @@ async fn app(token: Option<&str>) -> axum::Router {
             token: token.map(String::from),
         },
         256,
+        "sqlite",
     )
 }
 
@@ -234,6 +235,34 @@ async fn auth_gate() {
     // health stays open
     let (s, _) = send(&app, "GET", "/health", None, None).await;
     assert_eq!(s, StatusCode::OK);
+}
+
+/// RFC 7235: the auth-scheme is case-insensitive, and one-or-more spaces
+/// separate it from the token.
+#[tokio::test]
+async fn auth_scheme_is_case_insensitive() {
+    let app = app(Some("sekrit")).await;
+
+    for value in ["bearer sekrit", "BEARER sekrit", "Bearer  sekrit"] {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/books/onramp/trial-balance")
+            .header(header::AUTHORIZATION, value)
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "rejected {value:?}");
+    }
+
+    // a different scheme carrying the right token is still not bearer auth
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/books/onramp/trial-balance")
+        .header(header::AUTHORIZATION, "Basic sekrit")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }
 
 /// talea_sse_subscribers is a process-global gauge and tests in this binary
@@ -563,6 +592,27 @@ async fn middleware_errors_use_the_envelope() {
     assert_eq!(body["message"], "middleware failure");
 }
 
+#[tokio::test]
+async fn health_reports_backend_header() {
+    let app = app(None).await;
+    let req = Request::builder()
+        .method("GET")
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get("x-talea-backend")
+            .and_then(|v| v.to_str().ok()),
+        Some("sqlite")
+    );
+    // body must stay exactly "ok" — load balancers compare it verbatim
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"ok");
+}
+
 mod overload {
     use super::*;
     use async_trait::async_trait;
@@ -640,7 +690,8 @@ mod overload {
                 ..Default::default()
             },
         ));
-        let app = talea_server::http::routes::router(service, AuthConfig { token: None }, 256);
+        let app =
+            talea_server::http::routes::router(service, AuthConfig { token: None }, 256, "sqlite");
 
         // first request: committer takes it and hangs
         {
