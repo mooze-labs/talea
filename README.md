@@ -62,6 +62,7 @@ Or browse [`docs/`](docs/README.md). A running instance serves its own interacti
 | `talea-server` | `LedgerService` (implements `LedgerApi` over any `Store`) + axum REST/SSE transport with bearer auth and admission control |
 | `talead` | Daemon binary: `init` (migrate, token, seed, `.env`) and `serve` |
 | `talea-client` | `TaleaClient` SDK (also implements `LedgerApi`) + the `talea` CLI binary |
+| `talea-bench` | Capacity benchmark suite: five load scenarios against a running server, plus `summarize` for CI trend extraction |
 
 The trait symmetry is the point: `LedgerService` (in-process) and `TaleaClient` (remote) implement the same `LedgerApi`, so code written against the trait runs against either. There is a test that proves it.
 
@@ -219,6 +220,8 @@ cargo clippy --workspace --all-targets
 ```
 
 The conformance crate is the contract: both stores run the identical suite (idempotency, gapless sequences, normal-side balance enforcement, pagination that never splits a transaction across pages, subscribe catch-up + live delivery). Client tests run against the real server router on an ephemeral port, not mocks.
+
+CI also benchmarks both backends on every push to `main` (trimmed profile) and nightly (full sweep), charting throughput and latency trends on [GitHub Pages](https://mooze-labs.github.io/talea/dev/bench/) — see [`talea-bench`](talea-bench/README.md#ci-trend-tracking).
 
 ## Design notes and limits
 

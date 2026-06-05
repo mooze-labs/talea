@@ -102,6 +102,31 @@ docker compose exec postgres psql -U talea -c \
 `Lock` waits on the counter row = per-book ceiling. Pool exhaustion in
 the server = raise TALEA_DB_POOL. CPU-bound postgres = the DB itself.
 
+## CI trend tracking
+
+CI benches both backends automatically (`.github/workflows/bench.yml`): a
+trimmed profile on every push to `main` (`post-one-book` + `reads`,
+concurrencies 1/4/8, 10s windows) and the full five-scenario sweep nightly.
+Raw report JSONs are kept as workflow artifacts (90 days); extracted trends
+are charted at <https://mooze-labs.github.io/talea/dev/bench/>, with
+per-push and nightly data in separate datasets. Runner noise makes single
+points unreliable — read the curves across commits, not run-to-run deltas.
+
+The extraction step is the `summarize` subcommand, usable locally too:
+
+```bash
+cargo run --release -p talea-bench -- summarize bench-results/*.json
+```
+
+It reads run reports (any mix of backends — each report carries its own
+`backend` field) and writes `summary-bigger.json` / `summary-smaller.json`
+in github-action-benchmark format: peak throughput per scenario+backend,
+p99 per op at the representative step (`--rep-workers`, default 8), and
+per-step error-rates for `overload` instead of p99 (closed-loop latency
+past saturation measures queueing, not the server). It fails loudly rather
+than mislabel a chart: unknown backend, duplicate metrics, a missing
+representative step, or an all-invalid run are errors.
+
 ## A step is marked [INVALID] when
 
 its non-503 error rate exceeds 1% — its numbers are not trustworthy.
