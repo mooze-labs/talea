@@ -418,9 +418,15 @@ async fn run_loop(
 
                 Reply::DupInBatch { job_idx, staged_slot } => {
                     let s = &staged[staged_slot];
-                    if let Some(Job::Commit(tx, reply_tx)) = jobs[job_idx].take() {
+                    // Resolve to the FIRST (staged) transaction's identity, not the
+                    // duplicate's own txid — mirrors the committed-idem (Reply::Dup) path.
+                    let first_txid = match &s.wire.event {
+                        LedgerEvent::TransactionPosted(t) => t.id.clone(),
+                        _ => unreachable!("DupInBatch staged slot is always a TransactionPosted"),
+                    };
+                    if let Some(Job::Commit(_, reply_tx)) = jobs[job_idx].take() {
                         let _ = reply_tx.send(Ok(Committed {
-                            txid: tx.id,
+                            txid: first_txid,
                             seq: s.wire.seq,
                             at: s.wire.at,
                         }));
@@ -588,5 +594,36 @@ mod tests {
         }
         assert_eq!(rx.recv().await.unwrap().seq, 1);
         assert_eq!(rx.recv().await.unwrap().seq, 2);
+    }
+
+    #[tokio::test]
+    async fn duplicate_idem_within_one_batch_resolves_to_first_txid() {
+        // We submit two transactions with the same idempotency key concurrently
+        // via tokio::join! to maximize the chance they land in the same batch.
+        //
+        // Note: batching is not guaranteed — the two commits may arrive in
+        // separate batches, in which case the second resolves via the
+        // committed-idem path (Reply::Dup) rather than the in-batch path
+        // (Reply::DupInBatch).  Both paths must honour the same contract, and
+        // the assertions below hold in either case.
+        let dir = tempfile::tempdir().unwrap();
+        let w = writer_with_accounts(dir.path()).await;
+
+        let t1 = tx("same-key");
+        let t2 = tx("same-key"); // different TxId, same idempotency key
+
+        let (r1, r2) = tokio::join!(w.commit(t1), w.commit(t2));
+        let c1 = r1.expect("first commit must succeed");
+        let c2 = r2.expect("second commit must succeed");
+
+        // Both must resolve to the SAME txid/seq/at (the first transaction's).
+        assert_eq!(c2.txid, c1.txid, "dup must resolve to the first txid, not its own");
+        assert_eq!(c2.seq, c1.seq, "dup must resolve to the first seq");
+        assert_eq!(c2.at, c1.at, "dup must resolve to the first at");
+
+        // Only one frame should be on disk regardless of batching.
+        let seg = crate::segment::SegmentSet::open(dir.path()).await.unwrap();
+        let frames = seg.scan_from(1, 1000).await.unwrap();
+        assert_eq!(frames.len(), 1, "only the first transaction should be persisted");
     }
 }
