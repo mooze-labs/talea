@@ -37,6 +37,7 @@ pub struct HistoryQuery {
     responses(
         (status = 204, description = "registered (idempotent on id)"),
         (status = 400, body = ApiError), (status = 401, body = ApiError),
+        (status = 403, description = "token scope does not cover this book", body = ApiError),
         (status = 409, description = "same id, different definition", body = ApiError),
         (status = 415, description = "missing or wrong content-type", body = ApiError),
     ), security(("bearer" = [])), tag = "registry")]
@@ -60,6 +61,7 @@ pub async fn register_asset(
     responses(
         (status = 204, description = "opened (idempotent on book+path)"),
         (status = 400, body = ApiError), (status = 401, body = ApiError),
+        (status = 403, description = "token scope does not cover this book", body = ApiError),
         (status = 404, description = "unknown asset", body = ApiError),
         (status = 409, body = ApiError),
         (status = 415, description = "missing or wrong content-type", body = ApiError),
@@ -85,6 +87,7 @@ pub async fn open_account(
         (status = 200, description = "committed or deduplicated replay", body = Posted),
         (status = 400, description = "unbalanced / invalid amount / malformed draft", body = ApiError),
         (status = 401, body = ApiError),
+        (status = 403, description = "token scope does not cover this book", body = ApiError),
         (status = 404, description = "unknown account", body = ApiError),
         (status = 409, description = "min_balance violation", body = ApiError),
         (status = 415, description = "missing or wrong content-type", body = ApiError),
@@ -109,7 +112,9 @@ pub async fn post_transaction(
     ),
     responses(
         (status = 200, description = "effective balance, decimal string per asset precision", body = BalanceView),
-        (status = 401, body = ApiError), (status = 404, body = ApiError),
+        (status = 401, body = ApiError),
+        (status = 403, description = "token scope does not cover this book", body = ApiError),
+        (status = 404, body = ApiError),
     ), security(("bearer" = [])), tag = "reads")]
 pub async fn get_balance(
     State(state): State<AppState>,
@@ -136,7 +141,9 @@ pub async fn get_balance(
     ),
     responses(
         (status = 200, description = "seq-ascending postings; after_seq exclusive; one transaction never splits across pages", body = inline(Paged<PostingView>)),
-        (status = 401, body = ApiError), (status = 404, body = ApiError),
+        (status = 401, body = ApiError),
+        (status = 403, description = "token scope does not cover this book", body = ApiError),
+        (status = 404, body = ApiError),
     ), security(("bearer" = [])), tag = "reads")]
 pub async fn get_history(
     State(state): State<AppState>,
@@ -164,7 +171,9 @@ pub async fn get_history(
     params(("tx_id" = String, Path, description = "transaction id (uuid)")),
     responses(
         (status = 200, body = TransactionView),
-        (status = 401, body = ApiError), (status = 404, body = ApiError),
+        (status = 401, body = ApiError),
+        (status = 403, description = "token scope does not cover this book", body = ApiError),
+        (status = 404, body = ApiError),
     ), security(("bearer" = [])), tag = "ledger")]
 pub async fn get_transaction(
     State(state): State<AppState>,
@@ -187,6 +196,7 @@ pub async fn get_transaction(
     responses(
         (status = 200, body = TrialBalance),
         (status = 401, body = ApiError),
+        (status = 403, description = "token scope does not cover this book", body = ApiError),
     ), security(("bearer" = [])), tag = "reads")]
 pub async fn get_trial_balance(
     State(state): State<AppState>,

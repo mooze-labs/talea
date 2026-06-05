@@ -28,6 +28,7 @@ pub struct EventsQuery {
     responses(
         (status = 200, description = "SSE stream (text/event-stream): each event carries id: <seq> and an EventEnvelope JSON body; ?from= and Last-Event-ID both mean 'last seen seq' (header wins); reconnect resumes from the cursor", content_type = "text/event-stream"),
         (status = 401, body = ApiError),
+        (status = 403, description = "token scope does not cover this book", body = ApiError),
     ), security(("bearer" = [])), tag = "stream")]
 pub async fn events(
     State(state): State<AppState>,

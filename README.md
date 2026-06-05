@@ -123,6 +123,7 @@ Server (`talead serve` / `talea-server`, via env or `.env`):
 | `TALEA_DB_URL` | required | `postgres://...` or `sqlite://path.db` (`:memory:` is rejected) |
 | `TALEA_BIND` | `127.0.0.1:8080` | Listen address |
 | `TALEA_API_TOKEN` | unset | Bearer token; unset means OPEN dev mode (logged loudly) |
+| `TALEA_TOKENS_FILE` | unset | Path to a TOML file of scoped bearer tokens (see below). Additive with `TALEA_API_TOKEN`, which stays equivalent to an unnamed all-books `rw` entry |
 | `TALEA_DB_POOL` | `10` | Connection pool size. On Postgres each SSE subscriber pins one connection: size for subscribers + workers |
 | `TALEA_MAX_INFLIGHT` | `256` | In-flight request cap; excess sheds as 503 |
 | `TALEA_WRITE_QUEUE_DEPTH` | `256` | Per-book write queue length; a full queue answers 429 + `Retry-After` |
@@ -138,6 +139,24 @@ not yet committed are dropped (never half-applied); a client that got no
 response retries its idempotency key.
 
 Client (`talea` CLI): `TALEA_URL`, `TALEA_TOKEN`.
+
+### Scoped tokens
+
+`TALEA_TOKENS_FILE` confines each bearer token to a set of books:
+
+```toml
+[tokens.payments]
+token = "s3cret-1"
+books = ["payments"]   # exact book names, or ["*"] for all books
+access = "rw"          # "ro" = read-only
+
+[tokens.reporting]
+token = "s3cret-2"
+books = ["*"]
+access = "ro"
+```
+
+Out-of-scope requests answer `403 {"error":"forbidden","book":...}` (a bad token stays `401`). Registering assets requires an `rw` token scoped `["*"]` — the asset registry is shared by every book. Entry names appear in logs; secrets never do. Rotation = edit the file and restart. With neither `TALEA_TOKENS_FILE` nor `TALEA_API_TOKEN` set the API is open (dev mode, logged loudly).
 
 ## Horizontal scaling
 
