@@ -87,11 +87,56 @@ enum Cmd {
         #[arg(long, default_value_t = 5)]
         trial_weight: u32,
     },
+    /// Extract trend metrics from run reports into github-action-benchmark JSON
+    Summarize {
+        /// Step (by worker count) used for latency percentiles
+        #[arg(long, default_value_t = 8)]
+        rep_workers: usize,
+        /// Output path for customBiggerIsBetter metrics (throughput)
+        #[arg(long, default_value = "summary-bigger.json")]
+        bigger_out: PathBuf,
+        /// Output path for customSmallerIsBetter metrics (latency, error rates)
+        #[arg(long, default_value = "summary-smaller.json")]
+        smaller_out: PathBuf,
+        /// Run-report JSON files; legs from different backends mix freely
+        #[arg(required = true)]
+        reports: Vec<PathBuf>,
+    },
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    // summarize is offline — handle it before anything probes the server.
+    let cmd = match cli.cmd {
+        Cmd::Summarize {
+            rep_workers,
+            bigger_out,
+            smaller_out,
+            reports,
+        } => {
+            match talea_bench::summarize::run_summarize(
+                rep_workers,
+                &bigger_out,
+                &smaller_out,
+                &reports,
+            ) {
+                Ok((nb, ns)) => {
+                    println!(
+                        "wrote {nb} metrics to {} and {ns} metrics to {}",
+                        bigger_out.display(),
+                        smaller_out.display()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("SUMMARIZE FAILED: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        cmd => cmd,
+    };
     let backend = talea_bench::detect_backend(&cli.url).await;
     eprintln!("{}\n", report::caveats(&backend));
     let started_at = Utc::now();
@@ -105,7 +150,7 @@ async fn main() {
     };
 
     let (scenario, config, result): (&str, serde_json::Value, Result<Vec<StepJson>, String>) =
-        match cli.cmd {
+        match cmd {
             Cmd::PostOneBook {
                 concurrency,
                 postings_per_tx,
@@ -185,6 +230,7 @@ async fn main() {
                 let config = run_config(&ctx, &opts);
                 ("mixed", config, mixed::run(&ctx, opts).await)
             }
+            Cmd::Summarize { .. } => unreachable!("handled above"),
         };
 
     finish(&cli.out_dir, scenario, &backend, started_at, config, result);
@@ -236,10 +282,28 @@ fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn cli_parses() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn summarize_subcommand_parses_with_defaults() {
+        let cli = Cli::try_parse_from(["talea-bench", "summarize", "a.json", "b.json"]).unwrap();
+        let Cmd::Summarize {
+            rep_workers,
+            bigger_out,
+            smaller_out,
+            reports,
+        } = cli.cmd
+        else {
+            panic!("expected summarize");
+        };
+        assert_eq!(rep_workers, 8);
+        assert_eq!(bigger_out, PathBuf::from("summary-bigger.json"));
+        assert_eq!(smaller_out, PathBuf::from("summary-smaller.json"));
+        assert_eq!(reports.len(), 2);
     }
 }

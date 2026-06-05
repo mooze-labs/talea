@@ -1,0 +1,56 @@
+{
+  "scenario": "post-one-book",
+  "backend": "sqlite",
+  "git_sha": "0faac8c",
+  "started_at": "2026-06-05T00:40:24.401477Z",
+  "config": {
+    "duration_secs": 10,
+    "warmup_secs": 2,
+    "url": "http://127.0.0.1:8080",
+    "opts": { "concurrencies": [1, 4, 8], "postings_per_tx": 2 }
+  },
+  "steps": [
+    {
+      "label": "c1",
+      "workers": 1,
+      "measured_secs": 10.0,
+      "throughput_ops_s": 313.4,
+      "successes": 3134,
+      "saturated": 0,
+      "deduplicated": 0,
+      "errors": {},
+      "invalid": false,
+      "latency": {
+        "post": { "count": 3134, "p50_us": 3053, "p90_us": 3885, "p99_us": 6123, "p999_us": 8887, "max_us": 30287 }
+      }
+    },
+    {
+      "label": "c4",
+      "workers": 4,
+      "measured_secs": 10.0,
+      "throughput_ops_s": 488.3,
+      "successes": 4883,
+      "saturated": 0,
+      "deduplicated": 0,
+      "errors": {},
+      "invalid": false,
+      "latency": {
+        "post": { "count": 4883, "p50_us": 8019, "p90_us": 9255, "p99_us": 11671, "p999_us": 20751, "max_us": 112127 }
+      }
+    },
+    {
+      "label": "c8",
+      "workers": 8,
+      "measured_secs": 10.0,
+      "throughput_ops_s": 503.5,
+      "successes": 5035,
+      "saturated": 0,
+      "deduplicated": 0,
+      "errors": {},
+      "invalid": false,
+      "latency": {
+        "post": { "count": 5035, "p50_us": 15500, "p90_us": 18200, "p99_us": 24800, "p999_us": 41000, "max_us": 150000 }
+      }
+    }
+  ]
+}
