@@ -7,6 +7,7 @@
 
 use serde::Serialize;
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use crate::report::RunJson;
 
@@ -112,6 +113,41 @@ fn summarize_run(run: &RunJson, rep_workers: usize, out: &mut Summary) -> Result
     }
 
     Ok(())
+}
+
+/// CLI entry: read report files, write the two metric files.
+pub fn run_summarize(
+    rep_workers: usize,
+    bigger_out: &Path,
+    smaller_out: &Path,
+    reports: &[PathBuf],
+) -> Result<(), String> {
+    let mut runs = Vec::with_capacity(reports.len());
+    for path in reports {
+        let body = std::fs::read_to_string(path)
+            .map_err(|e| format!("reading {}: {e}", path.display()))?;
+        runs.push(
+            serde_json::from_str::<RunJson>(&body)
+                .map_err(|e| format!("parsing {}: {e}", path.display()))?,
+        );
+    }
+    let summary = summarize_runs(&runs, rep_workers)?;
+    write_metrics(bigger_out, &summary.bigger)?;
+    write_metrics(smaller_out, &summary.smaller)?;
+    println!(
+        "wrote {} metrics to {} and {} metrics to {}",
+        summary.bigger.len(),
+        bigger_out.display(),
+        summary.smaller.len(),
+        smaller_out.display()
+    );
+    Ok(())
+}
+
+fn write_metrics(path: &Path, metrics: &[Metric]) -> Result<(), String> {
+    let body =
+        serde_json::to_string_pretty(metrics).map_err(|e| format!("serializing metrics: {e}"))?;
+    std::fs::write(path, body).map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
 #[cfg(test)]
@@ -287,5 +323,44 @@ mod tests {
         ];
         let err = summarize_runs(&runs, 8).unwrap_err();
         assert!(err.contains("duplicate metric"), "got: {err}");
+    }
+
+    #[test]
+    fn run_summarize_reads_reports_and_writes_action_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join("post-one-book.json");
+        std::fs::write(
+            &report,
+            include_str!("../tests/fixtures/post-one-book.sqlite.json"),
+        )
+        .unwrap();
+        let bigger = dir.path().join("summary-bigger.json");
+        let smaller = dir.path().join("summary-smaller.json");
+
+        run_summarize(8, &bigger, &smaller, &[report]).unwrap();
+
+        let b: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&bigger).unwrap()).unwrap();
+        assert_eq!(b[0]["name"], "post-one-book/sqlite/peak-throughput");
+        assert_eq!(b[0]["unit"], "ops/s");
+        assert_eq!(b[0]["value"], 503.5);
+
+        let s: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&smaller).unwrap()).unwrap();
+        assert_eq!(s[0]["name"], "post-one-book/sqlite/p99-post@c8");
+        assert_eq!(s[0]["value"], 24800.0);
+    }
+
+    #[test]
+    fn run_summarize_reports_unreadable_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = run_summarize(
+            8,
+            &dir.path().join("b.json"),
+            &dir.path().join("s.json"),
+            &[dir.path().join("missing.json")],
+        )
+        .unwrap_err();
+        assert!(err.contains("missing.json"), "got: {err}");
     }
 }
