@@ -1,0 +1,55 @@
+name: Docs to Pages
+
+# Pages serves the gh-pages branch: docs/ synced to its root (this workflow)
+# plus benchmark trend data under dev/bench/ (bench.yml). This keeps all bot
+# commits off main while one Pages site serves both.
+
+on:
+  push:
+    branches: [main]
+    paths: [docs/**]
+  workflow_dispatch:
+
+concurrency:
+  group: docs-pages
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+
+      - name: Sync docs/ to gh-pages root (bench data under dev/ is preserved)
+        run: |
+          rsync -av --delete \
+            --exclude '.git' \
+            --exclude 'dev/' \
+            docs/ gh-pages/
+
+      - name: Commit and push
+        working-directory: gh-pages
+        run: |
+          git config user.name "docs-pages-sync"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "docs already in sync"
+            exit 0
+          fi
+          git commit -m "docs: sync docs/ from ${GITHUB_SHA::7}"
+          # bench.yml pushes to this branch too; rebase-retry absorbs races.
+          for _ in 1 2 3; do
+            git push && exit 0
+            git pull --rebase origin gh-pages
+          done
+          exit 1
