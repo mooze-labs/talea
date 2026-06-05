@@ -53,6 +53,7 @@ async fn in_batch_duplicate_stays_fast_and_dedups() {
     let Some(store) = store().await else { return };
     let (book, asset_id) = conformance::setup_book(&store).await;
     let first = conformance::transfer(&book, "fp-dup", "deposits", "cash", &asset_id, 100);
+    let first_id = first.id.clone();
     let mut second = first.clone();
     second.id = talea_core::types::TxId(uuid::Uuid::now_v7());
     let (path, results) = store.commit_batch_traced(&[first, second]).await;
@@ -61,6 +62,7 @@ async fn in_batch_duplicate_stays_fast_and_dedups() {
     let b = results[1].as_ref().unwrap();
     assert_eq!(a.seq, b.seq);
     assert_eq!(a.txid, b.txid); // dedup returns the winner's identity
+    assert_eq!(a.txid, first_id); // the FIRST draft is the winner
 }
 
 #[tokio::test]
@@ -105,6 +107,48 @@ async fn min_balance_violation_falls_back_with_sequential_semantics() {
         Err(StoreError::ConstraintViolation { .. })
     ));
     assert!(results[1].is_ok());
+}
+
+#[tokio::test]
+async fn multi_book_batch_falls_back() {
+    let Some(store) = store().await else { return };
+    let (book_a, asset_a) = conformance::setup_book(&store).await;
+    let (book_b, asset_b) = conformance::setup_book(&store).await;
+    let a = conformance::transfer(&book_a, "mb-a", "deposits", "cash", &asset_a, 100);
+    let b = conformance::transfer(&book_b, "mb-b", "deposits", "cash", &asset_b, 100);
+    let (path, results) = store.commit_batch_traced(&[a, b]).await;
+    assert_eq!(path, BatchPath::Fallback);
+    assert!(results[0].is_ok());
+    assert!(results[1].is_ok());
+}
+
+#[tokio::test]
+async fn exact_min_balance_boundary_stays_fast() {
+    let Some(store) = store().await else { return };
+    use talea_core::types::AccountKind;
+    let book = conformance::unique("book");
+    let asset_id = conformance::unique("USD");
+    store
+        .register_asset(&conformance::asset(&asset_id))
+        .await
+        .unwrap();
+    let (cash_def, mut cash_cfg) =
+        conformance::open_spec(&book, "cash", &asset_id, AccountKind::Asset);
+    cash_cfg.min_balance = Some(0);
+    store.open_account(&cash_def, &cash_cfg).await.unwrap();
+    let (dep_def, dep_cfg) =
+        conformance::open_spec(&book, "deposits", &asset_id, AccountKind::Liability);
+    store.open_account(&dep_def, &dep_cfg).await.unwrap();
+    let (exp_def, exp_cfg) =
+        conformance::open_spec(&book, "expenses", &asset_id, AccountKind::Expense);
+    store.open_account(&exp_def, &exp_cfg).await.unwrap();
+
+    // fund 100, then spend exactly 100: cash lands exactly at min (0)
+    let fund = conformance::transfer(&book, "bd-fund", "deposits", "cash", &asset_id, 100);
+    let spend = conformance::transfer(&book, "bd-spend", "cash", "expenses", &asset_id, 100);
+    let (path, results) = store.commit_batch_traced(&[fund, spend]).await;
+    assert_eq!(path, BatchPath::Fast);
+    assert!(results[0].is_ok() && results[1].is_ok());
 }
 
 #[tokio::test]

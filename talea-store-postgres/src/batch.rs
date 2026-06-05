@@ -2,7 +2,10 @@
 //! round trips per BATCH instead of per draft. Any surprise aborts the
 //! whole attempt (rollback frees the claimed seq range atomically) and
 //! the caller reruns the batch through the per-draft savepoint path —
-//! the semantic reference.
+//! the semantic reference. A bail is intentionally unobservable here:
+//! the fallback re-runs the batch and surfaces the underlying error with
+//! full context; the talea_commit_batch_path_total counter carries the
+//! fast/fallback rate.
 
 use std::collections::{HashMap, HashSet};
 
@@ -101,6 +104,8 @@ pub(crate) async fn try_commit_batch_fast(
         write_set(&mut db, book, &writes, &accounts, &mut by_key, &mut results).await?;
     }
 
+    // A failed COMMIT lands here too: nothing became durable, so the whole
+    // batch re-runs via the fallback — safe, at the cost of one wasted round trip group.
     db.commit().await.ok()?;
 
     for (i, key) in &dedup_slots {
@@ -143,6 +148,7 @@ async fn write_set(
     let first = last - n + 1;
 
     // 5. Balances: aggregate per account, one UNNEST upsert.
+    // MIRROR: keep column shape in sync with write_transaction's balances upsert (lib.rs).
     let mut agg: HashMap<String, i64> = HashMap::new();
     for w in writes {
         for p in &w.pendings {
@@ -200,6 +206,7 @@ async fn write_set(
     // 7. Row writes: three UNNEST inserts for the whole batch.
     //    transactions first — a unique violation (cross-instance idempotency
     //    race) lands here and aborts to the fallback.
+    // MIRROR: keep column shape in sync with write_transaction's transaction insert (lib.rs).
     let t_seqs: Vec<i64> = (first..=last).collect();
     let t_ids: Vec<Uuid> = writes.iter().map(|w| w.tx.id.0).collect();
     let t_keys: Vec<String> = writes
@@ -233,7 +240,8 @@ async fn write_set(
     .await
     .ok()?;
 
-    // postings: flatten with per-draft seq
+    // postings: flatten with per-draft seq.
+    // MIRROR: keep column shape in sync with write_transaction's postings insert (lib.rs).
     let mut p_tx: Vec<Uuid> = Vec::new();
     let mut p_idx: Vec<i32> = Vec::new();
     let mut p_key: Vec<String> = Vec::new();
@@ -273,7 +281,8 @@ async fn write_set(
     .await
     .ok()?;
 
-    // events: one row per draft; same kind; payload = full transaction
+    // events: one row per draft; same kind; payload = full transaction.
+    // MIRROR: keep column shape in sync with insert_event (lib.rs).
     let e_payloads: Vec<serde_json::Value> = writes
         .iter()
         .map(|w| serde_json::to_value(LedgerEvent::TransactionPosted(w.tx.clone())))

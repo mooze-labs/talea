@@ -310,7 +310,8 @@ async fn write_transaction(
         .map(|p| p.asset.as_str().to_string())
         .collect();
     let b_deltas: Vec<i64> = pending.iter().map(|p| p.delta).collect();
-    // RETURNING rows are matched by key, not position, for robustness
+    // RETURNING rows are matched by key, not position, for robustness.
+    // MIRROR: keep column shape in sync with batch.rs write_set (fast path).
     let rows = sqlx::query(
         "INSERT INTO balances (account_key, asset, balance, updated_seq)
          SELECT t.account_key, t.asset, t.delta, $4
@@ -359,7 +360,8 @@ async fn write_transaction(
     }
 
     // transaction row; a lost idempotency race surfaces here as a unique
-    // violation on (book, idempotency_key) — the caller handles it
+    // violation on (book, idempotency_key) — the caller handles it.
+    // MIRROR: keep column shape in sync with batch.rs write_set (fast path).
     sqlx::query(
         "INSERT INTO transactions
              (tx_id, book, seq, idempotency_key, occurred_at, committed_at, metadata, external_refs)
@@ -377,7 +379,8 @@ async fn write_transaction(
     .await
     .map_err(io_err)?;
 
-    // postings projection: one UNNEST insert
+    // postings projection: one UNNEST insert.
+    // MIRROR: keep column shape in sync with batch.rs write_set (fast path).
     let p_idxs: Vec<i32> = (0..transaction.postings.len() as i32).collect();
     let p_accounts: Vec<String> = transaction
         .postings
@@ -419,6 +422,7 @@ async fn write_transaction(
     .await
     .map_err(io_err)?;
 
+    // MIRROR: keep column shape in sync with batch.rs write_set (fast path).
     insert_event(
         db,
         &transaction.book.0,
