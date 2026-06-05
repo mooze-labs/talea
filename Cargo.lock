@@ -2604,14 +2604,11 @@ name = "talea-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "axum",
  "chrono",
  "futures",
  "serde",
  "serde_json",
- "sqlx",
  "thiserror 2.0.18",
- "tokio",
  "utoipa",
  "uuid",
 ]
