@@ -529,6 +529,40 @@ async fn shed_increments_counter() {
     );
 }
 
+#[tokio::test]
+async fn middleware_errors_use_the_envelope() {
+    // (`.oneshot` comes from the file's existing `use tower::ServiceExt;`)
+
+    // load shed -> 503 + Retry-After + overloaded envelope
+    let resp = talea_server::http::routes::handle_middleware_error(Box::new(
+        tower::load_shed::error::Overloaded::new(),
+    ))
+    .await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(resp.headers().contains_key(header::RETRY_AFTER));
+    assert_eq!(body_json(resp).await["error"], "overloaded");
+
+    // timeout -> 408 timeout envelope. A real Elapsed obtained from a real
+    // timeout layer (its constructor isn't part of tower's public API).
+    let svc = tower::ServiceBuilder::new()
+        .timeout(std::time::Duration::from_millis(1))
+        .service(tower::service_fn(|_: ()| async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            Ok::<_, std::convert::Infallible>(())
+        }));
+    let err = svc.oneshot(()).await.unwrap_err();
+    let resp = talea_server::http::routes::handle_middleware_error(err).await;
+    assert_eq!(resp.status(), StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(body_json(resp).await["error"], "timeout");
+
+    // anything else -> 500 internal envelope; the error text is NOT leaked
+    let resp = talea_server::http::routes::handle_middleware_error("secret detail".into()).await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"], "internal");
+    assert_eq!(body["message"], "middleware failure");
+}
+
 mod overload {
     use super::*;
     use async_trait::async_trait;
