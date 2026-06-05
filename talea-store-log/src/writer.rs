@@ -12,7 +12,7 @@
 //!    loop returns, and the channel closes. Callers that attempt to send
 //!    subsequent jobs will receive a "book writer gone" error.
 //!
-//! 3. **committed_at monotonic vs seq.** `at` starts at
+//! 3. **committed_at non-decreasing vs seq.** `at` starts at
 //!    `max(ledger_now(), state.last_at)` per batch and is clamped
 //!    non-decreasing within the batch.
 //!
@@ -37,6 +37,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use chrono::DateTime;
 use chrono::Utc;
@@ -85,11 +86,37 @@ impl BookWriter {
     /// Spawn the background writer task.
     ///
     /// `batch_max` caps how many jobs are drained per batch.
+    ///
+    /// # Contract
+    ///
+    /// At most **one** `BookWriter` may ever be spawned per `BookState` /
+    /// segment directory. Constructing a second writer over the same
+    /// `Arc<RwLock<BookState>>` would fork the seq counter and silently
+    /// corrupt the log — the two writers would interleave sequence numbers
+    /// and overwrite each other's segments. Construction is owned by the
+    /// store layer, which must ensure one writer per book.
+    ///
+    /// This invariant is enforced at runtime: a second `spawn` on the same
+    /// `BookState` returns an error.
     pub async fn spawn(
         dir: PathBuf,
         state: Arc<RwLock<BookState>>,
         batch_max: usize,
     ) -> std::io::Result<Self> {
+        // Single-writer guard: fail fast if another writer is already live.
+        {
+            let st = state.read().await;
+            if st.writer_attached
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return Err(std::io::Error::other(
+                    "a BookWriter is already attached to this BookState \
+                     — single-writer contract violated",
+                ));
+            }
+        }
+
         let segments = SegmentSet::open(&dir).await?;
         let (tx, rx) = mpsc::channel::<Job>(batch_max.max(64) * 4);
         let (ev_tx, _) = broadcast::channel::<Sequenced<LedgerEvent>>(1024);
@@ -333,8 +360,9 @@ async fn run_loop(
         // ----------------------------------------------------------------
         if !staged.is_empty() {
             for s in &mut staged {
+                // TooLarge (>4 GiB payload) is unreachable for real transactions.
                 let frame_bytes =
-                    encode_frame(&s.wire).expect("ledger events always serialize");
+                    encode_frame(&s.wire).expect("ledger events serialize and fit a frame");
 
                 if let Err(e) = segments.maybe_rotate(s.wire.seq).await {
                     io_kill_batch(jobs, e);
@@ -625,5 +653,167 @@ mod tests {
         let seg = crate::segment::SegmentSet::open(dir.path()).await.unwrap();
         let frames = seg.scan_from(1, 1000).await.unwrap();
         assert_eq!(frames.len(), 1, "only the first transaction should be persisted");
+    }
+
+    // -----------------------------------------------------------------------
+    // I1 — single-writer guard
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn second_writer_on_same_state_is_refused() {
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+        let state = Arc::new(RwLock::new(BookState::default()));
+
+        // First writer succeeds.
+        let _w1 = BookWriter::spawn(dir1.path().to_path_buf(), Arc::clone(&state), 64)
+            .await
+            .expect("first writer must succeed");
+
+        // Second writer on the same BookState must be refused.
+        let result = BookWriter::spawn(dir2.path().to_path_buf(), Arc::clone(&state), 64).await;
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("single-writer contract violated"),
+                "unexpected error message: {e}",
+            ),
+            Ok(_) => panic!("second writer must be refused but spawn succeeded"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Gap 3 — OpenAccount / RegisterAsset writer tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn open_account_idempotent_same_def_no_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(RwLock::new(BookState::default()));
+        let w = BookWriter::spawn(dir.path().to_path_buf(), Arc::clone(&state), 64)
+            .await
+            .unwrap();
+
+        let def = AccountDef {
+            id: AccountId { book: Book("b".into()), path: "checking".into() },
+            asset: AssetId::new("USD"),
+            kind: AccountKind::Asset,
+        };
+        let cfg = AccountCfg { normal_side: None, min_balance: None };
+
+        // First open — should succeed.
+        let (tx1, rx1) = oneshot::channel();
+        w.submit(Job::OpenAccount(def.clone(), cfg.clone(), tx1)).await.unwrap();
+        rx1.await.unwrap().expect("first open must succeed");
+
+        // Second open with identical (def, cfg) — idempotent, no new frame.
+        let (tx2, rx2) = oneshot::channel();
+        w.submit(Job::OpenAccount(def.clone(), cfg.clone(), tx2)).await.unwrap();
+        rx2.await.unwrap().expect("idempotent open must succeed");
+
+        // Exactly ONE AccountOpened frame on disk.
+        let seg = crate::segment::SegmentSet::open(dir.path()).await.unwrap();
+        let frames = seg.scan_from(1, 1000).await.unwrap();
+        assert_eq!(frames.len(), 1, "idempotent open must not append a second frame");
+
+        // The next commit must get seq 2 (open consumed seq 1; idempotent hit consumed none).
+        // To commit we need the account to exist; it does now. Add a counterpart.
+        let state_ref = state.read().await;
+        let next = state_ref.next_seq;
+        drop(state_ref);
+        assert_eq!(next, 2, "seq must be 2 after one open + one idempotent no-op");
+    }
+
+    #[tokio::test]
+    async fn open_account_different_def_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(RwLock::new(BookState::default()));
+        let w = BookWriter::spawn(dir.path().to_path_buf(), Arc::clone(&state), 64)
+            .await
+            .unwrap();
+
+        let def = AccountDef {
+            id: AccountId { book: Book("b".into()), path: "savings".into() },
+            asset: AssetId::new("USD"),
+            kind: AccountKind::Asset,
+        };
+        let cfg1 = AccountCfg { normal_side: None, min_balance: None };
+        let cfg2 = AccountCfg { normal_side: Some(Direction::Debit), min_balance: Some(0) };
+
+        let (tx1, rx1) = oneshot::channel();
+        w.submit(Job::OpenAccount(def.clone(), cfg1, tx1)).await.unwrap();
+        rx1.await.unwrap().expect("first open must succeed");
+
+        // Re-open same id but different cfg → AlreadyExists.
+        let (tx2, rx2) = oneshot::channel();
+        w.submit(Job::OpenAccount(def.clone(), cfg2, tx2)).await.unwrap();
+        let err = rx2.await.unwrap().expect_err("conflicting open must fail");
+        assert!(
+            matches!(err, talea_core::store::StoreError::AlreadyExists { .. }),
+            "expected AlreadyExists, got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn register_asset_appends_to_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(RwLock::new(BookState::default()));
+        let w = BookWriter::spawn(dir.path().to_path_buf(), Arc::clone(&state), 64)
+            .await
+            .unwrap();
+
+        let def = AssetDef {
+            id: AssetId::new("EUR"),
+            class: talea_core::types::AssetClass::Fiat,
+            precision: 2,
+            name: "Euro".into(),
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        w.submit(Job::RegisterAsset(def, reply_tx)).await.unwrap();
+        reply_rx.await.unwrap().expect("register asset must succeed");
+
+        // Exactly ONE AssetRegistered frame on disk.
+        let seg = crate::segment::SegmentSet::open(dir.path()).await.unwrap();
+        let frames = seg.scan_from(1, 1000).await.unwrap();
+        assert_eq!(frames.len(), 1, "one AssetRegistered frame expected");
+        assert!(
+            matches!(frames[0].event, talea_core::events::LedgerEvent::AssetRegistered(_)),
+            "expected AssetRegistered event",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Gap 2 — rejected drafts do not broadcast
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn rejected_draft_produces_no_broadcast() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = writer_with_accounts(dir.path()).await;
+        let mut rx = w.events.subscribe();
+
+        // Bad tx: ghost account → will be rejected.
+        let mut bad = tx("bad");
+        bad.postings[0].account = AccountId { book: Book("b".into()), path: "ghost".into() };
+
+        // Good tx: valid accounts.
+        let good = tx("good");
+
+        // Submit both concurrently so they may land in the same batch.
+        let (r_bad, r_good) = tokio::join!(w.commit(bad), w.commit(good));
+        assert!(r_bad.is_err(), "bad tx must be rejected");
+        let good_seq = r_good.expect("good tx must succeed").seq;
+
+        // The broadcast channel must yield exactly one event (the good seq).
+        let ev = rx.recv().await.expect("must receive one broadcast event");
+        assert_eq!(ev.seq, good_seq, "broadcast event must be the accepted tx");
+
+        // No further event within a short timeout — the rejected tx emits nothing.
+        let second = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            rx.recv(),
+        )
+        .await;
+        assert!(second.is_err(), "no second broadcast event expected after rejected draft");
     }
 }

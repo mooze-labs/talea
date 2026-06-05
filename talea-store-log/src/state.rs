@@ -6,6 +6,8 @@
 //! accepted by [`BookState::validate`], call [`Scratch::stage`] to project
 //! its effects into the overlay so later batchmates see the updated balances.
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use chrono::{DateTime, Utc};
 use talea_core::store::{AccountCfg, Committed, StoreError};
@@ -77,6 +79,16 @@ pub struct BookState {
     /// Per-asset lifetime (debits, credits) sums.
     pub sums: HashMap<AssetId, (i64, i64)>,
     pub last_at: Option<DateTime<Utc>>,
+    /// Single-writer guard: set to `true` when a `BookWriter` is spawned.
+    /// Cloned `BookState` values (e.g. snapshots) share the flag via `Arc`,
+    /// so a writer spawned from a snapshot will also see the flag. A
+    /// deserialized `BookState` gets a fresh `false` flag (via `default`).
+    #[serde(skip, default = "default_writer_attached")]
+    pub writer_attached: Arc<AtomicBool>,
+}
+
+fn default_writer_attached() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
 }
 
 impl Default for BookState {
@@ -88,6 +100,7 @@ impl Default for BookState {
             txids: HashMap::new(),
             sums: HashMap::new(),
             last_at: None,
+            writer_attached: Arc::new(AtomicBool::new(false)),
         }
     }
 }
