@@ -38,8 +38,10 @@
 //!
 //! # Rebuild
 //!
-//! `attach_dir` verifies every run's CRC.  Any failure, or a missing/corrupt
-//! Bloom file, triggers a full log scan via the caller-supplied iterator.
+//! `attach_dir` verifies every run's CRC.  Any CRC failure triggers a full
+//! log scan via the caller-supplied iterator.  The bloom is a pure in-memory
+//! cache rebuilt from runs at attach; nothing bloom-related is persisted,
+//! eliminating staleness windows.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -168,9 +170,6 @@ fn run_name(n: usize) -> String {
     format!("idem-{:06}.run", n)
 }
 
-/// Name for the Bloom persistence file.
-const BLOOM_FILE: &str = "idem-bloom.json";
-
 /// fsync the directory for dirent durability (mirrors snapshot.rs).
 fn fsync_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::File::open(dir)?.sync_all()
@@ -267,7 +266,11 @@ impl TieredIdem {
         }
     }
 
-    /// Attach a directory and load existing runs + Bloom filter from disk.
+    /// Attach a directory and load existing runs from disk, rebuilding the
+    /// Bloom filter in memory from the CRC-verified run contents.
+    ///
+    /// The bloom is a pure in-memory cache rebuilt from runs at attach; nothing
+    /// bloom-related is persisted, eliminating staleness windows.
     ///
     /// Returns an error only if the directory cannot be read.  Individual run
     /// CRC failures trigger a full rebuild from the caller-supplied log iterator.
@@ -295,7 +298,7 @@ impl TieredIdem {
         }
         run_paths.sort_by_key(|&(n, _)| n);
 
-        // Validate all runs; if any fail CRC, rebuild.
+        // Validate all runs; if any fail CRC, rebuild from the log.
         let mut all_valid = true;
         let mut metas: Vec<RunMeta> = Vec::new();
 
@@ -328,39 +331,10 @@ impl TieredIdem {
             }
         }
 
-        // Try to load the Bloom filter.
-        let bloom_path = dir.join(BLOOM_FILE);
-        // bloom_ok: true means bloom was loaded successfully OR no rebuild is needed.
-        //           false means bloom needs to be (re)built from the log.
-        //
-        // If the bloom file is absent, we always trigger a rebuild pass:
-        //   - fresh store / no spills: rebuild_fn returns empty → cheap no-op
-        //   - spills happened but bloom was deleted: rebuild from log
-        // Presence of a valid bloom file is the only way to skip the rebuild.
-        let bloom_ok = if bloom_path.exists() {
-            match tokio::fs::read(&bloom_path).await {
-                Ok(bytes) => match serde_json::from_slice::<Bloom>(&bytes) {
-                    Ok(b) => {
-                        self.bloom = b;
-                        true
-                    }
-                    Err(e) => {
-                        tracing::warn!(%e, "idem bloom parse failure — will rebuild");
-                        false
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(%e, "idem bloom read failure — will rebuild");
-                    false
-                }
-            }
-        } else {
-            // No bloom file — trigger rebuild.  For a fresh store the
-            // rebuild_fn returns [] and the bloom is initialised to empty.
-            false
-        };
-
-        if !all_valid || !bloom_ok {
+        // Trigger a rebuild from the log if any run failed CRC/read, or if
+        // there are no run files at all (either a fresh store — cheap empty
+        // rebuild — or runs were deleted after a crash).
+        if !all_valid || run_paths.is_empty() {
             // Rebuild: scan the full log for spilled keys (keys not in hot).
             tracing::info!(dir = %dir.display(), "rebuilding idem run files from log scan");
             let pairs = rebuild_fn().await?;
@@ -403,20 +377,31 @@ impl TieredIdem {
                         tracing::error!(%e, "failed to encode rebuilt idem run");
                     }
                 }
-
-                // Rebuild bloom from all runs.
-                let mut bloom = Bloom::new(sorted.len().max(self.cap));
-                for pair in &sorted {
-                    bloom.insert(&pair.0);
-                }
-                self.bloom = bloom;
-                persist_bloom(dir, &self.bloom).await;
-            } else {
-                // No spilled keys — empty bloom sized for cap.
-                self.bloom = Bloom::new(self.cap);
-                persist_bloom(dir, &self.bloom).await;
             }
         }
+
+        // Always rebuild the bloom in memory from the (now-valid) run metas.
+        // Runs are bounded (at most ~8 between merges) so reading them here is
+        // cheap and avoids any stale-bloom crash window.
+        let mut bloom = Bloom::new(self.cap);
+        for meta in &metas {
+            match tokio::fs::read(&meta.path).await {
+                Ok(bytes) => match decode_run(&bytes) {
+                    Ok(pairs) => {
+                        for (key, _) in &pairs {
+                            bloom.insert(key);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(path = %meta.path.display(), %e, "idem run decode during bloom rebuild — bloom may be incomplete");
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(path = %meta.path.display(), %e, "idem run read during bloom rebuild — bloom may be incomplete");
+                }
+            }
+        }
+        self.bloom = bloom;
 
         self.runs = metas;
         Ok(())
@@ -458,6 +443,9 @@ impl TieredIdem {
     /// Returns `None` if not found.  I/O errors on individual runs are logged
     /// as warnings and treated as misses (the log is the source of truth).
     pub async fn lookup_runs(&self, key: &str) -> Option<CommittedRec> {
+        #[cfg(test)]
+        test_hooks::RUN_READ_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         for meta in self.runs.iter().rev() {
             // Key-range early-out.
             if key < meta.key_range.0.as_str() || key > meta.key_range.1.as_str() {
@@ -576,9 +564,6 @@ impl TieredIdem {
             self.bloom.insert(key);
         }
 
-        // Persist the updated bloom.
-        persist_bloom(&self.runs_dir, &self.bloom).await;
-
         // Maybe merge runs.
         if self.runs.len() > 8 {
             self.merge_runs().await;
@@ -627,8 +612,14 @@ impl TieredIdem {
             a.0 == b.0
         });
 
-        // Use len as a fresh index to avoid clobbering any existing run-000000.
-        let merged_n = self.runs.len();
+        // Use next_run_n (max existing + 1) so the merged file never aliases
+        // a run that is still in self.runs and will be removed below.  Using
+        // self.runs.len() would collide on the second merge: after the first
+        // merge self.runs = [idem-000009.run] and len==1 → merged_n=1, but
+        // the second merge with runs=[9..17] (len=9) produces merged_n=9 which
+        // matches the idem-000009.run that was just read, then the removal loop
+        // deletes it → silent data loss.
+        let merged_n = next_run_n(&self.runs);
         let merged_path = self.runs_dir.join(run_name(merged_n));
 
         let bytes = match encode_run(&merged) {
@@ -662,13 +653,12 @@ impl TieredIdem {
             }]
         };
 
-        // Rebuild bloom from merged.
+        // Rebuild bloom in memory from merged.
         let mut bloom = Bloom::new(merged.len().max(self.cap));
         for (key, _) in &merged {
             bloom.insert(key);
         }
         self.bloom = bloom;
-        persist_bloom(&self.runs_dir, &self.bloom).await;
     }
 
     /// Number of run files.
@@ -703,20 +693,6 @@ fn next_run_n(existing: &[RunMeta]) -> usize {
         .max()
         .map(|n| n + 1)
         .unwrap_or(0)
-}
-
-async fn persist_bloom(dir: &Path, bloom: &Bloom) {
-    let bloom_path = dir.join(BLOOM_FILE);
-    match serde_json::to_vec(bloom) {
-        Ok(bytes) => {
-            if let Err(e) = tokio::fs::write(&bloom_path, &bytes).await {
-                tracing::error!(%e, "failed to persist idem bloom filter");
-            }
-        }
-        Err(e) => {
-            tracing::error!(%e, "failed to serialize idem bloom filter");
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -864,8 +840,12 @@ mod tests {
         let mut t = make_tiered(dir.path(), cap).await;
 
         // Insert and spill some keys so runs exist.
+        let mut spilled_key = String::new();
         for i in 0..8 {
             let key = format!("spilled-{i}");
+            if i == 0 {
+                spilled_key = key.clone();
+            }
             t.insert(key, make_rec(i as i64 + 1));
             if t.needs_flush() {
                 t.flush_spill().await;
@@ -879,10 +859,26 @@ mod tests {
         assert!(!t.bloom.might_contain(fresh_key),
             "bloom must not contain a key that was never inserted");
 
-        // get() must return None without touching disk.
-        // We verify by checking the bloom check alone — if bloom negative, disk is skipped.
+        // Reset the counter, then perform a bloom-negative get.
+        // RUN_READ_COUNT must stay at 0 — disk is skipped.
+        test_hooks::reset();
         let result = t.get(fresh_key).await;
         assert_eq!(result, None);
+        assert_eq!(
+            test_hooks::count(), 0,
+            "bloom-negative get must not call lookup_runs (disk skip)"
+        );
+
+        // A bloom-positive get (spilled key that IS in the bloom) must increment
+        // the counter, proving that lookup_runs is actually called for hits.
+        assert!(t.bloom.might_contain(&spilled_key),
+            "spilled_key must be in the bloom");
+        test_hooks::reset();
+        let _ = t.get(&spilled_key).await;
+        assert!(
+            test_hooks::count() > 0,
+            "bloom-positive get must call lookup_runs (counter should increment)"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -913,13 +909,13 @@ mod tests {
             recs.iter().filter(|(k, _)| !hot_keys.contains(k)).collect();
         assert!(!spilled_keys.is_empty(), "some keys must have been spilled");
 
-        // Phase 2: delete all run files + bloom.
+        // Phase 2: delete all run files (no bloom file to delete — bloom is never persisted).
         let entries: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| {
                 let name = e.file_name().into_string().unwrap_or_default();
-                name.ends_with(".run") || name == BLOOM_FILE
+                name.ends_with(".run")
             })
             .collect();
         for entry in entries {
@@ -999,7 +995,6 @@ mod tests {
                     for (key, _) in &spilled {
                         t.bloom.insert(key);
                     }
-                    persist_bloom(&t.runs_dir, &t.bloom).await;
                 }
             }
         }
@@ -1017,6 +1012,119 @@ mod tests {
                 found.as_ref().map(|r| r.seq),
                 Some(rec.seq),
                 "key {key} must still be found after merge"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // C1 regression: second merge must not clobber its output
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn second_merge_does_not_clobber_output() {
+        // C1 regression: with cap=2 and 40 bulk inserts, flush_spill is called
+        // ~39 times.  Auto-merge fires whenever runs.len() > 8.  With 40 bulk
+        // inserts the trace is: merge at flush 9, 19, 28, 35 (four merges),
+        // leaving 7 runs after the final flush.  The key invariant is:
+        //
+        //   1. Every live run file on disk MUST EXIST after each merge.
+        //   2. A key spilled BEFORE the first merge must still resolve via get().
+        //
+        // Before this fix, the second merge wrote its output to a path already
+        // occupied by a live run in self.runs, then the removal loop deleted
+        // that path — silently destroying the merged output.
+        let dir = tempfile::tempdir().unwrap();
+        let cap = 2usize;
+        let mut t = make_tiered(dir.path(), cap).await;
+
+        // Track the very first key inserted — it will be spilled before any merge.
+        let first_key = "first-key-ever";
+        let first_rec = make_rec(1);
+        t.insert(first_key.into(), first_rec.clone());
+
+        // Insert enough keys to trigger multiple auto-merges (needs >18 spill runs).
+        // With cap=2 each flush drains 1 key, so every insertion past the second
+        // triggers a flush and produces one run.
+        for seq in 2i64..42 {
+            let key = format!("bulk-{seq}");
+            t.insert(key, make_rec(seq));
+            if t.needs_flush() {
+                t.flush_spill().await;
+            }
+        }
+
+        // With 40 bulk inserts and cap=2: ~39 flushes, 4 auto-merges happen.
+        // After the last flush sequence (seq 36..41) we end up with 7 runs.
+        // Verify at least 1 run remains and all run files actually exist on disk.
+        assert!(
+            !t.runs.is_empty(),
+            "must have at least one run after sustained inserts"
+        );
+        for meta in &t.runs {
+            assert!(
+                meta.path.exists(),
+                "every live run file must exist on disk: {:?}",
+                meta.path
+            );
+        }
+
+        // A key spilled before the first merge must still be findable after
+        // multiple subsequent merges (the C1 clobber bug would lose it).
+        let found = t.get(first_key).await;
+        assert_eq!(
+            found.as_ref().map(|r| r.seq),
+            Some(first_rec.seq),
+            "key spilled before first merge must still resolve after subsequent merges"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // C2 regression: bloom rebuilt from runs on fresh attach, never stale
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn bloom_rebuilt_from_runs_on_attach_never_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let cap = 4usize;
+
+        // Phase 1: spill some keys.
+        let mut t = make_tiered(dir.path(), cap).await;
+        let mut spilled_keys: Vec<String> = Vec::new();
+        for i in 0..10 {
+            let key = format!("stale-test-{i:02}");
+            t.insert(key.clone(), make_rec(i as i64 + 1));
+            spilled_keys.push(key);
+            if t.needs_flush() {
+                t.flush_spill().await;
+            }
+        }
+        // Confirm some keys were actually spilled (not in hot).
+        let hot_keys: std::collections::HashSet<String> = t.hot.keys().cloned().collect();
+        let actually_spilled: Vec<&String> = spilled_keys
+            .iter()
+            .filter(|k| !hot_keys.contains(*k))
+            .collect();
+        assert!(!actually_spilled.is_empty(), "some keys must have been spilled to runs");
+
+        // Phase 2: simulate a "crash" by asserting there is no bloom artifact
+        // (the new design never writes one), then do a fresh attach_dir.
+        // Any idem-bloom.json from the old implementation would be a stale artifact;
+        // with the new design the file should not exist.
+        let bloom_artifact = dir.path().join("idem-bloom.json");
+        assert!(
+            !bloom_artifact.exists(),
+            "idem-bloom.json must not exist — bloom is never persisted"
+        );
+
+        // Phase 3: fresh TieredIdem, attach to the same dir.  The bloom must
+        // be rebuilt from the run files so all spilled keys are might_contain==true.
+        let mut t2 = TieredIdem::with_cap(cap);
+        t2.attach_dir(dir.path(), || async { Ok(vec![]) }).await.unwrap();
+
+        for key in &actually_spilled {
+            assert!(
+                t2.bloom.might_contain(key),
+                "after fresh attach bloom must contain spilled key {key:?}"
             );
         }
     }
