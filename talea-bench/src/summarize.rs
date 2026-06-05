@@ -115,13 +115,14 @@ fn summarize_run(run: &RunJson, rep_workers: usize, out: &mut Summary) -> Result
     Ok(())
 }
 
-/// CLI entry: read report files, write the two metric files.
+/// CLI entry: read report files, write the two metric files. Returns the
+/// (bigger, smaller) metric counts for the caller to report.
 pub fn run_summarize(
     rep_workers: usize,
     bigger_out: &Path,
     smaller_out: &Path,
     reports: &[PathBuf],
-) -> Result<(), String> {
+) -> Result<(usize, usize), String> {
     let mut runs = Vec::with_capacity(reports.len());
     for path in reports {
         let body = std::fs::read_to_string(path)
@@ -134,14 +135,7 @@ pub fn run_summarize(
     let summary = summarize_runs(&runs, rep_workers)?;
     write_metrics(bigger_out, &summary.bigger)?;
     write_metrics(smaller_out, &summary.smaller)?;
-    println!(
-        "wrote {} metrics to {} and {} metrics to {}",
-        summary.bigger.len(),
-        bigger_out.display(),
-        summary.smaller.len(),
-        smaller_out.display()
-    );
-    Ok(())
+    Ok((summary.bigger.len(), summary.smaller.len()))
 }
 
 fn write_metrics(path: &Path, metrics: &[Metric]) -> Result<(), String> {
@@ -337,16 +331,19 @@ mod tests {
         let bigger = dir.path().join("summary-bigger.json");
         let smaller = dir.path().join("summary-smaller.json");
 
-        run_summarize(8, &bigger, &smaller, &[report]).unwrap();
+        let (nb, ns) = run_summarize(8, &bigger, &smaller, &[report]).unwrap();
+        assert_eq!((nb, ns), (1, 1));
 
         let b: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&bigger).unwrap()).unwrap();
+        assert_eq!(b.as_array().unwrap().len(), 1);
         assert_eq!(b[0]["name"], "post-one-book/sqlite/peak-throughput");
         assert_eq!(b[0]["unit"], "ops/s");
         assert_eq!(b[0]["value"], 503.5);
 
         let s: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&smaller).unwrap()).unwrap();
+        assert_eq!(s.as_array().unwrap().len(), 1);
         assert_eq!(s[0]["name"], "post-one-book/sqlite/p99-post@c8");
         assert_eq!(s[0]["value"], 24800.0);
     }
@@ -362,5 +359,20 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("missing.json"), "got: {err}");
+    }
+
+    #[test]
+    fn run_summarize_reports_bad_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, b"not json").unwrap();
+        let err = run_summarize(
+            8,
+            &dir.path().join("b.json"),
+            &dir.path().join("s.json"),
+            &[bad],
+        )
+        .unwrap_err();
+        assert!(err.contains("parsing"), "got: {err}");
     }
 }
