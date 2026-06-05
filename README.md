@@ -127,6 +127,17 @@ Server (`talead serve` / `talea-server`, via env or `.env`):
 
 Client (`talea` CLI): `TALEA_URL`, `TALEA_TOKEN`.
 
+## Horizontal scaling
+
+Multiple server instances can share one Postgres with no coordination beyond the database itself:
+
+- **Writes:** the per-book counter-row lock arbitrates commits across instances — sequences stay gapless and dense no matter which instance accepts a write.
+- **Timestamps:** `committed_at` comes from the database clock (`clock_timestamp()` captured under the counter lock), not the instance clock, so it is monotonic vs seq within a book even with instance clock skew, and `as_of` reads stay precise. One time source also means one clock to keep healthy: run NTP on the database host — a clock step-back there is the only remaining way to observe a non-monotonic `committed_at`. (Ledgers written by versions that used the instance clock may show one such blip at the upgrade boundary; rows are not rewritten.)
+- **Events:** SSE subscriptions fan out via LISTEN/NOTIFY — a subscriber on one instance sees commits accepted by any instance, and clients resume by cursor, so switching instances behind a load balancer is seamless.
+- **PgBouncer:** subscriptions hold a dedicated `LISTEN` session (`PgListener`), which requires **session pooling mode**. Transaction or statement pooling silently breaks event subscriptions; commits and reads work in any mode. Point `TALEA_DB_URL` at a session-mode pool or directly at Postgres.
+
+The contract is pinned by `talea-client/tests/multi_instance.rs` (two real routers, one Postgres, exercised through the SDK) and the conformance suite's `committed_at_is_monotonic_per_book`.
+
 ## Metrics
 
 Set `TALEA_METRICS_BIND` to expose Prometheus metrics on a separate listener (`GET /metrics`). Labels never carry user-controlled values: route labels are the route templates (`/v1/books/{book}/...`), so cardinality stays bounded no matter how many books exist.
