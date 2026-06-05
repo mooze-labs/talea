@@ -9,6 +9,7 @@ pub use frame::WireEvent;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -56,6 +57,11 @@ pub struct LogTaleaStore {
     registry: Arc<RwLock<HashMap<AssetId, AssetDef>>>,
     books: Arc<RwLock<HashMap<String, BookWriter>>>,
     batch_max: usize,
+    /// Set to `true` by `shutdown()` before draining writers.  Any subsequent
+    /// call into `book_writer()` or `register_asset()` checks this flag first
+    /// and returns an error rather than silently recreating writers over an
+    /// empty `BookState` while a newly-opened store may own the directory.
+    shut_down: AtomicBool,
     /// Held for the process lifetime. `shutdown(&self)` takes the file out so
     /// the advisory lock is released before another `open` on the same dir
     /// (e.g. in the same test process). Drop of the struct releases it otherwise.
@@ -76,9 +82,9 @@ fn io_str(s: impl Into<String>) -> StoreError {
 
 /// Validate a book name is safe to use as a directory component.
 fn validate_book_name(book: &str) -> Result<(), StoreError> {
-    if book.contains('/') || book.contains('\\') || book == ".." || book.contains("..") {
+    if book.is_empty() || book.contains('/') || book.contains('\\') || book == ".." || book.contains("..") {
         return Err(io_str(format!(
-            "invalid book name {book:?}: must not contain '/', '\\', or '..'"
+            "invalid book name {book:?}: must not be empty or contain '/', '\\', or '..'"
         )));
     }
     Ok(())
@@ -183,6 +189,7 @@ impl LogTaleaStore {
             registry: Arc::new(RwLock::new(registry)),
             books: Arc::new(RwLock::new(books_map)),
             batch_max,
+            shut_down: AtomicBool::new(false),
             _lock: Mutex::new(Some(lock_file)),
         })
     }
@@ -196,6 +203,9 @@ impl LogTaleaStore {
     /// layer constrains book names further, but the store provides a last-line
     /// defence here too.
     async fn book_writer(&self, book: &str) -> Result<BookWriter, StoreError> {
+        if self.shut_down.load(Ordering::SeqCst) {
+            return Err(io_str("store has been shut down"));
+        }
         validate_book_name(book)?;
 
         // Fast path: read lock.
@@ -235,6 +245,11 @@ impl LogTaleaStore {
     /// Note: takes `&self` (not `self`) so it can be called without consuming
     /// the store. The caller is expected to drop the `LogTaleaStore` afterward.
     pub async fn shutdown(&self) {
+        // Signal all subsequent calls that the store is no longer usable.
+        // Must happen BEFORE draining writers so any concurrent book_writer()
+        // call racing with drain sees the flag and returns an error.
+        self.shut_down.store(true, Ordering::SeqCst);
+
         // Drain the books map → we now hold the only remaining clones.
         let writers: Vec<BookWriter> = {
             let mut guard = self.books.write().await;
@@ -270,6 +285,9 @@ impl Store for LogTaleaStore {
     /// operation, not a hot path), so a write-lock held across an await is
     /// acceptable here. Documented explicitly.
     async fn register_asset(&self, asset: &AssetDef) -> Result<(), StoreError> {
+        if self.shut_down.load(Ordering::SeqCst) {
+            return Err(io_str("store has been shut down"));
+        }
         // Hold the write lock for the full operation to serialize concurrent
         // registrations of the same new asset (see race note above).
         let mut reg = self.registry.write().await;
@@ -631,5 +649,49 @@ mod tests {
         assert!(matches!(out[1], Err(talea_core::store::StoreError::UnknownAccount(_))));
         assert!(out[2].is_ok());
         assert_eq!(out[0].as_ref().unwrap().seq + 1, out[2].as_ref().unwrap().seq, "gapless across the reject");
+    }
+
+    #[tokio::test]
+    async fn store_use_after_shutdown_fails_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seeded(dir.path()).await;
+
+        // Commit one tx so there's real state to inspect.
+        store.commit(&mk_tx("k1", 10)).await.unwrap();
+
+        store.shutdown().await;
+
+        // commit must return Err, not panic, not succeed.
+        let commit_res = store.commit(&mk_tx("k2", 5)).await;
+        assert!(commit_res.is_err(), "commit after shutdown must fail");
+
+        // open_account must return Err.
+        let cfg = AccountCfg { normal_side: None, min_balance: None };
+        let open_res = store.open_account(&cash_def(), &cfg).await;
+        assert!(open_res.is_err(), "open_account after shutdown must fail");
+
+        // balance reads via book_writer — after shutdown the books map is empty,
+        // so book_writer returns the shut_down error before it can recreate anything.
+        let bal_res = store.balance(&cash_def().id, None).await;
+        assert!(bal_res.is_err(), "balance after shutdown must fail");
+    }
+
+    #[tokio::test]
+    async fn empty_book_name_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LogTaleaStore::open(dir.path()).await.unwrap();
+        store.register_asset(&usd()).await.unwrap();
+
+        // An empty book name must be rejected by validate_book_name, which
+        // book_writer calls.  Using commit (which calls book_writer) is the
+        // simplest exerciser.
+        let mut tx = mk_tx("empty-book", 1);
+        tx.book = Book("".into());
+        tx.postings[0].account.book = Book("".into());
+        tx.postings[1].account.book = Book("".into());
+        let res = store.commit(&tx).await;
+        assert!(res.is_err(), "empty book name must be rejected");
+        let err_msg = format!("{:?}", res.unwrap_err());
+        assert!(err_msg.contains("invalid book name"), "error should mention invalid book name: {err_msg}");
     }
 }
