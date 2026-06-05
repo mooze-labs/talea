@@ -98,18 +98,25 @@ fn summarize_run(run: &RunJson, rep_workers: usize, out: &mut Summary) -> Result
         return Ok(());
     }
 
-    let rep = valid
-        .iter()
-        .find(|s| s.workers == rep_workers)
-        .ok_or_else(|| format!("{tag}: no valid step with workers == {rep_workers}"))?;
-    let mut kinds: Vec<_> = rep.latency.keys().collect();
-    kinds.sort();
-    for kind in kinds {
-        out.smaller.push(Metric {
-            name: format!("{tag}/p99-{kind}@c{rep_workers}"),
-            unit: "us".into(),
-            value: rep.latency[kind].p99_us as f64,
-        });
+    // Scenarios may emit several steps at the rep concurrency (reads: one per
+    // endpoint). Emit p99 for each; kinds keep the names unique, and the
+    // duplicate-name guard catches any collision loudly.
+    let reps: Vec<_> = valid.iter().filter(|s| s.workers == rep_workers).collect();
+    if reps.is_empty() {
+        return Err(format!(
+            "{tag}: no valid step with workers == {rep_workers}"
+        ));
+    }
+    for rep in reps {
+        let mut kinds: Vec<_> = rep.latency.keys().collect();
+        kinds.sort();
+        for kind in kinds {
+            out.smaller.push(Metric {
+                name: format!("{tag}/p99-{kind}@c{rep_workers}"),
+                unit: "us".into(),
+                value: rep.latency[kind].p99_us as f64,
+            });
+        }
     }
 
     Ok(())
@@ -359,6 +366,23 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("missing.json"), "got: {err}");
+    }
+
+    #[test]
+    fn p99_covers_every_step_at_rep_workers() {
+        // reads emits one step per endpoint at the same concurrency; all of
+        // them must reach the trend, not just the first.
+        let mut balance = step("balance/c8", 8, 5000.0, 800);
+        balance.latency = HashMap::from([("balance".to_string(), lat(800))]);
+        let mut history = step("history/c8", 8, 900.0, 4000);
+        history.latency = HashMap::from([("history".to_string(), lat(4000))]);
+        let runs = vec![run("reads", "sqlite", vec![balance, history])];
+        let s = summarize_runs(&runs, 8).unwrap();
+        assert_eq!(s.smaller.len(), 2);
+        assert_eq!(s.smaller[0].name, "reads/sqlite/p99-balance@c8");
+        assert_eq!(s.smaller[0].value, 800.0);
+        assert_eq!(s.smaller[1].name, "reads/sqlite/p99-history@c8");
+        assert_eq!(s.smaller[1].value, 4000.0);
     }
 
     #[test]
