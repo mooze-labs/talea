@@ -191,17 +191,20 @@ async fn load_pending(
     Ok(out)
 }
 
-/// Write phase: claim the per-book seq, apply balances (one UNNEST upsert),
-/// then the transaction row, postings (one UNNEST insert), the event row,
-/// and the notify. Every statement here runs while the book-counter lock is
-/// held. Runs entirely inside the caller's transaction or savepoint.
+/// Write phase: claim the per-book seq + commit timestamp from the DB clock,
+/// apply balances (one UNNEST upsert), then the transaction row, postings
+/// (one UNNEST insert), the event row, and the notify. Every statement here
+/// runs while the book-counter lock is held. Runs entirely inside the
+/// caller's transaction or savepoint.
 async fn write_transaction(
     db: &mut DbTx<'_, Postgres>,
     transaction: &Transaction,
     pending: &[Pending],
 ) -> Result<Committed, StoreError> {
-    let seq = next_seq(db, &transaction.book.0).await?;
-    let at = ledger_now();
+    // Each draft in a batch claims its own (seq, at) pair under the counter
+    // lock inside its savepoint; the DB-clock monotonicity invariant therefore
+    // extends to group commits automatically — no per-instance clock needed.
+    let (seq, at) = next_seq(db, &transaction.book.0).await?;
 
     let b_keys: Vec<String> = pending.iter().map(|p| p.account.to_key()).collect();
     let b_assets: Vec<String> = pending
@@ -414,21 +417,42 @@ async fn commit_in_savepoint(
     }
 }
 
-/// Claim the next per-book sequence number. The upsert's row lock on the
-/// counter is held until the surrounding transaction commits or rolls back,
-/// so concurrent same-book writers serialize here and an aborted commit
-/// releases its claimed seq atomically => gapless, dense 1..N per book.
-async fn next_seq(db: &mut DbTx<'_, Postgres>, book: &str) -> Result<Seq, StoreError> {
+/// Claim the next per-book sequence number and the commit timestamp.
+///
+/// The upsert's row lock on the counter is held until the surrounding
+/// transaction commits or rolls back, so concurrent same-book writers
+/// serialize here and an aborted commit releases its claimed seq
+/// atomically => gapless, dense 1..N per book.
+///
+/// The timestamp is `clock_timestamp()` evaluated in the RETURNING
+/// projection — captured *while holding the counter lock*, on the DB
+/// host's clock. Same-book writers serialize on exactly that lock, so
+/// `(seq, at)` is jointly monotonic per book no matter how many server
+/// instances commit concurrently; instance clock skew is irrelevant.
+/// Postgres timestamptz is natively microsecond-precision, so the value
+/// round-trips identically through its own read-back (the invariant
+/// `commit_is_idempotent` enforces — see `talea_core::store::ledger_now`).
+///
+/// The first-ever insert for a book has no row to lock; two concurrent
+/// first-inserts serialize on the primary-key uniqueness check instead —
+/// the loser blocks until the winner COMMITS, then takes the DO UPDATE
+/// branch, so its later-evaluated `clock_timestamp()` cannot precede the
+/// winner's. Don't refactor the upsert into separate INSERT + UPDATE
+/// statements; this serialization is load-bearing for `as_of` correctness.
+async fn next_seq(
+    db: &mut DbTx<'_, Postgres>,
+    book: &str,
+) -> Result<(Seq, DateTime<Utc>), StoreError> {
     let row = sqlx::query(
         "INSERT INTO books (book, next_seq) VALUES ($1, 1)
          ON CONFLICT (book) DO UPDATE SET next_seq = books.next_seq + 1
-         RETURNING next_seq",
+         RETURNING next_seq, clock_timestamp() AS at",
     )
     .bind(book)
     .fetch_one(&mut **db)
     .await
     .map_err(io_err)?;
-    Ok(row.get::<i64, _>("next_seq"))
+    Ok((row.get::<i64, _>("next_seq"), row.get("at")))
 }
 
 async fn insert_event(
@@ -572,8 +596,7 @@ impl Store for PgTaleaStore {
         .await
         .map_err(io_err)?;
 
-        let seq = next_seq(&mut db, SYSTEM_BOOK).await?;
-        let at = ledger_now();
+        let (seq, at) = next_seq(&mut db, SYSTEM_BOOK).await?;
         insert_event(
             &mut db,
             SYSTEM_BOOK,
@@ -642,8 +665,7 @@ impl Store for PgTaleaStore {
         .await
         .map_err(io_err)?;
 
-        let seq = next_seq(&mut db, &def.id.book.0).await?;
-        let at = ledger_now();
+        let (seq, at) = next_seq(&mut db, &def.id.book.0).await?;
         insert_event(
             &mut db,
             &def.id.book.0,

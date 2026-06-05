@@ -51,3 +51,4 @@ sqlite_test!(commit_batch_dedups_within_batch);
 sqlite_test!(commit_batch_dedups_against_prior_commit);
 sqlite_test!(commit_batch_rejects_reserved_book);
 sqlite_test!(commit_batch_empty_returns_empty);
+sqlite_test!(committed_at_is_monotonic_per_book);

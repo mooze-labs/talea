@@ -757,3 +757,63 @@ pub async fn commit_batch_rejects_reserved_book(store: &impl Store) {
 pub async fn commit_batch_empty_returns_empty(store: &impl Store) {
     assert!(store.commit_batch(&[]).await.is_empty());
 }
+
+// --- multi-instance timestamp contract ----------------------------------
+
+/// `at` must be non-decreasing in seq order within a book. The timestamp is
+/// captured while holding the per-book counter lock, on a single time
+/// source (the DB clock for postgres, the process clock for embedded
+/// sqlite), so `(seq, at)` is jointly monotonic — the property `as_of`
+/// precision depends on. Guards against any backend capturing time outside
+/// the lock or from a per-instance clock.
+pub async fn committed_at_is_monotonic_per_book(store: &impl Store) {
+    let (book, asset_id) = setup_book(store).await;
+    for i in 0..4 {
+        store
+            .commit(&transfer(
+                &book,
+                &format!("mono-{i}"),
+                "deposits",
+                "cash",
+                &asset_id,
+                1,
+            ))
+            .await
+            .unwrap();
+    }
+    // A burst of interleaved commits for contention. How much real
+    // concurrency this exercises is backend-dependent: the sqlite
+    // conformance harness pools a single connection, so the burst
+    // serializes at the pool; on postgres the three commits race for
+    // the per-book counter-row lock — the scenario that matters for
+    // DB-clock timestamps.
+    let tx_a = transfer(&book, "burst-a", "deposits", "cash", &asset_id, 2);
+    let tx_b = transfer(&book, "burst-b", "deposits", "cash", &asset_id, 3);
+    let tx_c = transfer(&book, "burst-c", "deposits", "cash", &asset_id, 4);
+    let (a, b, c) = futures::join!(
+        store.commit(&tx_a),
+        store.commit(&tx_b),
+        store.commit(&tx_c),
+    );
+    a.unwrap();
+    b.unwrap();
+    c.unwrap();
+
+    let events = store
+        .read_events(&Book(book.clone()), 1, 100)
+        .await
+        .unwrap();
+    // 2 account_opened from setup + 7 commits
+    assert_eq!(events.len(), 9);
+    for pair in events.windows(2) {
+        assert!(pair[0].seq < pair[1].seq, "events not in seq order");
+        assert!(
+            pair[0].at <= pair[1].at,
+            "committed_at regressed: seq {} at {:?} > seq {} at {:?}",
+            pair[0].seq,
+            pair[0].at,
+            pair[1].seq,
+            pair[1].at
+        );
+    }
+}
