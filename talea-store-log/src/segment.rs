@@ -15,7 +15,7 @@ use talea_core::types::Seq;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-use crate::frame::{WireEvent, decode_frame, HEADER_LEN};
+use crate::frame::{HEADER_LEN, WireEvent, decode_frame};
 
 pub const DEFAULT_SEGMENT_MAX: u64 = 128 * 1024 * 1024;
 
@@ -193,10 +193,9 @@ impl SegmentCatalog {
     ) -> std::io::Result<WireEvent> {
         let path = {
             let guard = self.0.read().unwrap();
-            guard
-                .get(&segment_base)
-                .cloned()
-                .ok_or_else(|| std::io::Error::other(format!("unknown segment base {segment_base}")))?
+            guard.get(&segment_base).cloned().ok_or_else(|| {
+                std::io::Error::other(format!("unknown segment base {segment_base}"))
+            })?
         };
 
         let mut file = File::open(&path).await?;
@@ -225,7 +224,7 @@ impl SegmentCatalog {
             Err(e) => {
                 return Err(std::io::Error::other(format!(
                     "decode error at offset {offset}: {e}"
-                )))
+                )));
             }
         };
 
@@ -244,8 +243,8 @@ impl SegmentCatalog {
 #[derive(Debug)]
 enum Validation {
     Clean,
-    Truncate(u64),    // truncate to this byte length
-    Corrupt(u64),     // corruption found at this offset
+    Truncate(u64), // truncate to this byte length
+    Corrupt(u64),  // corruption found at this offset
 }
 
 fn segment_name(base: Seq) -> String {
@@ -336,9 +335,10 @@ impl SegmentSet {
         let mut segments: BTreeMap<Seq, PathBuf> = BTreeMap::new();
         let mut rd = tokio::fs::read_dir(dir).await?;
         while let Some(entry) = rd.next_entry().await? {
-            let name = entry.file_name().into_string().map_err(|_| {
-                std::io::Error::other("non-UTF-8 filename in segment dir")
-            })?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| std::io::Error::other("non-UTF-8 filename in segment dir"))?;
             if let Some(base) = parse_base(&name) {
                 segments.insert(base, entry.path());
             }
@@ -508,14 +508,16 @@ impl SegmentSet {
         offset: u64,
         expected_seq: Seq,
     ) -> std::io::Result<WireEvent> {
-        self.catalog.read_at(segment_base, offset, expected_seq).await
+        self.catalog
+            .read_at(segment_base, offset, expected_seq)
+            .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame::{encode_frame, WireEvent};
+    use crate::frame::{WireEvent, encode_frame};
     use talea_core::events::LedgerEvent;
     use talea_core::store::AccountCfg;
     use talea_core::types::*;
@@ -526,11 +528,17 @@ mod tests {
             at: talea_core::store::ledger_now(),
             event: LedgerEvent::AccountOpened {
                 def: AccountDef {
-                    id: AccountId { book: Book("b".into()), path: format!("a{seq}") },
+                    id: AccountId {
+                        book: Book("b".into()),
+                        path: format!("a{seq}"),
+                    },
                     asset: AssetId::new("USD"),
                     kind: AccountKind::Asset,
                 },
-                cfg: AccountCfg { normal_side: None, min_balance: None },
+                cfg: AccountCfg {
+                    normal_side: None,
+                    min_balance: None,
+                },
             },
         }
     }
@@ -544,7 +552,10 @@ mod tests {
         }
         seg.sync().await.unwrap();
         let got = seg.scan_from(1, 100).await.unwrap();
-        assert_eq!(got.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            got.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
         let page = seg.scan_from(3, 2).await.unwrap();
         assert_eq!(page.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![3, 4]);
     }
@@ -577,7 +588,12 @@ mod tests {
             seg.sync().await.unwrap();
         }
         // tear the last frame: chop 5 bytes off the only segment
-        let path = std::fs::read_dir(dir.path()).unwrap().next().unwrap().unwrap().path();
+        let path = std::fs::read_dir(dir.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
         let len = std::fs::metadata(&path).unwrap().len();
         let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         f.set_len(len - 5).unwrap();
@@ -602,7 +618,10 @@ mod tests {
             seg.sync().await.unwrap();
         }
         // flip a byte in the FIRST (sealed, non-final) segment
-        let mut paths: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().path()).collect();
+        let mut paths: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
         paths.sort();
         let mut bytes = std::fs::read(&paths[0]).unwrap();
         let mid = bytes.len() / 2;
@@ -647,14 +666,22 @@ mod tests {
             .path();
         {
             use std::io::Write;
-            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
             f.write_all(&torn_fragment).unwrap();
         }
 
         // Reopen: validate must detect the torn payload and truncate.
         let seg = SegmentSet::open(dir.path()).await.unwrap();
         let got = seg.scan_from(1, 100).await.unwrap();
-        assert_eq!(got.len(), 3, "torn 4th frame must be truncated; got {} frames", got.len());
+        assert_eq!(
+            got.len(),
+            3,
+            "torn 4th frame must be truncated; got {} frames",
+            got.len()
+        );
 
         let actual_len = std::fs::metadata(&path).unwrap().len();
         assert_eq!(
@@ -679,7 +706,10 @@ mod tests {
 
         for (wire, (seg_base, offset)) in &pairs {
             let from_disk = seg.read_at(*seg_base, *offset, wire.seq).await.unwrap();
-            assert_eq!(from_disk.seq, wire.seq, "read_at must return the same seq at the recorded pos");
+            assert_eq!(
+                from_disk.seq, wire.seq,
+                "read_at must return the same seq at the recorded pos"
+            );
             // Verify the event type round-trips too.
             let ok = matches!(
                 (&wire.event, &from_disk.event),
@@ -847,17 +877,32 @@ mod tests {
 
         // All pre-rotation frames must be visible.
         let got = seg.scan_from(1, 100).await.unwrap();
-        assert_eq!(got.len(), 3, "expected 3 pre-rotation frames, got {}", got.len());
+        assert_eq!(
+            got.len(),
+            3,
+            "expected 3 pre-rotation frames, got {}",
+            got.len()
+        );
 
         // next_pos must point to the (empty) rotated segment.
         let (base, off) = seg.next_pos();
-        assert_eq!(base, pre_rotation_base, "expected rotated base {pre_rotation_base}, got {base}");
+        assert_eq!(
+            base, pre_rotation_base,
+            "expected rotated base {pre_rotation_base}, got {base}"
+        );
         assert_eq!(off, 0, "new segment must start at offset 0");
 
         // Appending to the empty segment must work.
-        seg.append(&encode_frame(&ev(rotated_base)).unwrap()).await.unwrap();
+        seg.append(&encode_frame(&ev(rotated_base)).unwrap())
+            .await
+            .unwrap();
         seg.sync().await.unwrap();
         let all = seg.scan_from(1, 100).await.unwrap();
-        assert_eq!(all.len(), 4, "expected 4 frames after append, got {}", all.len());
+        assert_eq!(
+            all.len(),
+            4,
+            "expected 4 frames after append, got {}",
+            all.len()
+        );
     }
 }

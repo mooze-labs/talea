@@ -86,7 +86,8 @@ pub async fn write_snapshot(dir: &Path, state: &BookState, last_seq: Seq) -> std
 
     // Step 4: fsync the directory so the new dirent is durable.
     let dir_owned = dir.to_path_buf();
-    tokio::task::spawn_blocking(move || fsync_dir(&dir_owned)).await
+    tokio::task::spawn_blocking(move || fsync_dir(&dir_owned))
+        .await
         .map_err(|e| std::io::Error::other(format!("spawn_blocking join: {e}")))??;
 
     // Prune old snapshots; keep the two newest.
@@ -212,7 +213,10 @@ mod tests {
     /// all the interesting fields (balances, idem, txids, sums) are populated.
     fn make_state() -> BookState {
         let mut st = BookState::default();
-        let id = AccountId { book: Book("b".into()), path: "cash".into() };
+        let id = AccountId {
+            book: Book("b".into()),
+            path: "cash".into(),
+        };
         let asset = AssetId::new("USD");
         st.accounts.insert(
             id.to_key(),
@@ -222,7 +226,10 @@ mod tests {
                     asset: asset.clone(),
                     kind: AccountKind::Asset,
                 },
-                cfg: AccountCfg { normal_side: Some(Direction::Debit), min_balance: Some(0) },
+                cfg: AccountCfg {
+                    normal_side: Some(Direction::Debit),
+                    min_balance: Some(0),
+                },
                 raw_balance: 42,
                 updated_seq: 1,
                 postings: PostingIndex::default(),
@@ -232,7 +239,11 @@ mod tests {
         let at = talea_core::store::ledger_now();
         st.idem.insert(
             "idem-key".into(),
-            CommittedRec { txid: TxId(txid), seq: 1, at },
+            CommittedRec {
+                txid: TxId(txid),
+                seq: 1,
+                at,
+            },
         );
         st.txids.insert(txid, (1, (1, 0)));
         *st.sums.entry(asset).or_insert((0, 0)) = (42, 0);
@@ -252,31 +263,52 @@ mod tests {
         write_snapshot(dir.path(), &st, seq).await.unwrap();
 
         let loaded = load_latest(dir.path()).await.unwrap();
-        assert!(loaded.is_some(), "load_latest must return Some after writing a snapshot");
+        assert!(
+            loaded.is_some(),
+            "load_latest must return Some after writing a snapshot"
+        );
         let (got, got_seq) = loaded.unwrap();
 
         assert_eq!(got_seq, seq, "returned seq must match written seq");
-        assert_eq!(got.next_seq, st.next_seq, "next_seq must survive round-trip");
-        assert_eq!(got.accounts.len(), st.accounts.len(), "accounts must survive");
+        assert_eq!(
+            got.next_seq, st.next_seq,
+            "next_seq must survive round-trip"
+        );
+        assert_eq!(
+            got.accounts.len(),
+            st.accounts.len(),
+            "accounts must survive"
+        );
         // Balance round-trips.
-        let id = AccountId { book: Book("b".into()), path: "cash".into() };
+        let id = AccountId {
+            book: Book("b".into()),
+            path: "cash".into(),
+        };
         assert_eq!(
             got.accounts[&id.to_key()].raw_balance,
             st.accounts[&id.to_key()].raw_balance,
             "raw_balance must survive round-trip"
         );
         // Idempotency key survives (in the hot map — the dir is not attached in this test).
-        assert!(got.idem.hot.contains_key("idem-key"), "idem must survive round-trip");
+        assert!(
+            got.idem.hot.contains_key("idem-key"),
+            "idem must survive round-trip"
+        );
         let orig_rec = &st.idem.hot["idem-key"];
         let got_rec = &got.idem.hot["idem-key"];
         assert_eq!(got_rec.seq, orig_rec.seq, "idem record seq must match");
         // txids survive.
-        assert_eq!(got.txids.len(), st.txids.len(), "txids must survive round-trip");
+        assert_eq!(
+            got.txids.len(),
+            st.txids.len(),
+            "txids must survive round-trip"
+        );
         // sums survive.
         assert_eq!(got.sums, st.sums, "sums must survive round-trip");
         // writer_attached is a fresh false flag after deserialization (serde skip + default).
         assert!(
-            !got.writer_attached.load(std::sync::atomic::Ordering::Acquire),
+            !got.writer_attached
+                .load(std::sync::atomic::Ordering::Acquire),
             "deserialized writer_attached must be false (fresh unattached flag)"
         );
     }
@@ -304,9 +336,15 @@ mod tests {
             .await
             .expect("load_latest must return Ok even when newest snapshot is corrupt");
 
-        assert!(loaded.is_some(), "load_latest must return Some (the seq-10 snapshot)");
+        assert!(
+            loaded.is_some(),
+            "load_latest must return Some (the seq-10 snapshot)"
+        );
         let (_, got_seq) = loaded.unwrap();
-        assert_eq!(got_seq, 10, "must fall back to seq-10 snapshot, got seq={got_seq}");
+        assert_eq!(
+            got_seq, 10,
+            "must fall back to seq-10 snapshot, got seq={got_seq}"
+        );
     }
 
     #[tokio::test]
@@ -359,9 +397,15 @@ mod tests {
         // load_latest must return the seq-5 snapshot, not error and not treat
         // the .tmp as a valid snapshot file.
         let loaded = load_latest(dir.path()).await.unwrap();
-        assert!(loaded.is_some(), "load_latest must return Some (seq-5 snapshot)");
+        assert!(
+            loaded.is_some(),
+            "load_latest must return Some (seq-5 snapshot)"
+        );
         let (_, got_seq) = loaded.unwrap();
-        assert_eq!(got_seq, 5, "must return the seq-5 snapshot, ignoring the .tmp file");
+        assert_eq!(
+            got_seq, 5,
+            "must return the seq-5 snapshot, ignoring the .tmp file"
+        );
     }
 
     /// When ALL snapshot files are corrupt, `load_latest` must return
@@ -387,7 +431,13 @@ mod tests {
         }
 
         let result = load_latest(dir.path()).await;
-        assert!(result.is_ok(), "load_latest must return Ok even with all snapshots corrupt");
-        assert!(result.unwrap().is_none(), "load_latest must return None when all snapshots are corrupt");
+        assert!(
+            result.is_ok(),
+            "load_latest must return Ok even with all snapshots corrupt"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "load_latest must return None when all snapshots are corrupt"
+        );
     }
 }

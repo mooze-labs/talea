@@ -178,12 +178,12 @@ async fn apply_ops(
     store: &LogTaleaStore,
     ops: &[Op],
 ) -> (
-    HashMap<String, (i64, i64)>,      // balances
-    Vec<(String, i64, i64)>,          // trial_balance rows
-    HashMap<String, Committed>,       // committed idem results
-    HashMap<String, Transaction>,     // idem_key → original tx (for replay)
-    Vec<i64>,                         // event_seqs
-    Vec<String>,                      // opened account paths
+    HashMap<String, (i64, i64)>,  // balances
+    Vec<(String, i64, i64)>,      // trial_balance rows
+    HashMap<String, Committed>,   // committed idem results
+    HashMap<String, Transaction>, // idem_key → original tx (for replay)
+    Vec<i64>,                     // event_seqs
+    Vec<String>,                  // opened account paths
 ) {
     // Register USD asset (must always succeed first).
     store.register_asset(&usd()).await.unwrap();
@@ -307,7 +307,14 @@ async fn apply_ops(
         .unwrap_or_default();
     let event_seqs: Vec<i64> = events.iter().map(|e| e.seq).collect();
 
-    (balances, trial_balance, idem_committed, idem_tx, event_seqs, opened_paths)
+    (
+        balances,
+        trial_balance,
+        idem_committed,
+        idem_tx,
+        event_seqs,
+        opened_paths,
+    )
 }
 
 /// Capture observables from an already-open store after reopen.
@@ -352,18 +359,12 @@ async fn capture_after_reopen(
             };
             match store.commit(&replay_tx).await {
                 Ok(c) => {
-                    idem_results.insert(
-                        key.clone(),
-                        (c.seq, c.txid.0.as_bytes().to_vec()),
-                    );
+                    idem_results.insert(key.clone(), (c.seq, c.txid.0.as_bytes().to_vec()));
                 }
                 Err(e) => {
                     // A failure here means idempotency was lost — we record a
                     // sentinel so the assertion will fail with a clear diff.
-                    idem_results.insert(
-                        key.clone(),
-                        (0, format!("ERROR: {e}").into_bytes()),
-                    );
+                    idem_results.insert(key.clone(), (0, format!("ERROR: {e}").into_bytes()));
                     let _ = original_committed; // suppress unused warning
                 }
             }
@@ -428,10 +429,7 @@ async fn open_store(dir: &Path) -> LogTaleaStore {
 fn delete_idem_runs(book_dir: &Path) {
     if let Ok(rd) = fs::read_dir(book_dir) {
         for entry in rd.flatten() {
-            let name = entry
-                .file_name()
-                .into_string()
-                .unwrap_or_default();
+            let name = entry.file_name().into_string().unwrap_or_default();
             if name.starts_with("idem-") && name.ends_with(".run") {
                 let _ = fs::remove_file(entry.path());
             }
@@ -512,7 +510,11 @@ async fn run_scenario(
     let after = capture_after_reopen(&store2, &idem_committed, &idem_tx, &opened_paths).await;
     store2.shutdown().await;
 
-    ScenarioResult { before, after, label }
+    ScenarioResult {
+        before,
+        after,
+        label,
+    }
 }
 
 fn assert_scenario_equal(result: &ScenarioResult) {

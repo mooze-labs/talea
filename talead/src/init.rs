@@ -66,7 +66,10 @@ fn parse_log_store_opts() -> Result<talea_store_log::LogStoreOptions, Box<dyn st
 fn parse_log_store_opts_from(
     get: impl Fn(&str) -> Option<String>,
 ) -> Result<talea_store_log::LogStoreOptions, Box<dyn std::error::Error>> {
-    fn parse_opt<T>(var: &'static str, val: Option<String>) -> Result<Option<T>, Box<dyn std::error::Error>>
+    fn parse_opt<T>(
+        var: &'static str,
+        val: Option<String>,
+    ) -> Result<Option<T>, Box<dyn std::error::Error>>
     where
         T: std::str::FromStr,
         T::Err: std::fmt::Display,
@@ -78,7 +81,8 @@ fn parse_log_store_opts_from(
         .transpose()
     }
 
-    let snapshot_every = parse_opt::<u64>("TALEA_LOG_SNAPSHOT_EVERY", get("TALEA_LOG_SNAPSHOT_EVERY"))?;
+    let snapshot_every =
+        parse_opt::<u64>("TALEA_LOG_SNAPSHOT_EVERY", get("TALEA_LOG_SNAPSHOT_EVERY"))?;
     let idem_hot_cap = parse_opt::<usize>("TALEA_LOG_IDEM_HOT_CAP", get("TALEA_LOG_IDEM_HOT_CAP"))?;
     let segment_max = parse_opt::<u64>("TALEA_LOG_SEGMENT_MAX", get("TALEA_LOG_SEGMENT_MAX"))?;
 
@@ -114,10 +118,9 @@ pub async fn connect_store(db_url: &str) -> Result<Arc<dyn Store>, Box<dyn std::
         Ok(Arc::new(store))
     } else if let Some(path) = db_url.strip_prefix("log://") {
         let log_opts = parse_log_store_opts()?;
-        let store =
-            talea_store_log::LogTaleaStore::open_with(std::path::Path::new(path), log_opts)
-                .await
-                .map_err(|e| format!("couldn't open log store at {path}: {e}"))?;
+        let store = talea_store_log::LogTaleaStore::open_with(std::path::Path::new(path), log_opts)
+            .await
+            .map_err(|e| format!("couldn't open log store at {path}: {e}"))?;
         Ok(Arc::new(store))
     } else {
         Err(format!(
@@ -187,7 +190,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let url = format!("log://{}", dir.path().display());
         let store = connect_store(&url).await.unwrap();
-        assert!(store.asset(&talea_core::types::AssetId::new("X")).await.unwrap().is_none());
+        assert!(
+            store
+                .asset(&talea_core::types::AssetId::new("X"))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     // ---- log store option parsing ------------------------------------------
@@ -267,7 +276,13 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(store.asset(&talea_core::types::AssetId::new("X")).await.unwrap().is_none());
+        assert!(
+            store
+                .asset(&talea_core::types::AssetId::new("X"))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -280,7 +295,10 @@ mod tests {
             }
         })
         .unwrap();
-        assert_eq!(opts.snapshot_every, 0, "0 should disable snapshots, not error");
+        assert_eq!(
+            opts.snapshot_every, 0,
+            "0 should disable snapshots, not error"
+        );
     }
 
     #[test]

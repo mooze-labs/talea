@@ -22,10 +22,12 @@ use tokio::sync::RwLock;
 
 use talea_core::events::LedgerEvent;
 use talea_core::store::{
-    AccountCfg, BalanceSnapshot, Committed, PostingRecord, Sequenced, Store, StoreError,
-    StoredTransaction, TrialBalanceRow, SYSTEM_BOOK,
+    AccountCfg, BalanceSnapshot, Committed, PostingRecord, SYSTEM_BOOK, Sequenced, Store,
+    StoreError, StoredTransaction, TrialBalanceRow,
 };
-use talea_core::types::{AccountDef, AccountId, Amount, AssetDef, AssetId, Book, Direction, Seq, Transaction, TxId};
+use talea_core::types::{
+    AccountDef, AccountId, Amount, AssetDef, AssetId, Book, Direction, Seq, Transaction, TxId,
+};
 
 use crate::idem_spill::DEFAULT_IDEM_HOT_CAP;
 use crate::segment::SegmentSet;
@@ -114,7 +116,12 @@ fn io_str(s: impl Into<String>) -> StoreError {
 
 /// Validate a book name is safe to use as a directory component.
 fn validate_book_name(book: &str) -> Result<(), StoreError> {
-    if book.is_empty() || book.contains('/') || book.contains('\\') || book == ".." || book.contains("..") {
+    if book.is_empty()
+        || book.contains('/')
+        || book.contains('\\')
+        || book == ".."
+        || book.contains("..")
+    {
         return Err(io_str(format!(
             "invalid book name {book:?}: must not be empty or contain '/', '\\', or '..'"
         )));
@@ -147,7 +154,9 @@ impl LogTaleaStore {
         // 1. Create dirs.
         tokio::fs::create_dir_all(dir).await.map_err(io_err)?;
         let books_dir = dir.join("books");
-        tokio::fs::create_dir_all(&books_dir).await.map_err(io_err)?;
+        tokio::fs::create_dir_all(&books_dir)
+            .await
+            .map_err(io_err)?;
 
         // 2. Acquire exclusive advisory lock.
         let lock_path = dir.join("LOCK");
@@ -232,7 +241,10 @@ impl LogTaleaStore {
             st.idem.cap = opts.idem_hot_cap;
 
             // Replay the tail starting at `replay_from` (full replay when no snapshot).
-            let pairs = seg.scan_with_pos(replay_from, usize::MAX).await.map_err(io_err)?;
+            let pairs = seg
+                .scan_with_pos(replay_from, usize::MAX)
+                .await
+                .map_err(io_err)?;
 
             // Fold into the (possibly snapshot-seeded) BookState.
             // Use try_apply_transaction (not apply_transaction) so a corrupt or
@@ -425,9 +437,7 @@ impl LogTaleaStore {
             .await?
             .ok_or_else(|| io_str(format!("book {book:?} not found for snapshot_now")))?;
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        writer
-            .submit(Job::Snapshot(reply_tx))
-            .await?;
+        writer.submit(Job::Snapshot(reply_tx)).await?;
         reply_rx
             .await
             .map_err(|_| io_str("book writer gone during snapshot_now"))?
@@ -506,7 +516,9 @@ impl Store for LogTaleaStore {
         // Submit to the _system writer.
         let writer = self.book_writer(SYSTEM_BOOK).await?;
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        writer.submit(Job::RegisterAsset(asset.clone(), reply_tx)).await?;
+        writer
+            .submit(Job::RegisterAsset(asset.clone(), reply_tx))
+            .await?;
         reply_rx
             .await
             .map_err(|_| io_str("book writer gone during register_asset"))??;
@@ -542,7 +554,9 @@ impl Store for LogTaleaStore {
 
         let writer = self.book_writer(&def.id.book.0).await?;
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        writer.submit(Job::OpenAccount(def.clone(), cfg.clone(), reply_tx)).await?;
+        writer
+            .submit(Job::OpenAccount(def.clone(), cfg.clone(), reply_tx))
+            .await?;
         reply_rx
             .await
             .map_err(|_| io_str("book writer gone during open_account"))?
@@ -626,7 +640,10 @@ impl Store for LogTaleaStore {
         for ps in &pending {
             let i = ps.tx_idx;
             // pending only contains entries whose book resolved Ok; unwrap is safe.
-            let writer = writers_cache[&ps.book].as_ref().expect("pending entry must have Ok writer").clone();
+            let writer = writers_cache[&ps.book]
+                .as_ref()
+                .expect("pending entry must have Ok writer")
+                .clone();
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
             let submit_result = writer.submit(Job::Commit(txs[i].clone(), reply_tx)).await;
             match submit_result {
@@ -718,7 +735,10 @@ impl Store for LogTaleaStore {
                         updated_seq: 0,
                     })
                 } else {
-                    let entry = acct.postings.get(idx - 1).expect("partition_point_at guaranteed in-range");
+                    let entry = acct
+                        .postings
+                        .get(idx - 1)
+                        .expect("partition_point_at guaranteed in-range");
                     let eff = effective(entry.raw_after, &acct.cfg.normal_side);
                     Ok(BalanceSnapshot {
                         amount: Amount::new(eff, acct.def.asset.clone()),
@@ -908,9 +928,8 @@ impl Store for LogTaleaStore {
                     }
                     if let LedgerEvent::TransactionPosted(tx) = wire.event {
                         for posting in &tx.postings {
-                            let entry = sums
-                                .entry(posting.amount.asset().clone())
-                                .or_insert((0, 0));
+                            let entry =
+                                sums.entry(posting.amount.asset().clone()).or_insert((0, 0));
                             match posting.direction {
                                 Direction::Debit => {
                                     entry.0 = entry.0.saturating_add(posting.amount.minor())
@@ -989,7 +1008,11 @@ impl Store for LogTaleaStore {
             .collect())
     }
 
-    fn subscribe(&self, book: &Book, from: Seq) -> BoxStream<'static, Result<Sequenced<LedgerEvent>, StoreError>> {
+    fn subscribe(
+        &self,
+        book: &Book,
+        from: Seq,
+    ) -> BoxStream<'static, Result<Sequenced<LedgerEvent>, StoreError>> {
         // subscribe is sync — clone everything we need into the stream before returning.
         let books = Arc::clone(&self.books);
         let dir = self.dir.clone();
@@ -1132,9 +1155,9 @@ impl Store for LogTaleaStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::writer::BookWriter;
     use talea_core::store::{AccountCfg, Store};
     use talea_core::types::*;
-    use crate::writer::BookWriter;
 
     fn mk_tx(key: &str, minor: i64) -> Transaction {
         Transaction {
@@ -1142,12 +1165,18 @@ mod tests {
             book: Book("b".into()),
             postings: vec![
                 Posting {
-                    account: AccountId { book: Book("b".into()), path: "cash".into() },
+                    account: AccountId {
+                        book: Book("b".into()),
+                        path: "cash".into(),
+                    },
                     amount: Amount::new(minor, AssetId::new("USD")),
                     direction: Direction::Debit,
                 },
                 Posting {
-                    account: AccountId { book: Book("b".into()), path: "rev".into() },
+                    account: AccountId {
+                        book: Book("b".into()),
+                        path: "rev".into(),
+                    },
                     amount: Amount::new(minor, AssetId::new("USD")),
                     direction: Direction::Credit,
                 },
@@ -1160,21 +1189,43 @@ mod tests {
     }
 
     fn usd() -> AssetDef {
-        AssetDef { id: AssetId::new("USD"), class: AssetClass::Fiat, precision: 2, name: "Dollar".into() }
+        AssetDef {
+            id: AssetId::new("USD"),
+            class: AssetClass::Fiat,
+            precision: 2,
+            name: "Dollar".into(),
+        }
     }
 
     fn cash_def() -> AccountDef {
-        AccountDef { id: AccountId { book: Book("b".into()), path: "cash".into() }, asset: AssetId::new("USD"), kind: AccountKind::Asset }
+        AccountDef {
+            id: AccountId {
+                book: Book("b".into()),
+                path: "cash".into(),
+            },
+            asset: AssetId::new("USD"),
+            kind: AccountKind::Asset,
+        }
     }
 
     fn rev_def() -> AccountDef {
-        AccountDef { id: AccountId { book: Book("b".into()), path: "rev".into() }, asset: AssetId::new("USD"), kind: AccountKind::Income }
+        AccountDef {
+            id: AccountId {
+                book: Book("b".into()),
+                path: "rev".into(),
+            },
+            asset: AssetId::new("USD"),
+            kind: AccountKind::Income,
+        }
     }
 
     async fn seeded(dir: &std::path::Path) -> LogTaleaStore {
         let store = LogTaleaStore::open(dir).await.unwrap();
         store.register_asset(&usd()).await.unwrap();
-        let cfg = AccountCfg { normal_side: None, min_balance: None };
+        let cfg = AccountCfg {
+            normal_side: None,
+            min_balance: None,
+        };
         store.open_account(&cash_def(), &cfg).await.unwrap();
         store.open_account(&rev_def(), &cfg).await.unwrap();
         store
@@ -1192,12 +1243,23 @@ mod tests {
         let bal = store.balance(&cash_def().id, None).await.unwrap();
         assert_eq!(bal.amount.minor(), 25);
         assert_eq!(bal.updated_seq, 3); // seq 1 = cash open, 2 = rev open, 3 = tx
-        assert_eq!(store.asset(&AssetId::new("USD")).await.unwrap(), Some(usd()));
+        assert_eq!(
+            store.asset(&AssetId::new("USD")).await.unwrap(),
+            Some(usd())
+        );
         // idempotency survives restart: replay returns the prior commit
         let replay = store.commit(&mk_tx("k1", 25)).await.unwrap();
         assert_eq!(replay.seq, 3);
         // and balance is unchanged
-        assert_eq!(store.balance(&cash_def().id, None).await.unwrap().amount.minor(), 25);
+        assert_eq!(
+            store
+                .balance(&cash_def().id, None)
+                .await
+                .unwrap()
+                .amount
+                .minor(),
+            25
+        );
     }
 
     #[tokio::test]
@@ -1225,7 +1287,10 @@ mod tests {
     async fn open_account_requires_registered_asset_and_real_book() {
         let dir = tempfile::tempdir().unwrap();
         let store = LogTaleaStore::open(dir.path()).await.unwrap();
-        let cfg = AccountCfg { normal_side: None, min_balance: None };
+        let cfg = AccountCfg {
+            normal_side: None,
+            min_balance: None,
+        };
         assert!(matches!(
             store.open_account(&cash_def(), &cfg).await,
             Err(talea_core::store::StoreError::UnknownAsset(_))
@@ -1248,9 +1313,16 @@ mod tests {
         let txs = vec![mk_tx("a", 1), bad, mk_tx("b", 2)];
         let out = store.commit_batch(&txs).await;
         assert!(out[0].is_ok());
-        assert!(matches!(out[1], Err(talea_core::store::StoreError::UnknownAccount(_))));
+        assert!(matches!(
+            out[1],
+            Err(talea_core::store::StoreError::UnknownAccount(_))
+        ));
         assert!(out[2].is_ok());
-        assert_eq!(out[0].as_ref().unwrap().seq + 1, out[2].as_ref().unwrap().seq, "gapless across the reject");
+        assert_eq!(
+            out[0].as_ref().unwrap().seq + 1,
+            out[2].as_ref().unwrap().seq,
+            "gapless across the reject"
+        );
     }
 
     #[tokio::test]
@@ -1268,7 +1340,10 @@ mod tests {
         assert!(commit_res.is_err(), "commit after shutdown must fail");
 
         // open_account must return Err.
-        let cfg = AccountCfg { normal_side: None, min_balance: None };
+        let cfg = AccountCfg {
+            normal_side: None,
+            min_balance: None,
+        };
         let open_res = store.open_account(&cash_def(), &cfg).await;
         assert!(open_res.is_err(), "open_account after shutdown must fail");
 
@@ -1294,7 +1369,10 @@ mod tests {
         let res = store.commit(&tx).await;
         assert!(res.is_err(), "empty book name must be rejected");
         let err_msg = format!("{:?}", res.unwrap_err());
-        assert!(err_msg.contains("invalid book name"), "error should mention invalid book name: {err_msg}");
+        assert!(
+            err_msg.contains("invalid book name"),
+            "error should mention invalid book name: {err_msg}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1365,12 +1443,18 @@ mod tests {
             book: Book("b".into()),
             postings: vec![
                 Posting {
-                    account: AccountId { book: Book("b".into()), path: "cash".into() },
+                    account: AccountId {
+                        book: Book("b".into()),
+                        path: "cash".into(),
+                    },
                     amount: Amount::new(i64::MAX, AssetId::new("USD")),
                     direction: Direction::Debit,
                 },
                 Posting {
-                    account: AccountId { book: Book("b".into()), path: "rev".into() },
+                    account: AccountId {
+                        book: Book("b".into()),
+                        path: "rev".into(),
+                    },
                     amount: Amount::new(i64::MAX, AssetId::new("USD")),
                     direction: Direction::Credit,
                 },
@@ -1447,18 +1531,39 @@ mod tests {
         // as_of before t1: no postings → amount 0, updated_seq 0.
         let before = times[0] - chrono::Duration::microseconds(1);
         let snap = store.balance(&cash, Some(before)).await.unwrap();
-        assert_eq!(snap.amount.minor(), 0, "as_of before first commit must be 0");
-        assert_eq!(snap.updated_seq, 0, "as_of before first commit: updated_seq must be 0");
+        assert_eq!(
+            snap.amount.minor(),
+            0,
+            "as_of before first commit must be 0"
+        );
+        assert_eq!(
+            snap.updated_seq, 0,
+            "as_of before first commit: updated_seq must be 0"
+        );
 
         // as_of = t2 (second commit's at) → balance 30 (10+20), updated_seq = 4.
         let snap2 = store.balance(&cash, Some(times[1])).await.unwrap();
-        assert_eq!(snap2.amount.minor(), 30, "balance after 2 commits must be 30");
-        assert_eq!(snap2.updated_seq, 4, "updated_seq after 2 commits must be 4");
+        assert_eq!(
+            snap2.amount.minor(),
+            30,
+            "balance after 2 commits must be 30"
+        );
+        assert_eq!(
+            snap2.updated_seq, 4,
+            "updated_seq after 2 commits must be 4"
+        );
 
         // as_of = t3 → 60, updated_seq 5.
         let snap3 = store.balance(&cash, Some(times[2])).await.unwrap();
-        assert_eq!(snap3.amount.minor(), 60, "balance after 3 commits must be 60");
-        assert_eq!(snap3.updated_seq, 5, "updated_seq after 3 commits must be 5");
+        assert_eq!(
+            snap3.amount.minor(),
+            60,
+            "balance after 3 commits must be 60"
+        );
+        assert_eq!(
+            snap3.updated_seq, 5,
+            "updated_seq after 3 commits must be 5"
+        );
     }
 
     #[tokio::test]
@@ -1497,7 +1602,11 @@ mod tests {
         let (store, txids, times) = history_fixture(dir.path()).await;
 
         // transaction(txid of 2nd commit) → seq 4, at == t2.
-        let stored = store.transaction(&txids[1]).await.unwrap().expect("should find 2nd tx");
+        let stored = store
+            .transaction(&txids[1])
+            .await
+            .unwrap()
+            .expect("should find 2nd tx");
         assert_eq!(stored.seq, 4, "2nd transaction must have seq 4");
         assert_eq!(stored.at, times[1], "committed_at must match");
         assert_eq!(stored.transaction.idempotency_key.0, "tx2");
@@ -1587,12 +1696,20 @@ mod tests {
         let seqs: Vec<Seq> = evs.iter().map(|e| e.seq).collect();
 
         // Must have exactly seqs 1..=5 and no more.
-        assert_eq!(seqs, vec![1, 2, 3, 4, 5], "read_events must return exactly seqs 1..=ceiling");
+        assert_eq!(
+            seqs,
+            vec![1, 2, 3, 4, 5],
+            "read_events must return exactly seqs 1..=ceiling"
+        );
 
         // Also verify from= skipping still applies within the ceiling.
         let evs_from4 = store.read_events(&book, 4, 100).await.unwrap();
         let seqs_from4: Vec<Seq> = evs_from4.iter().map(|e| e.seq).collect();
-        assert_eq!(seqs_from4, vec![4, 5], "from=4 must return seqs 4 and 5 only");
+        assert_eq!(
+            seqs_from4,
+            vec![4, 5],
+            "from=4 must return seqs 4 and 5 only"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1656,7 +1773,10 @@ mod tests {
         // --- Verify snapshot file exists for book "b" ---
         let book_dir = dir.path().join("books").join("b");
         let snap = snapshot::load_latest(&book_dir).await.unwrap();
-        assert!(snap.is_some(), "snapshot must exist for book b after snapshot_now + shutdown");
+        assert!(
+            snap.is_some(),
+            "snapshot must exist for book b after snapshot_now + shutdown"
+        );
         let (_, snap_seq) = snap.unwrap();
         assert!(
             snap_seq >= snap_seq_at_least,
@@ -1708,9 +1828,14 @@ mod tests {
 
         let orig_seqs: Vec<talea_core::types::Seq>;
         {
-            let store = LogTaleaStore::open_with(dir.path(), opts.clone()).await.unwrap();
+            let store = LogTaleaStore::open_with(dir.path(), opts.clone())
+                .await
+                .unwrap();
             store.register_asset(&usd()).await.unwrap();
-            let cfg = AccountCfg { normal_side: None, min_balance: None };
+            let cfg = AccountCfg {
+                normal_side: None,
+                min_balance: None,
+            };
             store.open_account(&cash_def(), &cfg).await.unwrap();
             store.open_account(&rev_def(), &cfg).await.unwrap();
 
@@ -1718,7 +1843,10 @@ mod tests {
             let n = 20usize;
             let mut seqs = Vec::with_capacity(n);
             for i in 0..n {
-                let c = store.commit(&mk_tx(&format!("spill-idem-{i:03}"), 1)).await.unwrap();
+                let c = store
+                    .commit(&mk_tx(&format!("spill-idem-{i:03}"), 1))
+                    .await
+                    .unwrap();
                 seqs.push(c.seq);
             }
 
@@ -1758,8 +1886,14 @@ mod tests {
         let store = LogTaleaStore::open(dir.path()).await.unwrap();
 
         let mut stream = store.subscribe(&Book("../evil".into()), 1);
-        let first = stream.next().await.expect("stream must yield at least one item");
-        assert!(first.is_err(), "first item must be Err for invalid book name");
+        let first = stream
+            .next()
+            .await
+            .expect("stream must yield at least one item");
+        assert!(
+            first.is_err(),
+            "first item must be Err for invalid book name"
+        );
 
         // The directory that would have been created by path traversal must not exist.
         let evil_dir = dir.path().join("evil");
@@ -1812,8 +1946,13 @@ mod tests {
         if c1.at == c2.at {
             let book = Book("b".into());
             let tb = store.trial_balance(&book, Some(c1.at)).await.unwrap();
-            assert!(!tb.is_empty(), "trial balance must not be empty after two commits");
-            let usd_row = tb.iter().find(|r| r.asset == AssetId::new("USD"))
+            assert!(
+                !tb.is_empty(),
+                "trial balance must not be empty after two commits"
+            );
+            let usd_row = tb
+                .iter()
+                .find(|r| r.asset == AssetId::new("USD"))
                 .expect("USD row must exist");
             // Both txs debit cash and credit rev by 50 and 75 → total debits 125.
             assert_eq!(
@@ -1828,7 +1967,9 @@ mod tests {
             // includes both.
             let book = Book("b".into());
             let tb = store.trial_balance(&book, Some(c2.at)).await.unwrap();
-            let usd_row = tb.iter().find(|r| r.asset == AssetId::new("USD"))
+            let usd_row = tb
+                .iter()
+                .find(|r| r.asset == AssetId::new("USD"))
                 .expect("USD row must exist");
             assert_eq!(
                 usd_row.debits, 125,
