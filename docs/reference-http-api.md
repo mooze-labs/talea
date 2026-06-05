@@ -14,13 +14,26 @@ For *why* the API behaves this way, see [Architecture & design](explanation-arch
 
 ## Authentication
 
-When `TALEA_API_TOKEN` is set, every `/v1` route requires:
+When any token is configured (`TALEA_API_TOKEN`, `TALEA_TOKENS_FILE`, or both), every `/v1` route requires:
 
 ```
 Authorization: Bearer <token>
 ```
 
-The scheme is case-insensitive per RFC 7235 (`bearer`, `BEARER` both work); the token is compared in constant time. Missing or wrong token → `401 {"error":"unauthorized"}`. When the env var is unset the server runs in open mode (dev) and the header is ignored. `/health`, `/docs`, and `/openapi.json` are always open.
+The scheme is case-insensitive per RFC 7235 (`bearer`, `BEARER` both work); the token is compared in constant time. Missing or wrong token → `401 {"error":"unauthorized"}`. With neither variable set the server runs in open mode (dev) and the header is ignored. `/health`, `/docs`, and `/openapi.json` are always open.
+
+### Scoped tokens
+
+`TALEA_TOKENS_FILE` points at a TOML file that confines each token to a set of books with `ro` or `rw` access:
+
+```toml
+[tokens.payments]
+token = "s3cret-1"
+books = ["payments"]   # exact book names, or ["*"] for all books
+access = "rw"          # "ro" = read-only
+```
+
+A valid token used outside its scope answers `403 {"error":"forbidden","book":"..."}` — distinct from `401` (bad token). The book is checked wherever it lives: the path for reads and SSE, the request body for `POST /v1/accounts` and `POST /v1/transactions`, and the loaded transaction for `GET /v1/transactions/{tx_id}`. Registering assets requires an `rw` token scoped `["*"]` (the registry is global; the `403` carries `"book":"*"`). `TALEA_API_TOKEN` remains equivalent to an unnamed all-books `rw` entry.
 
 ## Routes
 
@@ -44,7 +57,7 @@ Request (`AssetDraft`):
 - `class`: `"fiat"` or `"crypto"`. Fiat assets must not set `network`/`native_id`; crypto assets require `network` (e.g. `"ethereum"`) and may set `native_id` (contract address / chain asset id).
 - `precision`: decimal places used to render balances. **Immutable once set.**
 
-Responses: `204` on success · `400 invalid_draft` · `401` · `409 already_exists`.
+Responses: `204` on success · `400 invalid_draft` · `401` · `403 forbidden` (requires an `rw` token scoped `["*"]`) · `409 already_exists` · `415` (content-type is not `application/json`).
 
 ### `POST /v1/accounts` — open an account
 
@@ -68,7 +81,7 @@ Request (`AccountDraft`):
 - `min_balance`: optional commit-time floor on the normal-side-adjusted balance. `0` means "never overdraw" for every account kind. Omit for unconstrained.
 - Account paths may contain `:`. Book names starting with `_` are reserved for the ledger.
 
-Responses: `204` · `400 invalid_draft` · `401` · `404 unknown_asset` · `409 already_exists`.
+Responses: `204` · `400 invalid_draft` · `401` · `403 forbidden` (token scope does not cover the draft's book) · `404 unknown_asset` · `409 already_exists` · `415`.
 
 ### `POST /v1/transactions` — post a transaction
 
@@ -105,7 +118,7 @@ Response `200` (`Posted`):
 }
 ```
 
-Other responses: `400 unbalanced | invalid_amount | invalid_draft` · `401` · `404 unknown_account` · `409 constraint_violation` · `429 overloaded` (+ `Retry-After: 1` — the per-book write queue is full; retry with the **same** idempotency key).
+Other responses: `400 unbalanced | invalid_amount | invalid_draft` · `401` · `403 forbidden` (token scope does not cover the draft's book) · `404 unknown_account` · `409 constraint_violation` · `415` · `429 overloaded` (+ `Retry-After: 1` — the per-book write queue is full; retry with the **same** idempotency key).
 
 ### `GET /v1/books/{book}/accounts/{path}/balance?as_of=`
 
@@ -123,7 +136,7 @@ Response `200` (`BalanceView`):
 }
 ```
 
-`balance` is normal-side adjusted (a liability holding 100 reads `"+100"`, not `-100`) and rendered with the asset's precision. Other responses: `401` · `404 unknown_account`.
+`balance` is normal-side adjusted (a liability holding 100 reads `"+100"`, not `-100`) and rendered with the asset's precision. Other responses: `401` · `403 forbidden` (book outside the token's scope) · `404 unknown_account`.
 
 ### `GET /v1/books/{book}/accounts/{path}/history?after_seq=&limit=`
 
@@ -147,11 +160,11 @@ Response `200` (`Paged<PostingView>`):
 }
 ```
 
-`next` is the cursor for the following page, `null` when exhausted. One transaction's postings never split across pages.
+`next` is the cursor for the following page, `null` when exhausted. One transaction's postings never split across pages. Other responses: `400 invalid_draft` (bad `after_seq`/`limit`) · `401` · `403 forbidden` (book outside the token's scope) · `404 unknown_account`.
 
 ### `GET /v1/transactions/{tx_id}`
 
-Committed transaction by UUID. Response `200` (`TransactionView`): `tx_id`, `book`, `seq`, `at`, `postings` (as above), `external_refs`, `metadata`. Other responses: `400 invalid_draft` (not a UUID) · `401` · `404 not_found`.
+Committed transaction by UUID. Response `200` (`TransactionView`): `tx_id`, `book`, `seq`, `at`, `postings` (as above), `external_refs`, `metadata`. Other responses: `400 invalid_draft` (not a UUID) · `401` · `403 forbidden` (the loaded transaction's book is outside the token's scope) · `404 not_found` (unknown id, for every caller — a `403` therefore confirms the id exists; a deliberate operator-mode trade for debuggability).
 
 ### `GET /v1/books/{book}/trial-balance?as_of=`
 
@@ -169,7 +182,7 @@ Response `200` (`TrialBalance`):
 }
 ```
 
-Every line balances when the ledger does.
+Every line balances when the ledger does. Other responses: `401` · `403 forbidden` (book outside the token's scope).
 
 ### `GET /v1/books/{book}/events?from=` — SSE event stream
 
@@ -182,7 +195,7 @@ id: 3
 data: {"seq":3,"at":"2026-06-04T12:00:00.123456Z","kind":"transaction_posted","payload":{...}}
 ```
 
-Resume: reconnect with `Last-Event-ID` set to the last seq you processed. Delivery is at-least-once — dedupe on `seq`. A stream error arrives as an SSE `error` event followed by close; reconnect with your cursor. A malformed `?from=` returns a `400 invalid_draft` envelope.
+Resume: reconnect with `Last-Event-ID` set to the last seq you processed. Delivery is at-least-once — dedupe on `seq`. A stream error arrives as an SSE `error` event followed by close; reconnect with your cursor. A malformed `?from=` returns a `400 invalid_draft` envelope; a book outside the token's scope returns `403 forbidden` before any stream output.
 
 On Postgres, each subscription pins one database connection for its lifetime (LISTEN/NOTIFY) — size `TALEA_DB_POOL` accordingly. On SQLite, subscriptions only see commits made by the **same process**.
 
@@ -209,6 +222,7 @@ Every error — including malformed JSON, bad query parameters, wrong content ty
 | `invalid_amount` | 400 | `amount` | Amount ≤ 0 or overflow |
 | `asset_mismatch` | 400 | `account`, `account_asset`, `asset` | Posting's asset ≠ account's asset |
 | `unauthorized` | 401 | — | Missing/invalid bearer token |
+| `forbidden` | 403 | `book` | Valid token, but its scope does not cover this book (`"*"` = the global asset registry) |
 | `unknown_asset` | 404 | `asset` | Asset not registered |
 | `unknown_account` | 404 | `account` | Account not open |
 | `not_found` | 404 | `what` | Transaction id not found |
@@ -227,7 +241,8 @@ All shedding and timeouts assume clients retry with the same idempotency key —
 |---|---|---|
 | `TALEA_DB_URL` | — (required) | `postgres://...` or `sqlite://path.db` (`:memory:` is rejected) |
 | `TALEA_BIND` | `127.0.0.1:8080` | API listener |
-| `TALEA_API_TOKEN` | unset (open mode) | Bearer token for `/v1` |
+| `TALEA_API_TOKEN` | unset (open mode) | Bearer token for `/v1`; equivalent to an unnamed all-books `rw` entry |
+| `TALEA_TOKENS_FILE` | unset | TOML file of per-book scoped tokens (see [Authentication](#authentication)) |
 | `TALEA_DB_POOL` | `10` | DB pool size; each Postgres SSE subscriber pins one connection |
 | `TALEA_MAX_INFLIGHT` | `256` | Admission limit; excess sheds `503` |
 | `TALEA_WRITE_QUEUE_DEPTH` | `256` | Per-book write queue; full → `429` |

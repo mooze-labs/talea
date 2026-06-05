@@ -9,7 +9,7 @@ Two layers, deliberately separate:
 
 ## Routes
 
-All `/v1` routes require `Authorization: Bearer <token>` when `TALEA_API_TOKEN` is set; unset means OPEN dev mode, logged loudly. Errors are a tagged JSON envelope: `{"error":"unbalanced", ...}`.
+All `/v1` routes require `Authorization: Bearer <token>` when a token is configured — `TALEA_API_TOKEN` (one all-books token) or `TALEA_TOKENS_FILE` (per-book scoped tokens; out-of-scope requests answer `403 forbidden`). Neither set means OPEN dev mode, logged loudly. Errors are a tagged JSON envelope: `{"error":"unbalanced", ...}`.
 
 | Route | What it does |
 |---|---|
@@ -31,9 +31,13 @@ The crate ships a `talea-server` binary configured purely from the environment, 
 |---|---|---|
 | `TALEA_DB_URL` | required | `postgres://...` or `sqlite://path.db` (`:memory:` is rejected) |
 | `TALEA_BIND` | `127.0.0.1:8080` | Listen address |
-| `TALEA_API_TOKEN` | unset | Bearer token; unset means OPEN dev mode |
+| `TALEA_API_TOKEN` | unset | Bearer token; equivalent to an unnamed all-books `rw` entry |
+| `TALEA_TOKENS_FILE` | unset | TOML file of per-book scoped tokens (see the workspace README's "Scoped tokens") |
 | `TALEA_DB_POOL` | `10` | Pool size. On Postgres each SSE subscriber pins one connection: size for subscribers + workers |
 | `TALEA_MAX_INFLIGHT` | `256` | In-flight request cap; excess sheds as 503 |
+| `TALEA_WRITE_QUEUE_DEPTH` | `256` | Per-book write queue length; a full queue answers 429 + `Retry-After` |
+| `TALEA_WRITE_BATCH_MAX` | `64` | Max drafts group-committed in one DB transaction per book |
+| `TALEA_METRICS_BIND` | unset | Optional Prometheus listener; unset = no metrics endpoint |
 
 Store selection is by URL scheme. The server owns pool sizing so admission control (acquire timeout → 503) is configurable in one place. Overload responses pair with the idempotency design: retrying with the same key is always safe, and the client SDK does it automatically.
 
