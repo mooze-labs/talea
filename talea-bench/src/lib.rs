@@ -28,6 +28,33 @@ pub struct Ctx {
     pub progress: Progress,
 }
 
+/// Ask the target server which store backend it runs — the
+/// `x-talea-backend` header on `/health`. Servers older than the header
+/// (or unreachable ones) yield "unknown" with a stderr warning; the run
+/// proceeds, it is just unlabeled.
+pub async fn detect_backend(url: &str) -> String {
+    let probe = async {
+        reqwest::get(format!("{url}/health"))
+            .await
+            .ok()?
+            .headers()
+            .get("x-talea-backend")?
+            .to_str()
+            .ok()
+            .map(str::to_string)
+    };
+    match probe.await {
+        Some(backend) => backend,
+        None => {
+            eprintln!(
+                "WARN: server did not report x-talea-backend on /health; \
+                 recording backend=\"unknown\""
+            );
+            "unknown".into()
+        }
+    }
+}
+
 impl Ctx {
     pub fn client(&self) -> Result<TaleaClient, String> {
         self.client_with(RetryPolicy::default())

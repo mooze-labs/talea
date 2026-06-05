@@ -120,3 +120,9 @@ async fn overload_smoke() {
     assert_eq!(steps.len(), 2); // raw-503 pass + retry-to-success pass
     assert!(steps[1].successes > 0, "retrying pass must land commits");
 }
+
+#[tokio::test]
+async fn detect_backend_reports_sqlite() {
+    let url = harness::spawn_server(256).await;
+    assert_eq!(talea_bench::detect_backend(&url).await, "sqlite");
+}

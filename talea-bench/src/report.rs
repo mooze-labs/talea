@@ -10,12 +10,28 @@ use serde::Serialize;
 
 use crate::runner::StepReport;
 
-pub const CAVEATS: &str = "\
+/// Caveats header printed before every run and useful to embed near
+/// results. The sqlite extension keeps cross-backend comparisons honest:
+/// a SQLite post-many-books knee is the single-writer model, not a
+/// regression.
+pub fn caveats(backend: &str) -> String {
+    let mut out = String::from(
+        "\
 CAVEATS:
   1. Closed-loop load understates latency at saturation (coordinated
      omission). Treat results as ceilings and curve shapes, not SLO evidence.
   2. Postgres under Docker Desktop on macOS skews commit latency (VM +
-     fsync behavior). Treat absolute numbers as indicative only.";
+     fsync behavior). Treat absolute numbers as indicative only.",
+    );
+    if backend == "sqlite" {
+        out.push_str(
+            "\n  3. SQLite has a single WAL writer: cross-book write scaling \
+             (post-many-books) knees early BY DESIGN. Compare SQLite runs only \
+             against other SQLite runs.",
+        );
+    }
+    out
+}
 
 #[derive(Debug, Serialize)]
 pub struct LatencyJson {
@@ -146,6 +162,9 @@ pub fn step_line(s: &StepJson) -> String {
 #[derive(Debug, Serialize)]
 pub struct RunJson {
     pub scenario: String,
+    /// Store backend the target server reported ("postgres" | "sqlite" |
+    /// "unknown" for pre-header servers).
+    pub backend: String,
     pub git_sha: String,
     pub started_at: DateTime<Utc>,
     pub config: serde_json::Value,
@@ -243,6 +262,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("talea-bench-test-{}", std::process::id()));
         let run = RunJson {
             scenario: "unit".into(),
+            backend: "sqlite".into(),
             git_sha: git_sha(),
             started_at: chrono::Utc::now(),
             config: serde_json::json!({"k": 1}),
@@ -252,7 +272,22 @@ mod tests {
         let body = std::fs::read_to_string(&path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["scenario"], "unit");
+        assert_eq!(parsed["backend"], "sqlite");
         assert_eq!(parsed["steps"][0]["successes"], 5);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn caveats_are_backend_conditional() {
+        let pg = caveats("postgres");
+        let lite = caveats("sqlite");
+        // the two universal caveats appear for every backend
+        for c in [&pg, &lite] {
+            assert!(c.contains("coordinated"));
+            assert!(c.contains("Docker Desktop"));
+        }
+        // the single-writer note appears only for sqlite
+        assert!(lite.contains("single WAL writer"));
+        assert!(!pg.contains("single WAL writer"));
     }
 }
