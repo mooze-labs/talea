@@ -21,9 +21,23 @@ pub struct AccountId {
 } // e.g. { onramp, "treasury:btc" }
 
 impl AccountId {
+    /// Flat `book:path` key used for persisted account_key columns and error
+    /// payloads. The separator is the first *unescaped* ':' — ':' and '\\'
+    /// inside the book component are '\\'-escaped, so distinct (book, path)
+    /// pairs can never collide (e.g. ("a:b", "c") vs ("a", "b:c")). Books
+    /// without those characters produce the same keys as ever, so existing
+    /// persisted keys are unaffected. The path is the final component and
+    /// needs no escaping.
     pub fn to_key(&self) -> String {
-        let key = format!("{}:{}", &self.book.0, &self.path);
-
+        let mut key = String::with_capacity(self.book.0.len() + self.path.len() + 1);
+        for c in self.book.0.chars() {
+            if c == ':' || c == '\\' {
+                key.push('\\');
+            }
+            key.push(c);
+        }
+        key.push(':');
+        key.push_str(&self.path);
         key
     }
 }
@@ -45,6 +59,33 @@ pub enum AccountKind {
     Expense,
     Equity,
     Clearing,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(book: &str, path: &str) -> AccountId {
+        AccountId {
+            book: Book(book.into()),
+            path: path.into(),
+        }
+    }
+
+    /// The historical bug: ("a:b", "c") and ("a", "b:c") both produced "a:b:c".
+    #[test]
+    fn to_key_is_injective_across_the_book_path_split() {
+        assert_ne!(id("a:b", "c").to_key(), id("a", "b:c").to_key());
+        assert_ne!(id("a\\", "c").to_key(), id("a", "\\:c").to_key());
+    }
+
+    /// Books without ':' or '\\' keep their exact pre-escaping keys —
+    /// persisted account_key values must not shift.
+    #[test]
+    fn to_key_is_unchanged_for_plain_books() {
+        assert_eq!(id("onramp", "treasury:btc").to_key(), "onramp:treasury:btc");
+        assert_eq!(id("_system", "events").to_key(), "_system:events");
+    }
 }
 
 impl AccountKind {
