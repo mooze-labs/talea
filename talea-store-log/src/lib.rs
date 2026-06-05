@@ -820,9 +820,132 @@ impl Store for LogTaleaStore {
             .collect())
     }
 
-    #[allow(unused_variables)]
     fn subscribe(&self, book: &Book, from: Seq) -> BoxStream<'static, Result<Sequenced<LedgerEvent>, StoreError>> {
-        todo!("task 8")
+        // subscribe is sync — clone everything we need into the stream before returning.
+        let books = Arc::clone(&self.books);
+        let dir = self.dir.clone();
+        let batch_max = self.batch_max;
+        let book = book.clone();
+
+        Box::pin(async_stream::try_stream! {
+            // Step 1: get-or-create the BookWriter inside the async stream so we
+            // can await it. This mirrors sqlite's behaviour: subscribing to a book
+            // that has never been written to still works; future writes will be
+            // received live.
+            let writer: BookWriter = {
+                // Fast path: read lock.
+                let maybe = {
+                    let g = books.read().await;
+                    g.get(&book.0).cloned()
+                };
+                if let Some(w) = maybe {
+                    w
+                } else {
+                    // Slow path: write lock, get-or-create.
+                    let mut g = books.write().await;
+                    if let Some(w) = g.get(&book.0).cloned() {
+                        w
+                    } else {
+                        let book_dir = dir.join("books").join(&book.0);
+                        let state = Arc::new(RwLock::new(crate::state::BookState::default()));
+                        let w = BookWriter::spawn(book_dir, state, batch_max)
+                            .await
+                            .map_err(|e| StoreError::Io(Box::new(e)))?;
+                        g.insert(book.0.clone(), w.clone());
+                        w
+                    }
+                }
+            };
+
+            // Step 2: subscribe to the live broadcast channel BEFORE reading history
+            // so nothing between catch-up and live-tail is missed.
+            let mut live = writer.events.subscribe();
+
+            // Step 3: page through history from `from` up to the durability watermark.
+            let page_size = 512usize;
+            let mut next = from;
+
+            loop {
+                // Ceiling at the start of each page so we don't surface un-applied frames.
+                let ceiling: Seq = {
+                    let st = writer.state.read().await;
+                    st.next_seq.saturating_sub(1)
+                };
+                if next > ceiling {
+                    break;
+                }
+                let limit = page_size.min((ceiling - next + 1) as usize);
+                let wires = writer.catalog.scan_from(next, limit).await.map_err(io_err)?;
+                let page_len = wires.len();
+                for wire in wires {
+                    // Double-check ceiling in case ceiling moved backward (shouldn't happen,
+                    // but be defensive).
+                    if wire.seq > ceiling {
+                        break;
+                    }
+                    next = wire.seq + 1;
+                    yield Sequenced { seq: wire.seq, at: wire.at, event: wire.event };
+                }
+                // A short page means we're caught up to the watermark.
+                if page_len < limit {
+                    break;
+                }
+            }
+
+            // Step 4: live-tail loop.
+            let mut last: Seq = next.saturating_sub(1);
+            loop {
+                match live.recv().await {
+                    Ok(ev) => {
+                        if ev.seq <= last {
+                            // overlap from catch-up — skip
+                            continue;
+                        }
+                        last = ev.seq;
+                        yield Sequenced { seq: ev.seq, at: ev.at, event: ev.event };
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // We fell behind the broadcast ring — re-page from last+1.
+                        let resume = last + 1;
+                        let page_size_lag = 512usize;
+                        let mut cursor = resume;
+                        loop {
+                            let ceiling: Seq = {
+                                let st = writer.state.read().await;
+                                st.next_seq.saturating_sub(1)
+                            };
+                            if cursor > ceiling {
+                                break;
+                            }
+                            let limit = page_size_lag.min((ceiling - cursor + 1) as usize);
+                            let wires = writer.catalog.scan_from(cursor, limit).await.map_err(io_err)?;
+                            let page_len = wires.len();
+                            for wire in wires {
+                                if wire.seq > ceiling {
+                                    break;
+                                }
+                                if wire.seq > last {
+                                    last = wire.seq;
+                                    cursor = wire.seq + 1;
+                                    yield Sequenced { seq: wire.seq, at: wire.at, event: wire.event };
+                                } else {
+                                    cursor = wire.seq + 1;
+                                }
+                            }
+                            if page_len < limit {
+                                break;
+                            }
+                        }
+                        // After re-paging, resume the live loop (re-subscribe isn't
+                        // possible but new events will arrive normally).
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // Writer died — no more events. End the stream cleanly (matches sqlite).
+                        return;
+                    }
+                }
+            }
+        })
     }
 }
 
@@ -1289,6 +1412,30 @@ mod tests {
         let evs_from4 = store.read_events(&book, 4, 100).await.unwrap();
         let seqs_from4: Vec<Seq> = evs_from4.iter().map(|e| e.seq).collect();
         assert_eq!(seqs_from4, vec![4, 5], "from=4 must return seqs 4 and 5 only");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 8: subscribe catch-up + live tail
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn subscribe_catch_up_then_live() {
+        use futures::StreamExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = seeded(dir.path()).await; // 2 opens → seqs 1, 2
+        store.commit(&mk_tx("h1", 10)).await.unwrap(); // seq 3
+        let mut stream = store.subscribe(&Book("b".into()), 1);
+        let mut seen = vec![];
+        for _ in 0..3 {
+            seen.push(stream.next().await.unwrap().unwrap().seq);
+        }
+        assert_eq!(seen, vec![1, 2, 3]);
+        store.commit(&mk_tx("live1", 5)).await.unwrap(); // seq 4
+        assert_eq!(stream.next().await.unwrap().unwrap().seq, 4);
+        // a second subscriber from the middle
+        let mut s2 = store.subscribe(&Book("b".into()), 3);
+        assert_eq!(s2.next().await.unwrap().unwrap().seq, 3);
+        assert_eq!(s2.next().await.unwrap().unwrap().seq, 4);
     }
 
     /// Verify that `trial_balance(Some(t))` clamps to the durability ceiling.
