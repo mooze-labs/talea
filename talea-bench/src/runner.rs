@@ -54,10 +54,12 @@ pub struct StepReport {
 /// Map a client error to an outcome. A 503 that survives the retry
 /// budget surfaces as Transport with a message starting "503"
 /// (talea-client http.rs decode_error) — that is admission shedding,
-/// not an ambiguous failure.
+/// not an ambiguous failure. A 429 Overloaded (per-book write queue
+/// full) is the same class of backpressure, one layer deeper.
 pub fn classify(e: ApiError) -> OpOutcome {
     match e {
         ApiError::Transport { ref message } if message.starts_with("503") => OpOutcome::Saturated,
+        ApiError::Overloaded => OpOutcome::Saturated,
         other => OpOutcome::Failed {
             kind: error_kind(&other).into(),
         },
@@ -79,6 +81,7 @@ pub fn error_kind(e: &ApiError) -> &'static str {
         ApiError::NotFound { .. } => "not_found",
         ApiError::Transport { .. } => "transport",
         ApiError::Unauthorized => "unauthorized",
+        ApiError::Overloaded => "overloaded",
         ApiError::Internal { .. } => "internal",
     }
 }
