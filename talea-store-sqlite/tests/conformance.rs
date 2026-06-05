@@ -52,3 +52,19 @@ sqlite_test!(commit_batch_dedups_against_prior_commit);
 sqlite_test!(commit_batch_rejects_reserved_book);
 sqlite_test!(commit_batch_empty_returns_empty);
 sqlite_test!(committed_at_is_monotonic_per_book);
+
+/// The in-memory single-connection harness above cannot produce
+/// write-write contention (the pool serializes everything). This variant
+/// runs the production pool shape — file-backed WAL, multiple
+/// connections, busy_timeout — where cross-book writers genuinely race.
+/// Regression test for SQLITE_BUSY/BUSY_SNAPSHOT escaping as commit
+/// errors when write transactions began deferred.
+#[tokio::test]
+async fn concurrent_cross_book_commits_all_succeed_on_a_real_pool() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("contention.db");
+    let store = SqliteTaleaStore::connect(&format!("sqlite://{}", path.display()))
+        .await
+        .unwrap();
+    conformance::concurrent_cross_book_commits_all_succeed(&store).await;
+}
