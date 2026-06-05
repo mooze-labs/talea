@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use talea_core::types::Seq;
 use tokio::fs::File;
@@ -17,6 +18,178 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use crate::frame::{WireEvent, decode_frame, HEADER_LEN};
 
 pub const DEFAULT_SEGMENT_MAX: u64 = 128 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// SegmentCatalog — shared, clone-able read view of the segment map
+// ---------------------------------------------------------------------------
+
+/// A shared, clone-able catalog of segment base-seqs → paths.
+///
+/// Owned by [`SegmentSet`] but cloned out to readers (e.g. `BookWriter`)
+/// so read operations (`scan_from`, `scan_with_pos`, `read_at`) can happen
+/// without holding the writer task's exclusive `SegmentSet`.
+///
+/// The inner `BTreeMap` is updated in exactly two places:
+/// 1. [`SegmentSet::open_with_max`] — initial enumeration.
+/// 2. [`SegmentSet::maybe_rotate`] — on every segment rotation.
+///
+/// All other operations (append, sync) leave the catalog unchanged.
+#[derive(Clone)]
+pub struct SegmentCatalog(pub(crate) Arc<RwLock<BTreeMap<Seq, PathBuf>>>);
+
+impl SegmentCatalog {
+    /// Scan events ascending with `seq >= from`, returning at most `limit`.
+    pub async fn scan_from(&self, from: Seq, limit: usize) -> std::io::Result<Vec<WireEvent>> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+        let snapshot = {
+            let guard = self.0.read().unwrap();
+            guard.clone()
+        };
+
+        let start_base = snapshot
+            .range(..=from)
+            .next_back()
+            .map(|(k, _)| *k)
+            .unwrap_or_else(|| *snapshot.keys().next().unwrap());
+
+        let mut results = Vec::new();
+        for (_, path) in snapshot.range(start_base..) {
+            if results.len() >= limit {
+                break;
+            }
+            let bytes = tokio::fs::read(path).await?;
+            let mut pos = 0usize;
+            loop {
+                if results.len() >= limit {
+                    break;
+                }
+                match decode_frame(&bytes[pos..]) {
+                    Ok(None) => break,
+                    Ok(Some((ev, consumed))) => {
+                        pos += consumed;
+                        if ev.seq >= from {
+                            results.push(ev);
+                        }
+                    }
+                    Err(e) => {
+                        return Err(std::io::Error::other(format!(
+                            "decode error in {path:?} at offset {pos}: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// Like [`scan_from`] but each event is paired with its `FramePos`.
+    pub async fn scan_with_pos(
+        &self,
+        from: Seq,
+        limit: usize,
+    ) -> std::io::Result<Vec<(WireEvent, crate::state::FramePos)>> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+        let snapshot = {
+            let guard = self.0.read().unwrap();
+            guard.clone()
+        };
+
+        let start_base = snapshot
+            .range(..=from)
+            .next_back()
+            .map(|(k, _)| *k)
+            .unwrap_or_else(|| *snapshot.keys().next().unwrap());
+
+        let mut results = Vec::new();
+        for (&seg_base, path) in snapshot.range(start_base..) {
+            if results.len() >= limit {
+                break;
+            }
+            let bytes = tokio::fs::read(path).await?;
+            let mut byte_offset: u64 = 0;
+            loop {
+                if results.len() >= limit {
+                    break;
+                }
+                match decode_frame(&bytes[byte_offset as usize..]) {
+                    Ok(None) => break,
+                    Ok(Some((ev, consumed))) => {
+                        let frame_start = byte_offset;
+                        byte_offset += consumed as u64;
+                        if ev.seq >= from {
+                            results.push((ev, (seg_base, frame_start)));
+                        }
+                    }
+                    Err(e) => {
+                        return Err(std::io::Error::other(format!(
+                            "decode error in {path:?} at offset {byte_offset}: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// Open the segment with `segment_base`, seek to `offset`, decode one frame.
+    pub async fn read_at(
+        &self,
+        segment_base: Seq,
+        offset: u64,
+        expected_seq: Seq,
+    ) -> std::io::Result<WireEvent> {
+        let path = {
+            let guard = self.0.read().unwrap();
+            guard
+                .get(&segment_base)
+                .cloned()
+                .ok_or_else(|| std::io::Error::other(format!("unknown segment base {segment_base}")))?
+        };
+
+        let mut file = File::open(&path).await?;
+        let file_len = file.metadata().await?.len();
+
+        file.seek(SeekFrom::Start(offset)).await?;
+        let mut header = [0u8; HEADER_LEN];
+        file.read_exact(&mut header).await?;
+        let payload_len = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
+
+        let frame_end = offset
+            .checked_add((HEADER_LEN + payload_len) as u64)
+            .ok_or_else(|| std::io::Error::other("frame length arithmetic overflow"))?;
+        if frame_end > file_len {
+            return Err(std::io::Error::other(format!(
+                "frame header at {offset} claims {payload_len} bytes past end of segment"
+            )));
+        }
+
+        let mut frame = vec![0u8; HEADER_LEN + payload_len];
+        frame[..HEADER_LEN].copy_from_slice(&header);
+        file.read_exact(&mut frame[HEADER_LEN..]).await?;
+        let ev = match decode_frame(&frame) {
+            Ok(Some((ev, _))) => ev,
+            Ok(None) => return Err(std::io::Error::other("empty frame at read_at")),
+            Err(e) => {
+                return Err(std::io::Error::other(format!(
+                    "decode error at offset {offset}: {e}"
+                )))
+            }
+        };
+
+        if ev.seq != expected_seq {
+            return Err(std::io::Error::other(format!(
+                "frame at {segment_base}/{offset} has seq {got}, expected {expected_seq} — stale or wrong position",
+                got = ev.seq,
+            )));
+        }
+
+        Ok(ev)
+    }
+}
 
 /// Private helper result for per-segment validation.
 #[derive(Debug)]
@@ -80,8 +253,9 @@ fn validate(path: &Path, is_final: bool) -> std::io::Result<Validation> {
 /// A set of append-log segment files for a single book's event stream.
 pub struct SegmentSet {
     dir: PathBuf,
-    /// Maps base_seq → path for every known segment (including the active one).
-    segments: BTreeMap<Seq, PathBuf>,
+    /// Shared segment catalog. The inner BTreeMap IS the canonical segment map;
+    /// `SegmentSet` inserts into it on open and on every rotation.
+    catalog: SegmentCatalog,
     /// The open, writable handle for the active (highest-base) segment.
     active: File,
     /// Byte length of the active segment (tracked without seeking).
@@ -172,13 +346,25 @@ impl SegmentSet {
         // blocking std::fs is deliberate at open() time — one-shot startup path, not the hot path
         fsync_dir(dir)?;
 
+        // Wrap the map in a shared catalog so readers can clone a handle.
+        let catalog = SegmentCatalog(Arc::new(RwLock::new(segments)));
+
         Ok(Self {
             dir: dir.to_path_buf(),
-            segments,
+            catalog,
             active,
             active_len,
             segment_max,
         })
+    }
+
+    /// Return a clone of the shared segment catalog.
+    ///
+    /// The clone shares the inner `Arc<RwLock<…>>` so any subsequent rotation
+    /// written through the `SegmentSet` is immediately visible to all holders
+    /// of cloned catalogs.
+    pub fn catalog(&self) -> SegmentCatalog {
+        self.catalog.clone()
     }
 
     /// Append a pre-encoded frame to the active segment. Does NOT fsync.
@@ -208,7 +394,8 @@ impl SegmentSet {
             // is silently dropped by recovery.
             // blocking std::fs is deliberate at rotation — rare event, not the hot path
             fsync_dir(&self.dir)?;
-            self.segments.insert(next_seq, new_path);
+            // Insert into the shared catalog — all cloned catalog handles see this immediately.
+            self.catalog.0.write().unwrap().insert(next_seq, new_path);
             self.active = new_file;
             self.active_len = 0;
         }
@@ -217,169 +404,40 @@ impl SegmentSet {
 
     /// Scan events ascending with `seq >= from`, returning at most `limit`.
     ///
-    /// Starts at the last segment whose base ≤ `from` (falls back to the first
-    /// segment). Reads each file fully, decodes sequentially, stops at `limit`.
+    /// Delegates to [`SegmentCatalog::scan_from`].
     pub async fn scan_from(&self, from: Seq, limit: usize) -> std::io::Result<Vec<WireEvent>> {
-        if limit == 0 {
-            return Ok(vec![]);
-        }
-
-        // Pick the starting segment: last base <= from, else first.
-        let start_base = self
-            .segments
-            .range(..=from)
-            .next_back()
-            .map(|(k, _)| *k)
-            .unwrap_or_else(|| *self.segments.keys().next().unwrap());
-
-        let mut results = Vec::new();
-        for (_, path) in self.segments.range(start_base..) {
-            if results.len() >= limit {
-                break;
-            }
-            let bytes = tokio::fs::read(path).await?;
-            let mut pos = 0usize;
-            loop {
-                if results.len() >= limit {
-                    break;
-                }
-                match decode_frame(&bytes[pos..]) {
-                    Ok(None) => break,
-                    Ok(Some((ev, consumed))) => {
-                        pos += consumed;
-                        if ev.seq >= from {
-                            results.push(ev);
-                        }
-                    }
-                    Err(e) => {
-                        return Err(std::io::Error::other(format!(
-                            "decode error in {path:?} at offset {pos}: {e}"
-                        )));
-                    }
-                }
-            }
-        }
-        Ok(results)
+        self.catalog.scan_from(from, limit).await
     }
 
     /// Like [`scan_from`] but each event is paired with its [`FramePos`]
     /// `(segment_base, byte_offset_of_frame_start)`.
     ///
-    /// The offset recorded is where the frame begins within its segment file.
-    /// Passing it back to [`read_at`] with the matching `segment_base` and
-    /// the event's `seq` will round-trip the exact same event.
+    /// Delegates to [`SegmentCatalog::scan_with_pos`].
     pub async fn scan_with_pos(
         &self,
         from: Seq,
         limit: usize,
     ) -> std::io::Result<Vec<(WireEvent, crate::state::FramePos)>> {
-        if limit == 0 {
-            return Ok(vec![]);
-        }
-
-        // Pick the starting segment: last base <= from, else first.
-        let start_base = self
-            .segments
-            .range(..=from)
-            .next_back()
-            .map(|(k, _)| *k)
-            .unwrap_or_else(|| *self.segments.keys().next().unwrap());
-
-        let mut results = Vec::new();
-        for (&seg_base, path) in self.segments.range(start_base..) {
-            if results.len() >= limit {
-                break;
-            }
-            let bytes = tokio::fs::read(path).await?;
-            let mut byte_offset: u64 = 0;
-            loop {
-                if results.len() >= limit {
-                    break;
-                }
-                match decode_frame(&bytes[byte_offset as usize..]) {
-                    Ok(None) => break,
-                    Ok(Some((ev, consumed))) => {
-                        let frame_start = byte_offset;
-                        byte_offset += consumed as u64;
-                        if ev.seq >= from {
-                            results.push((ev, (seg_base, frame_start)));
-                        }
-                    }
-                    Err(e) => {
-                        return Err(std::io::Error::other(format!(
-                            "decode error in {path:?} at offset {byte_offset}: {e}"
-                        )));
-                    }
-                }
-            }
-        }
-        Ok(results)
+        self.catalog.scan_with_pos(from, limit).await
     }
 
     /// Returns `(active_segment_base, active_len)` — position of the NEXT append.
     pub fn next_pos(&self) -> (Seq, u64) {
-        let base = *self.segments.keys().next_back().unwrap();
+        let base = *self.catalog.0.read().unwrap().keys().next_back().unwrap();
         (base, self.active_len)
     }
 
     /// Open the segment with `segment_base`, seek to `offset`, decode one frame.
     ///
-    /// # Trust contract
-    ///
-    /// `offset` MUST come from the in-process index built at append/replay time.
-    /// It must NEVER be taken from external input.  This function verifies that
-    /// the decoded frame carries `expected_seq` as an additional guard against
-    /// stale positions or accidental wrong-segment reads, but the primary
-    /// correctness guarantee is that callers supply only index-derived offsets.
+    /// Delegates to [`SegmentCatalog::read_at`]; see that method for the
+    /// trust contract on `offset`.
     pub async fn read_at(
         &self,
         segment_base: Seq,
         offset: u64,
         expected_seq: Seq,
     ) -> std::io::Result<WireEvent> {
-        let path = self.segments.get(&segment_base).ok_or_else(|| {
-            std::io::Error::other(format!("unknown segment base {segment_base}"))
-        })?;
-        let mut file = File::open(path).await?;
-
-        // Bound the allocation: refuse to allocate based on an unvalidated header.
-        let file_len = file.metadata().await?.len();
-
-        file.seek(SeekFrom::Start(offset)).await?;
-        // Read the 8-byte header first.
-        let mut header = [0u8; HEADER_LEN];
-        file.read_exact(&mut header).await?;
-        let payload_len = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
-
-        // Validate that the claimed frame fits within the file before allocating.
-        let frame_end = offset
-            .checked_add((HEADER_LEN + payload_len) as u64)
-            .ok_or_else(|| std::io::Error::other("frame length arithmetic overflow"))?;
-        if frame_end > file_len {
-            return Err(std::io::Error::other(format!(
-                "frame header at {offset} claims {payload_len} bytes past end of segment"
-            )));
-        }
-
-        // Read the full frame (header + payload).
-        let mut frame = vec![0u8; HEADER_LEN + payload_len];
-        frame[..HEADER_LEN].copy_from_slice(&header);
-        file.read_exact(&mut frame[HEADER_LEN..]).await?;
-        let ev = match decode_frame(&frame) {
-            Ok(Some((ev, _))) => ev,
-            Ok(None) => return Err(std::io::Error::other("empty frame at read_at")),
-            Err(e) => return Err(std::io::Error::other(format!("decode error at offset {offset}: {e}"))),
-        };
-
-        // Verify the decoded sequence number matches what the caller expected.
-        if ev.seq != expected_seq {
-            return Err(std::io::Error::other(format!(
-                "frame at {segment_base}/{offset} has seq {got}, expected {expected_seq} — stale or wrong position",
-                got = ev.seq,
-            )));
-        }
-
-        Ok(ev)
+        self.catalog.read_at(segment_base, offset, expected_seq).await
     }
 }
 

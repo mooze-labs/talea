@@ -23,7 +23,7 @@ use talea_core::store::{
     AccountCfg, BalanceSnapshot, Committed, PostingRecord, Sequenced, Store, StoreError,
     StoredTransaction, TrialBalanceRow, SYSTEM_BOOK,
 };
-use talea_core::types::{AccountDef, AccountId, Amount, AssetDef, AssetId, Book, Seq, Transaction, TxId};
+use talea_core::types::{AccountDef, AccountId, Amount, AssetDef, AssetId, Book, Direction, Seq, Transaction, TxId};
 
 use crate::segment::SegmentSet;
 use crate::state::{BookState, effective};
@@ -501,19 +501,87 @@ impl Store for LogTaleaStore {
     /// Current balance for `account`.
     ///
     /// `as_of: None` returns the current (fully-applied) balance from
-    /// in-memory state. `as_of: Some(_)` is not yet implemented (task 7).
+    /// in-memory state. `as_of: Some(t)` binary-searches the per-account
+    /// posting entries (sorted by committed_at, non-decreasing) to find the
+    /// balance as it stood at time `t`.
     ///
     /// Uses `existing_book` (read-only lookup) so querying an account in a
     /// book that has never been written to does NOT create that book's
     /// directory on disk.  An absent book means the account cannot exist →
     /// `StoreError::UnknownAccount`.
+    ///
+    /// Edge semantics matching sqlite:
+    /// - Unknown book → `UnknownAccount` (no book → no account).
+    /// - Unknown account within a known book → `UnknownAccount`.
+    /// - Account exists but no postings before `as_of` → `BalanceSnapshot { amount: 0, updated_seq: 0 }`.
     async fn balance(
         &self,
         account: &AccountId,
         as_of: Option<DateTime<Utc>>,
     ) -> Result<BalanceSnapshot, StoreError> {
-        if as_of.is_some() {
-            todo!("task 7: point-in-time balance replay")
+        let writer = self
+            .existing_book(&account.book.0)
+            .await?
+            .ok_or_else(|| StoreError::UnknownAccount(account.clone()))?;
+        let st = writer.state.read().await;
+        let key = account.to_key();
+        let acct = st
+            .accounts
+            .get(&key)
+            .ok_or_else(|| StoreError::UnknownAccount(account.clone()))?;
+
+        match as_of {
+            None => {
+                let eff = effective(acct.raw_balance, &acct.cfg.normal_side);
+                Ok(BalanceSnapshot {
+                    amount: Amount::new(eff, acct.def.asset.clone()),
+                    updated_seq: acct.updated_seq,
+                })
+            }
+            Some(t) => {
+                // Binary search: committed_at is non-decreasing vs seq within a book.
+                let idx = acct.postings.partition_point(|e| e.at <= t);
+                if idx == 0 {
+                    // No postings at or before the cutoff.
+                    Ok(BalanceSnapshot {
+                        amount: Amount::new(0, acct.def.asset.clone()),
+                        updated_seq: 0,
+                    })
+                } else {
+                    let entry = &acct.postings[idx - 1];
+                    let eff = effective(entry.raw_after, &acct.cfg.normal_side);
+                    Ok(BalanceSnapshot {
+                        amount: Amount::new(eff, acct.def.asset.clone()),
+                        updated_seq: entry.seq,
+                    })
+                }
+            }
+        }
+    }
+
+    /// Look up an asset by id.
+    async fn asset(&self, id: &AssetId) -> Result<Option<AssetDef>, StoreError> {
+        let reg = self.registry.read().await;
+        Ok(reg.get(id).cloned())
+    }
+
+    /// Posting history for `account`, paginated by seq.
+    ///
+    /// `after_seq` is EXCLUSIVE (matches sqlite semantics: `seq > after_seq`).
+    /// `limit` counts DISTINCT seqs so one transaction's postings to the same
+    /// account are never split across pages.
+    ///
+    /// Edge semantics matching sqlite:
+    /// - Unknown book or account → `UnknownAccount`.
+    /// - limit 0 → empty vec (never an error).
+    async fn account_history(
+        &self,
+        account: &AccountId,
+        after_seq: Option<Seq>,
+        limit: usize,
+    ) -> Result<Vec<PostingRecord>, StoreError> {
+        if limit == 0 {
+            return Ok(vec![]);
         }
 
         let writer = self
@@ -526,51 +594,193 @@ impl Store for LogTaleaStore {
             .accounts
             .get(&key)
             .ok_or_else(|| StoreError::UnknownAccount(account.clone()))?;
-        let eff = effective(acct.raw_balance, &acct.cfg.normal_side);
-        Ok(BalanceSnapshot {
-            amount: Amount::new(eff, acct.def.asset.clone()),
-            updated_seq: acct.updated_seq,
-        })
+
+        let after = after_seq.unwrap_or(0);
+        // Start at the first entry with seq > after.
+        let start = acct.postings.partition_point(|e| e.seq <= after);
+        let entries = &acct.postings[start..];
+
+        // Walk counting DISTINCT seqs, stopping before exceeding `limit`.
+        let mut records: Vec<PostingRecord> = Vec::new();
+        let mut distinct_seqs: usize = 0;
+        let mut last_seq: Seq = 0;
+
+        for entry in entries {
+            if entry.seq != last_seq {
+                if distinct_seqs >= limit {
+                    break;
+                }
+                distinct_seqs += 1;
+                last_seq = entry.seq;
+            }
+            records.push(PostingRecord {
+                seq: entry.seq,
+                txid: entry.txid.clone(),
+                account: account.clone(),
+                amount: Amount::new(entry.minor, acct.def.asset.clone()),
+                direction: entry.direction.clone(),
+                at: entry.at,
+            });
+        }
+
+        Ok(records)
     }
 
-    /// Look up an asset by id.
-    async fn asset(&self, id: &AssetId) -> Result<Option<AssetDef>, StoreError> {
-        let reg = self.registry.read().await;
-        Ok(reg.get(id).cloned())
-    }
-
-    #[allow(unused_variables)]
-    async fn account_history(
-        &self,
-        account: &AccountId,
-        after_seq: Option<Seq>,
-        limit: usize,
-    ) -> Result<Vec<PostingRecord>, StoreError> {
-        todo!("task 7")
-    }
-
-    #[allow(unused_variables)]
+    /// Look up a committed transaction by its `TxId`.
+    ///
+    /// Searches all book writers' in-memory txid indexes. Found → reads the
+    /// frame at the recorded position and returns a `StoredTransaction`.
+    /// Not found → `Ok(None)` (matches sqlite semantics).
     async fn transaction(&self, txid: &TxId) -> Result<Option<StoredTransaction>, StoreError> {
-        todo!("task 7")
+        use talea_core::events::LedgerEvent;
+
+        // Snapshot the writers map under a read lock.
+        let writers: Vec<BookWriter> = {
+            let guard = self.books.read().await;
+            guard.values().cloned().collect()
+        };
+
+        for writer in &writers {
+            let st = writer.state.read().await;
+            if let Some(&(seq, pos)) = st.txids.get(&txid.0) {
+                // Found: release state lock before doing async I/O.
+                drop(st);
+                let wire = writer
+                    .catalog
+                    .read_at(pos.0, pos.1, seq)
+                    .await
+                    .map_err(io_err)?;
+                match wire.event {
+                    LedgerEvent::TransactionPosted(tx) => {
+                        return Ok(Some(StoredTransaction {
+                            transaction: tx,
+                            seq: wire.seq,
+                            at: wire.at,
+                        }));
+                    }
+                    _ => {
+                        return Err(io_str(format!(
+                            "frame at recorded position is not a transaction (seq {seq})"
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
-    #[allow(unused_variables)]
+    /// Trial balance for `book`.
+    ///
+    /// `as_of: None` returns the current lifetime sums from in-memory state
+    /// (cheap). `as_of: Some(t)` replays all TransactionPosted frames with
+    /// `committed_at <= t` from disk (rare, documented as slow path).
+    ///
+    /// Edge semantics matching sqlite:
+    /// - Unknown book → empty vec (sqlite returns no rows for an unknown book).
+    /// - Rows are sorted by asset id string, matching sqlite's `ORDER BY asset`.
     async fn trial_balance(
         &self,
         book: &Book,
         as_of: Option<DateTime<Utc>>,
     ) -> Result<Vec<TrialBalanceRow>, StoreError> {
-        todo!("task 7")
+        use talea_core::events::LedgerEvent;
+
+        let writer = match self.existing_book(&book.0).await? {
+            None => return Ok(vec![]),
+            Some(w) => w,
+        };
+
+        match as_of {
+            None => {
+                let st = writer.state.read().await;
+                let mut rows: Vec<TrialBalanceRow> = st
+                    .sums
+                    .iter()
+                    .map(|(asset, &(debits, credits))| TrialBalanceRow {
+                        asset: asset.clone(),
+                        debits,
+                        credits,
+                    })
+                    .collect();
+                rows.sort_by(|a, b| a.asset.as_str().cmp(b.asset.as_str()));
+                Ok(rows)
+            }
+            Some(t) => {
+                // Disk replay: scan all events, fold TransactionPosted with at <= t.
+                // Rare operation; documented as slow path.
+                let events = writer
+                    .catalog
+                    .scan_from(1, usize::MAX)
+                    .await
+                    .map_err(io_err)?;
+
+                let mut sums: HashMap<AssetId, (i64, i64)> = HashMap::new();
+                for wire in events {
+                    if wire.at > t {
+                        break; // committed_at is non-decreasing; can stop early
+                    }
+                    if let LedgerEvent::TransactionPosted(tx) = wire.event {
+                        for posting in &tx.postings {
+                            let entry = sums
+                                .entry(posting.amount.asset().clone())
+                                .or_insert((0, 0));
+                            match posting.direction {
+                                Direction::Debit => {
+                                    entry.0 = entry.0.saturating_add(posting.amount.minor())
+                                }
+                                Direction::Credit => {
+                                    entry.1 = entry.1.saturating_add(posting.amount.minor())
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let mut rows: Vec<TrialBalanceRow> = sums
+                    .into_iter()
+                    .map(|(asset, (debits, credits))| TrialBalanceRow {
+                        asset,
+                        debits,
+                        credits,
+                    })
+                    .collect();
+                rows.sort_by(|a, b| a.asset.as_str().cmp(b.asset.as_str()));
+                Ok(rows)
+            }
+        }
     }
 
-    #[allow(unused_variables)]
+    /// Read events from `book` starting at `from` (INCLUSIVE), returning at
+    /// most `limit`.
+    ///
+    /// Edge semantics matching sqlite:
+    /// - Unknown book → empty vec (sqlite returns no rows).
     async fn read_events(
         &self,
         book: &Book,
         from: Seq,
         limit: usize,
     ) -> Result<Vec<Sequenced<LedgerEvent>>, StoreError> {
-        todo!("task 7/8")
+        let writer = match self.existing_book(&book.0).await? {
+            None => return Ok(vec![]),
+            Some(w) => w,
+        };
+
+        let wires = writer
+            .catalog
+            .scan_from(from, limit)
+            .await
+            .map_err(io_err)?;
+
+        Ok(wires
+            .into_iter()
+            .map(|w| Sequenced {
+                seq: w.seq,
+                at: w.at,
+                event: w.event,
+            })
+            .collect())
     }
 
     #[allow(unused_variables)]
@@ -859,5 +1069,155 @@ mod tests {
             Ok(_) => panic!("open must fail on overflow replay, but it succeeded"),
             Err(other) => panic!("expected StoreError::Io, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 7: read path tests
+    // -----------------------------------------------------------------------
+
+    /// Build a store with 3 transactions at distinct timestamps.
+    /// Returns (store, txids, commit_ats).
+    /// Seqs: 1 = cash open, 2 = rev open, 3/4/5 = the 3 transactions.
+    async fn history_fixture(
+        dir: &std::path::Path,
+    ) -> (LogTaleaStore, Vec<TxId>, Vec<chrono::DateTime<chrono::Utc>>) {
+        let store = seeded(dir).await;
+        let mut txids = Vec::new();
+        let mut times = Vec::new();
+
+        for (key, minor) in [("tx1", 10i64), ("tx2", 20), ("tx3", 30)] {
+            let c = store.commit(&mk_tx(key, minor)).await.unwrap();
+            txids.push(c.txid);
+            times.push(c.at);
+            // Ensure distinct microsecond timestamps for as_of binary search.
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+
+        (store, txids, times)
+    }
+
+    #[tokio::test]
+    async fn balance_as_of_binary_searches_posting_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _txids, times) = history_fixture(dir.path()).await;
+
+        let cash = cash_def().id;
+
+        // as_of before t1: no postings → amount 0, updated_seq 0.
+        let before = times[0] - chrono::Duration::microseconds(1);
+        let snap = store.balance(&cash, Some(before)).await.unwrap();
+        assert_eq!(snap.amount.minor(), 0, "as_of before first commit must be 0");
+        assert_eq!(snap.updated_seq, 0, "as_of before first commit: updated_seq must be 0");
+
+        // as_of = t2 (second commit's at) → balance 30 (10+20), updated_seq = 4.
+        let snap2 = store.balance(&cash, Some(times[1])).await.unwrap();
+        assert_eq!(snap2.amount.minor(), 30, "balance after 2 commits must be 30");
+        assert_eq!(snap2.updated_seq, 4, "updated_seq after 2 commits must be 4");
+
+        // as_of = t3 → 60, updated_seq 5.
+        let snap3 = store.balance(&cash, Some(times[2])).await.unwrap();
+        assert_eq!(snap3.amount.minor(), 60, "balance after 3 commits must be 60");
+        assert_eq!(snap3.updated_seq, 5, "updated_seq after 3 commits must be 5");
+    }
+
+    #[tokio::test]
+    async fn account_history_pages_by_distinct_seq_after_seq_exclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _txids, times) = history_fixture(dir.path()).await;
+
+        let cash = cash_def().id;
+
+        // after_seq None, limit 2 → postings of seqs 3, 4 only.
+        let page1 = store.account_history(&cash, None, 2).await.unwrap();
+        assert_eq!(page1.len(), 2, "limit 2 must return 2 records");
+        assert_eq!(page1[0].seq, 3);
+        assert_eq!(page1[1].seq, 4);
+        assert_eq!(page1[0].amount.minor(), 10);
+        assert_eq!(page1[1].amount.minor(), 20);
+        assert!(matches!(page1[0].direction, Direction::Debit));
+        // at must match the commit time
+        assert_eq!(page1[0].at, times[0]);
+        assert_eq!(page1[1].at, times[1]);
+
+        // Resume after_seq Some(4), limit 10 → only seq 5.
+        let page2 = store.account_history(&cash, Some(4), 10).await.unwrap();
+        assert_eq!(page2.len(), 1);
+        assert_eq!(page2[0].seq, 5);
+        assert_eq!(page2[0].amount.minor(), 30);
+
+        // limit 0 → empty.
+        let empty = store.account_history(&cash, None, 0).await.unwrap();
+        assert!(empty.is_empty(), "limit 0 must return empty vec");
+    }
+
+    #[tokio::test]
+    async fn transaction_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, txids, times) = history_fixture(dir.path()).await;
+
+        // transaction(txid of 2nd commit) → seq 4, at == t2.
+        let stored = store.transaction(&txids[1]).await.unwrap().expect("should find 2nd tx");
+        assert_eq!(stored.seq, 4, "2nd transaction must have seq 4");
+        assert_eq!(stored.at, times[1], "committed_at must match");
+        assert_eq!(stored.transaction.idempotency_key.0, "tx2");
+
+        // Unknown uuid → Ok(None).
+        let unknown = TxId(uuid::Uuid::now_v7());
+        let result = store.transaction(&unknown).await.unwrap();
+        assert!(result.is_none(), "unknown txid must return Ok(None)");
+    }
+
+    #[tokio::test]
+    async fn trial_balance_none_and_as_of() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _txids, times) = history_fixture(dir.path()).await;
+
+        let book = Book("b".into());
+
+        // None: both accounts use USD; debits = 60 (10+20+30 to cash), credits = 60 (to rev).
+        let tb = store.trial_balance(&book, None).await.unwrap();
+        assert_eq!(tb.len(), 1, "one USD row");
+        assert_eq!(tb[0].asset, AssetId::new("USD"));
+        assert_eq!(tb[0].debits, 60);
+        assert_eq!(tb[0].credits, 60);
+
+        // as_of = t2: debits 30 (10+20), credits 30.
+        let tb2 = store.trial_balance(&book, Some(times[1])).await.unwrap();
+        assert_eq!(tb2.len(), 1);
+        assert_eq!(tb2[0].debits, 30);
+        assert_eq!(tb2[0].credits, 30);
+
+        // Unknown book → empty vec (matches sqlite).
+        let unknown = Book("ghost".into());
+        let tb3 = store.trial_balance(&unknown, None).await.unwrap();
+        assert!(tb3.is_empty(), "unknown book must return empty vec");
+    }
+
+    #[tokio::test]
+    async fn read_events_from_inclusive_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _txids, _times) = history_fixture(dir.path()).await;
+
+        let book = Book("b".into());
+
+        // from=2, limit=2 → seqs [2, 3].
+        let evs = store.read_events(&book, 2, 2).await.unwrap();
+        assert_eq!(evs.len(), 2);
+        assert_eq!(evs[0].seq, 2);
+        assert_eq!(evs[1].seq, 3);
+
+        // from=5, limit=10 → [5].
+        let evs5 = store.read_events(&book, 5, 10).await.unwrap();
+        assert_eq!(evs5.len(), 1);
+        assert_eq!(evs5[0].seq, 5);
+
+        // from past the end → empty.
+        let evs_end = store.read_events(&book, 999, 10).await.unwrap();
+        assert!(evs_end.is_empty(), "from past end must return empty vec");
+
+        // Unknown book → empty vec (matches sqlite).
+        let unknown = Book("ghost".into());
+        let evs_ghost = store.read_events(&unknown, 1, 10).await.unwrap();
+        assert!(evs_ghost.is_empty(), "unknown book must return empty vec");
     }
 }

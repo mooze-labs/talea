@@ -53,7 +53,7 @@ use talea_core::store::{AccountCfg, Committed, Sequenced, StoreError, ledger_now
 use talea_core::types::{AccountDef, AssetDef, Seq, Transaction};
 
 use crate::frame::{WireEvent, encode_frame};
-use crate::segment::SegmentSet;
+use crate::segment::{SegmentCatalog, SegmentSet};
 use crate::state::{BookState, CommittedRec, FramePos, Scratch};
 
 // ---------------------------------------------------------------------------
@@ -77,6 +77,9 @@ pub struct BookWriter {
     pub events: broadcast::Sender<Sequenced<LedgerEvent>>,
     /// Shared reference to the live in-memory state.
     pub state: Arc<RwLock<BookState>>,
+    /// Shared segment catalog — readers clone this to access segment files
+    /// without touching the writer task's exclusive `SegmentSet`.
+    pub catalog: SegmentCatalog,
     /// Join handle for the background task; held so callers can await
     /// clean shutdown.  `Arc<Mutex<Option<…>>>` keeps `BookWriter: Clone`.
     handle: Arc<Mutex<Option<JoinHandle<()>>>>,
@@ -118,6 +121,11 @@ impl BookWriter {
         }
 
         let segments = SegmentSet::open(&dir).await?;
+        // Clone the catalog handle BEFORE moving segments into the loop.
+        // The catalog's inner Arc is shared, so rotations done by the loop
+        // are immediately visible through this clone.
+        let catalog = segments.catalog();
+
         let (tx, rx) = mpsc::channel::<Job>(batch_max.max(64) * 4);
         let (ev_tx, _) = broadcast::channel::<Sequenced<LedgerEvent>>(1024);
 
@@ -130,6 +138,7 @@ impl BookWriter {
             tx,
             events: ev_tx,
             state,
+            catalog,
             handle: Arc::new(Mutex::new(Some(handle))),
         })
     }
