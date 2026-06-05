@@ -75,7 +75,7 @@ The trait symmetry is the point: `LedgerService` (in-process) and `TaleaClient` 
 
 ## HTTP API
 
-All `/v1` routes require `Authorization: Bearer <token>` when `TALEA_API_TOKEN` is set. Errors are a tagged JSON envelope: `{"error":"unbalanced", ...}`.
+All `/v1` routes require `Authorization: Bearer <token>` when a token is configured (`TALEA_API_TOKEN` or `TALEA_TOKENS_FILE`); a valid token used outside its book scope answers `403 forbidden`. Errors are a tagged JSON envelope: `{"error":"unbalanced", ...}`.
 
 | Route | What it does |
 |---|---|
@@ -213,8 +213,8 @@ The provisioned dashboard covers commit throughput/latency, HTTP rates and p95s 
 
 ```bash
 cargo test --workspace                 # everything; Postgres conformance skips without a DB
-TALEA_TEST_PG_URL=postgres://postgres:dev@localhost:5432 \
-    cargo test -p talea-store-postgres # the same conformance suite, live
+TALEA_TEST_PG_URL=postgres://talea:talea@localhost:5432/talea \
+    cargo test -p talea_store_postgres # the same conformance suite, live (compose DB)
 cargo clippy --workspace --all-targets
 ```
 
@@ -226,4 +226,4 @@ The conformance crate is the contract: both stores run the identical suite (idem
 - **Gapless per-book sequences** come from a counter-row lock, which also serializes writers per book. That is the write ceiling: roughly one commit per commit-latency per book, unbounded across books. The lock is the arbiter across any number of server instances; admission control lives at the HTTP edge.
 - **`as_of` filters on commit time**, not client-supplied `occurred_at` (which is metadata for backdating business time).
 - **SQLite subscriptions are same-process only** (no cross-connection notify). Use Postgres when subscribers and writers are separate processes.
-- **Auth is a single static bearer token** for now. Per-book tokens, TLS, and rate limiting are deployment concerns or future work.
+- **Auth is bearer tokens, optionally scoped per book** (`TALEA_TOKENS_FILE`; see Scoped tokens above). TLS and rate limiting are deployment concerns or future work.
