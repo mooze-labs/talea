@@ -33,7 +33,7 @@ books = ["payments"]   # exact book names, or ["*"] for all books
 access = "rw"          # "ro" = read-only
 ```
 
-A valid token used outside its scope answers `403 {"error":"forbidden","book":"..."}` — distinct from `401` (bad token). The book is checked wherever it lives: the path for reads and SSE, the request body for `POST /v1/accounts` and `POST /v1/transactions`, and the loaded transaction for `GET /v1/transactions/{tx_id}`. Registering assets requires an `rw` token scoped `["*"]` (the registry is global; the `403` carries `"book":"*"`). `TALEA_API_TOKEN` remains equivalent to an unnamed all-books `rw` entry.
+A valid token used outside its scope answers `403 {"error":"forbidden","book":"..."}` — distinct from `401` (bad token). The book is checked where it appears in the request: the path for reads and SSE, the request body for `POST /v1/accounts` and `POST /v1/transactions`. These `403`s only echo a name the caller supplied, so they reveal nothing about what exists. `GET /v1/transactions/{tx_id}` is the exception: the book is only known after the load, so an out-of-scope transaction answers `404` exactly like an unknown id — a `403` there would confirm the id exists and name a book the token cannot see. Registering assets requires an `rw` token scoped `["*"]` (the registry is global; the `403` carries `"book":"*"`). `TALEA_API_TOKEN` remains equivalent to an unnamed all-books `rw` entry.
 
 ## Routes
 
@@ -164,7 +164,7 @@ Response `200` (`Paged<PostingView>`):
 
 ### `GET /v1/transactions/{tx_id}`
 
-Committed transaction by UUID. Response `200` (`TransactionView`): `tx_id`, `book`, `seq`, `at`, `postings` (as above), `external_refs`, `metadata`. Other responses: `400 invalid_draft` (not a UUID) · `401` · `403 forbidden` (the loaded transaction's book is outside the token's scope) · `404 not_found` (unknown id, for every caller — a `403` therefore confirms the id exists; a deliberate operator-mode trade for debuggability).
+Committed transaction by UUID. Response `200` (`TransactionView`): `tx_id`, `book`, `seq`, `at`, `postings` (as above), `external_refs`, `metadata`. Other responses: `400 invalid_draft` (not a UUID) · `401` · `404 not_found` (unknown id, or a transaction whose book is outside the token's scope — indistinguishable by design, so the endpoint is not an existence oracle for transaction ids).
 
 ### `GET /v1/books/{book}/trial-balance?as_of=`
 

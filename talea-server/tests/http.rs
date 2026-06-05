@@ -1007,6 +1007,9 @@ async fn scoped_tokens_gate_books() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
+    // out-of-scope tx-by-id is 404, byte-identical to a true miss: a 403
+    // here would be an existence oracle for transaction ids (and leaked
+    // the owning book's name to a token that has no rights to it)
     let (s, body) = send(
         &app,
         "GET",
@@ -1015,8 +1018,26 @@ async fn scoped_tokens_gate_books() {
         None,
     )
     .await;
-    assert_eq!(s, StatusCode::FORBIDDEN);
-    assert_eq!(body["book"], "onramp");
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "not_found");
+    assert_eq!(body["what"], format!("transaction {tx_id}"));
+    assert!(body.get("book").is_none(), "must not leak the book: {body}");
+    // ...and carries the same shape as a genuinely unknown id
+    let ghost = "00000000-0000-4000-8000-000000000000";
+    let (s, ghost_body) = send(
+        &app,
+        "GET",
+        &format!("/v1/transactions/{ghost}"),
+        Some("other-svc"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(
+        ghost_body.as_object().unwrap().keys().collect::<Vec<_>>(),
+        body.as_object().unwrap().keys().collect::<Vec<_>>(),
+        "out-of-scope and true-miss bodies must be indistinguishable"
+    );
 
     // SSE: foreign book forbidden before any stream output
     let (s, body) = send(
