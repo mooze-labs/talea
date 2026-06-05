@@ -42,9 +42,30 @@ Run a production-shaped talea: Postgres storage, bearer auth, metrics, and the l
    | `TALEA_WRITE_QUEUE_DEPTH` / `TALEA_WRITE_BATCH_MAX` | `256` / `64` | Hot-book write tuning |
    | `TALEA_METRICS_BIND` | unset | You want Prometheus metrics (separate listener) |
 
-4. Configure your load balancer against `/health` — as **readiness, not liveness**. `/health` sits inside the admission limits on purpose: under saturation it returns `503`, which means *busy*, not *dead*. Treating it as liveness will restart healthy instances exactly under load. ([Why](explanation-architecture.md#admission-control-and-why-health-is-inside-it).)
+4. (Recommended) Scope tokens per service. The `init` token can do everything; production services should each hold a token confined to their own book(s). Write a tokens file and point the server at it:
 
-5. (Optional) Metrics + dashboards. With `TALEA_METRICS_BIND=0.0.0.0:9100` set, the compose `metrics` profile gives you Prometheus and a provisioned Grafana dashboard:
+   ```toml
+   # /etc/talea/tokens.toml
+   [tokens.payments]
+   token = "..."          # the secret the payments service presents
+   books = ["payments"]   # exact book names, or ["*"] for all books
+   access = "rw"          # "ro" = read-only (reporting, dashboards)
+
+   [tokens.reporting]
+   token = "..."
+   books = ["*"]
+   access = "ro"
+   ```
+
+   ```bash
+   TALEA_TOKENS_FILE=/etc/talea/tokens.toml cargo run -p talead -- serve
+   ```
+
+   A leaked `payments` token now cannot touch any other book: out-of-scope requests answer `403 {"error":"forbidden","book":...}`. Registering assets needs an `rw` token scoped `["*"]`. `TALEA_API_TOKEN` keeps working alongside the file as an unnamed all-books `rw` token — drop it from `.env` once every service has a scoped token. Rotation = edit the file, restart (the file is read once at startup; a syntactically broken or empty file fails startup rather than silently opening the API).
+
+5. Configure your load balancer against `/health` — as **readiness, not liveness**. `/health` sits inside the admission limits on purpose: under saturation it returns `503`, which means *busy*, not *dead*. Treating it as liveness will restart healthy instances exactly under load. ([Why](explanation-architecture.md#admission-control-and-why-health-is-inside-it).)
+
+6. (Optional) Metrics + dashboards. With `TALEA_METRICS_BIND=0.0.0.0:9100` set, the compose `metrics` profile gives you Prometheus and a provisioned Grafana dashboard:
 
    ```bash
    docker compose --profile metrics up -d
