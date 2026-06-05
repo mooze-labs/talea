@@ -1,0 +1,99 @@
+name: Bench
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Bench profile
+        type: choice
+        options: [trimmed, full]
+        default: trimmed
+
+# Serialize runs: overlapping benches would contend for the runner, and
+# concurrent gh-pages pushes would race.
+concurrency:
+  group: bench
+  cancel-in-progress: false
+
+permissions:
+  contents: write # benchmark-action pushes chart data to gh-pages
+
+env:
+  CARGO_TERM_COLOR: always
+  PROFILE: ${{ github.event_name == 'schedule' && 'full' || github.event_name == 'workflow_dispatch' && inputs.profile || 'trimmed' }}
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ github.event_name == 'push' && 45 || 120 }}
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release -p talead -p talea-bench
+
+      - name: Create bench database
+        run: PGPASSWORD=postgres psql -h localhost -U postgres -c 'CREATE DATABASE bench'
+
+      - name: Bench sqlite leg
+        run: .github/scripts/bench-leg.sh sqlite "sqlite://bench.db"
+
+      - name: Bench postgres leg
+        run: .github/scripts/bench-leg.sh postgres "postgres://postgres:postgres@localhost:5432/bench"
+
+      - name: Upload raw reports (full fidelity)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-reports-${{ env.PROFILE }}-${{ github.run_id }}
+          path: reports/
+
+      - name: Summarize
+        run: ./target/release/talea-bench summarize --rep-workers 8 reports/*.json
+
+      - name: Pick trend dataset
+        run: |
+          if [ "$PROFILE" = "full" ]; then
+            echo "DATASET=bench-nightly" >> "$GITHUB_ENV"
+          else
+            echo "DATASET=bench-push" >> "$GITHUB_ENV"
+          fi
+
+      - name: Publish throughput trends
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: ${{ env.DATASET }}-bigger
+          tool: customBiggerIsBetter
+          output-file-path: summary-bigger.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+
+      - name: Publish latency trends
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: ${{ env.DATASET }}-smaller
+          tool: customSmallerIsBetter
+          output-file-path: summary-smaller.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
