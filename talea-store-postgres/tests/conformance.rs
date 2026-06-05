@@ -56,5 +56,6 @@ pg_test!(commit_batch_dedups_within_batch);
 pg_test!(commit_batch_dedups_against_prior_commit);
 pg_test!(commit_batch_rejects_reserved_book);
 pg_test!(commit_batch_empty_returns_empty);
+pg_test!(commit_batch_min_balance_checks_run_sequentially);
 pg_test!(committed_at_is_monotonic_per_book);
 pg_test!(concurrent_cross_book_commits_all_succeed);
