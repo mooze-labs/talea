@@ -2631,6 +2631,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "subtle",
  "talea-core",
  "talea-store-postgres",
  "talea-store-sqlite",

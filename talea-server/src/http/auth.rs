@@ -3,6 +3,7 @@
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
+use subtle::ConstantTimeEq;
 use talea_core::api::ApiError;
 
 use crate::http::error::ApiFailure;
@@ -24,21 +25,25 @@ pub async fn require_bearer(
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
+        .and_then(parse_bearer);
     match provided {
-        Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => {
+        // ct_eq short-circuits on length, which is fine: length is not secret
+        Some(token) if bool::from(token.as_bytes().ct_eq(expected.as_bytes())) => {
             Ok(next.run(req).await)
         }
         _ => Err(ApiFailure(ApiError::Unauthorized)),
     }
 }
 
-/// Constant-time comparison (length is not secret).
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
+/// RFC 7235 credentials: a case-insensitive auth-scheme, one-or-more spaces,
+/// then the token.
+fn parse_bearer(header: &str) -> Option<&str> {
+    let (scheme, rest) = header.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
     }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    let token = rest.trim_start_matches(' ');
+    (!token.is_empty()).then_some(token)
 }
 
 #[cfg(test)]
@@ -46,9 +51,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn constant_time_eq_basics() {
-        assert!(constant_time_eq(b"secret", b"secret"));
-        assert!(!constant_time_eq(b"secret", b"secreT"));
-        assert!(!constant_time_eq(b"secret", b"secre"));
+    fn parse_bearer_scheme_case_insensitive() {
+        assert_eq!(parse_bearer("Bearer tok"), Some("tok"));
+        assert_eq!(parse_bearer("bearer tok"), Some("tok"));
+        assert_eq!(parse_bearer("BEARER tok"), Some("tok"));
+    }
+
+    #[test]
+    fn parse_bearer_allows_multiple_spaces() {
+        assert_eq!(parse_bearer("Bearer  tok"), Some("tok"));
+    }
+
+    #[test]
+    fn parse_bearer_rejects_other_shapes() {
+        assert_eq!(parse_bearer("Basic tok"), None);
+        assert_eq!(parse_bearer("Bearer"), None);
+        assert_eq!(parse_bearer("Bearer "), None);
+        assert_eq!(parse_bearer("Bearertok"), None);
+        assert_eq!(parse_bearer(""), None);
     }
 }

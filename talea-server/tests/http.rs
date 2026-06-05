@@ -236,6 +236,34 @@ async fn auth_gate() {
     assert_eq!(s, StatusCode::OK);
 }
 
+/// RFC 7235: the auth-scheme is case-insensitive, and one-or-more spaces
+/// separate it from the token.
+#[tokio::test]
+async fn auth_scheme_is_case_insensitive() {
+    let app = app(Some("sekrit")).await;
+
+    for value in ["bearer sekrit", "BEARER sekrit", "Bearer  sekrit"] {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/v1/books/onramp/trial-balance")
+            .header(header::AUTHORIZATION, value)
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "rejected {value:?}");
+    }
+
+    // a different scheme carrying the right token is still not bearer auth
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/books/onramp/trial-balance")
+        .header(header::AUTHORIZATION, "Basic sekrit")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
 /// talea_sse_subscribers is a process-global gauge and tests in this binary
 /// run in parallel: any two tests that hold SSE streams open will race the
 /// gauge test's exact-value assertions (observed on CI: gauge read 2).
