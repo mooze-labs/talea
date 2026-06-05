@@ -24,6 +24,7 @@ async fn app(token: Option<&str>) -> axum::Router {
             token: token.map(String::from),
         },
         256,
+        "sqlite",
     )
 }
 
@@ -529,6 +530,27 @@ async fn shed_increments_counter() {
     );
 }
 
+#[tokio::test]
+async fn health_reports_backend_header() {
+    let app = app(None).await;
+    let req = Request::builder()
+        .method("GET")
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get("x-talea-backend")
+            .and_then(|v| v.to_str().ok()),
+        Some("sqlite")
+    );
+    // body must stay exactly "ok" — load balancers compare it verbatim
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"ok");
+}
+
 mod overload {
     use super::*;
     use async_trait::async_trait;
@@ -606,7 +628,8 @@ mod overload {
                 ..Default::default()
             },
         ));
-        let app = talea_server::http::routes::router(service, AuthConfig { token: None }, 256);
+        let app =
+            talea_server::http::routes::router(service, AuthConfig { token: None }, 256, "sqlite");
 
         // first request: committer takes it and hangs
         {
