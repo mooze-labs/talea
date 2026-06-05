@@ -52,6 +52,47 @@ pub struct InitReport {
     pub env: EnvOutcome,
 }
 
+/// Parse log-store tuning env vars.
+///
+/// Each var is optional; a set but unparseable value is a startup error naming
+/// the variable. `TALEA_LOG_SNAPSHOT_EVERY=0` is valid and disables automatic
+/// snapshots.
+fn parse_log_store_opts() -> Result<talea_store_log::LogStoreOptions, Box<dyn std::error::Error>> {
+    parse_log_store_opts_from(|k| std::env::var(k).ok())
+}
+
+/// Testable core: accepts a lookup fn instead of reading the process env
+/// (env-var mutation races under the parallel test runner).
+fn parse_log_store_opts_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> Result<talea_store_log::LogStoreOptions, Box<dyn std::error::Error>> {
+    fn parse_opt<T>(var: &'static str, val: Option<String>) -> Result<Option<T>, Box<dyn std::error::Error>>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        val.map(|v| {
+            v.parse::<T>()
+                .map_err(|e| -> Box<dyn std::error::Error> { format!("invalid {var}: {e}").into() })
+        })
+        .transpose()
+    }
+
+    let snapshot_every = parse_opt::<u64>("TALEA_LOG_SNAPSHOT_EVERY", get("TALEA_LOG_SNAPSHOT_EVERY"))?;
+    let idem_hot_cap = parse_opt::<usize>("TALEA_LOG_IDEM_HOT_CAP", get("TALEA_LOG_IDEM_HOT_CAP"))?;
+    let segment_max = parse_opt::<u64>("TALEA_LOG_SEGMENT_MAX", get("TALEA_LOG_SEGMENT_MAX"))?;
+
+    if snapshot_every.is_none() && idem_hot_cap.is_none() && segment_max.is_none() {
+        return Ok(talea_store_log::LogStoreOptions::default());
+    }
+    let defaults = talea_store_log::LogStoreOptions::default();
+    Ok(talea_store_log::LogStoreOptions {
+        snapshot_every: snapshot_every.unwrap_or(defaults.snapshot_every),
+        idem_hot_cap: idem_hot_cap.unwrap_or(defaults.idem_hot_cap),
+        segment_max: segment_max.unwrap_or(defaults.segment_max),
+    })
+}
+
 /// URL-scheme store selection, mirroring talea_server::run::connect_store —
 /// but using the stores' own connect() (which migrate), since init doesn't
 /// need the server's pool sizing.
@@ -72,9 +113,11 @@ pub async fn connect_store(db_url: &str) -> Result<Arc<dyn Store>, Box<dyn std::
             .map_err(|e| format!("couldn't open {db_url}: {e}"))?;
         Ok(Arc::new(store))
     } else if let Some(path) = db_url.strip_prefix("log://") {
-        let store = talea_store_log::LogTaleaStore::open(std::path::Path::new(path))
-            .await
-            .map_err(|e| format!("couldn't open log store at {path}: {e}"))?;
+        let log_opts = parse_log_store_opts()?;
+        let store =
+            talea_store_log::LogTaleaStore::open_with(std::path::Path::new(path), log_opts)
+                .await
+                .map_err(|e| format!("couldn't open log store at {path}: {e}"))?;
         Ok(Arc::new(store))
     } else {
         Err(format!(
@@ -145,6 +188,99 @@ mod tests {
         let url = format!("log://{}", dir.path().display());
         let store = connect_store(&url).await.unwrap();
         assert!(store.asset(&talea_core::types::AssetId::new("X")).await.unwrap().is_none());
+    }
+
+    // ---- log store option parsing ------------------------------------------
+
+    #[test]
+    fn log_opts_garbage_snapshot_every_errors_with_var_name() {
+        let err = parse_log_store_opts_from(|k| {
+            if k == "TALEA_LOG_SNAPSHOT_EVERY" {
+                Some("not-a-number".into())
+            } else {
+                None
+            }
+        })
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("TALEA_LOG_SNAPSHOT_EVERY"),
+            "error must name the var, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn log_opts_garbage_idem_hot_cap_errors_with_var_name() {
+        let err = parse_log_store_opts_from(|k| {
+            if k == "TALEA_LOG_IDEM_HOT_CAP" {
+                Some("bad".into())
+            } else {
+                None
+            }
+        })
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("TALEA_LOG_IDEM_HOT_CAP"),
+            "error must name the var, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn log_opts_garbage_segment_max_errors_with_var_name() {
+        let err = parse_log_store_opts_from(|k| {
+            if k == "TALEA_LOG_SEGMENT_MAX" {
+                Some("???".into())
+            } else {
+                None
+            }
+        })
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("TALEA_LOG_SEGMENT_MAX"),
+            "error must name the var, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn log_opts_valid_values_open_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("log://{}", dir.path().display());
+
+        // Simulate all three vars set to valid values.
+        let opts = parse_log_store_opts_from(|k| match k {
+            "TALEA_LOG_SNAPSHOT_EVERY" => Some("500".into()),
+            "TALEA_LOG_IDEM_HOT_CAP" => Some("2000".into()),
+            "TALEA_LOG_SEGMENT_MAX" => Some("65536".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(opts.snapshot_every, 500);
+        assert_eq!(opts.idem_hot_cap, 2000);
+        assert_eq!(opts.segment_max, 65536);
+
+        // Confirm the store actually opens with these options.
+        let store = talea_store_log::LogTaleaStore::open_with(
+            std::path::Path::new(&url["log://".len()..]),
+            opts,
+        )
+        .await
+        .unwrap();
+        assert!(store.asset(&talea_core::types::AssetId::new("X")).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn log_opts_snapshot_every_zero_is_valid() {
+        let opts = parse_log_store_opts_from(|k| {
+            if k == "TALEA_LOG_SNAPSHOT_EVERY" {
+                Some("0".into())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert_eq!(opts.snapshot_every, 0, "0 should disable snapshots, not error");
     }
 
     #[test]
