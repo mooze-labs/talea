@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780672860214,
+  "lastUpdate": 1780672861800,
   "repoUrl": "https://github.com/mooze-labs/talea",
   "entries": {
     "bench-push-bigger": [
@@ -625,6 +625,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "reads/log/p99-trial-balance@c8",
             "value": 716,
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "h4vismat@mooze.app",
+            "name": "havis",
+            "username": "h4vismat"
+          },
+          "committer": {
+            "email": "h4vismat@mooze.app",
+            "name": "havis",
+            "username": "h4vismat"
+          },
+          "distinct": true,
+          "id": "c15dd14d74a358e464f9b835acde34f995fb7c2e",
+          "message": "style: cargo fmt over the log-store feature\n\nCI's Format gate caught what the local loops never ran — tests and\nclippy gated every task, fmt gated none of them.\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-05T11:10:10-03:00",
+          "tree_id": "d0e4238ca951c85670e3fd906ba225ad0233ca51",
+          "url": "https://github.com/mooze-labs/talea/commit/c15dd14d74a358e464f9b835acde34f995fb7c2e"
+        },
+        "date": 1780672861426,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "post-one-book/sqlite/p99-post@c8",
+            "value": 9647,
+            "unit": "us"
+          },
+          {
+            "name": "reads/sqlite/p99-balance@c8",
+            "value": 1505,
+            "unit": "us"
+          },
+          {
+            "name": "reads/sqlite/p99-history@c8",
+            "value": 7235,
+            "unit": "us"
+          },
+          {
+            "name": "reads/sqlite/p99-trial-balance@c8",
+            "value": 11503,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/postgres/p99-post@c8",
+            "value": 20207,
+            "unit": "us"
+          },
+          {
+            "name": "reads/postgres/p99-balance@c8",
+            "value": 4267,
+            "unit": "us"
+          },
+          {
+            "name": "reads/postgres/p99-history@c8",
+            "value": 6983,
+            "unit": "us"
+          },
+          {
+            "name": "reads/postgres/p99-trial-balance@c8",
+            "value": 11599,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/log/p99-post@c8",
+            "value": 4443,
+            "unit": "us"
+          },
+          {
+            "name": "reads/log/p99-balance@c8",
+            "value": 720,
+            "unit": "us"
+          },
+          {
+            "name": "reads/log/p99-history@c8",
+            "value": 2545,
+            "unit": "us"
+          },
+          {
+            "name": "reads/log/p99-trial-balance@c8",
+            "value": 692,
             "unit": "us"
           }
         ]
