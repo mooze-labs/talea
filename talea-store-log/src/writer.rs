@@ -121,7 +121,8 @@ impl BookWriter {
         Self::spawn_with(dir, state, batch_max, Self::DEFAULT_SNAPSHOT_EVERY).await
     }
 
-    /// Like [`spawn`] but with an explicit `snapshot_every` cadence.
+    /// Like [`spawn`] but with explicit `snapshot_every` cadence and
+    /// `segment_max` rotation threshold.
     ///
     /// After every `snapshot_every` applied events, the writer clones the
     /// current `BookState` and writes a snapshot asynchronously.  Snapshot
@@ -130,11 +131,26 @@ impl BookWriter {
     ///
     /// `snapshot_every = 0` disables automatic snapshots (useful for tests
     /// that trigger `Job::Snapshot` explicitly).
+    ///
+    /// `segment_max` sets the byte threshold for segment rotation.  Use
+    /// [`crate::segment::DEFAULT_SEGMENT_MAX`] (128 MiB) for production.
     pub async fn spawn_with(
         dir: PathBuf,
         state: Arc<RwLock<BookState>>,
         batch_max: usize,
         snapshot_every: u64,
+    ) -> std::io::Result<Self> {
+        Self::spawn_with_opts(dir, state, batch_max, snapshot_every, crate::segment::DEFAULT_SEGMENT_MAX).await
+    }
+
+    /// Full-options constructor — like [`spawn_with`] but also accepts an
+    /// explicit `segment_max` rotation threshold.
+    pub async fn spawn_with_opts(
+        dir: PathBuf,
+        state: Arc<RwLock<BookState>>,
+        batch_max: usize,
+        snapshot_every: u64,
+        segment_max: u64,
     ) -> std::io::Result<Self> {
         // Single-writer guard: fail fast if another writer is already live.
         {
@@ -150,7 +166,7 @@ impl BookWriter {
             }
         }
 
-        let segments = SegmentSet::open(&dir).await?;
+        let segments = SegmentSet::open_with_max(&dir, segment_max).await?;
         // Clone the catalog handle BEFORE moving segments into the loop.
         // The catalog's inner Arc is shared, so rotations done by the loop
         // are immediately visible through this clone.

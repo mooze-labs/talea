@@ -82,6 +82,13 @@ pub struct LogTaleaStore {
     registry: Arc<RwLock<HashMap<AssetId, AssetDef>>>,
     books: Arc<RwLock<HashMap<String, BookWriter>>>,
     batch_max: usize,
+    /// Segment rotation threshold in bytes.  Stored so that new books created
+    /// after `open_with` (via `book_writer`) use the same threshold as books
+    /// that were already on disk at startup.
+    segment_max: u64,
+    /// Snapshot cadence (events between automatic snapshots).  Stored so that
+    /// new books created after `open_with` use the same setting.
+    snapshot_every: u64,
     /// Set to `true` by `shutdown()` before draining writers.  Any subsequent
     /// call into `book_writer()` or `register_asset()` checks this flag first
     /// and returns an error rather than silently recreating writers over an
@@ -306,11 +313,12 @@ impl LogTaleaStore {
             drop(seg);
 
             // Spawn writer over the replayed state.
-            let writer = BookWriter::spawn_with(
+            let writer = BookWriter::spawn_with_opts(
                 book_dir,
                 Arc::new(RwLock::new(st)),
                 batch_max,
                 opts.snapshot_every,
+                opts.segment_max,
             )
             .await
             .map_err(io_err)?;
@@ -323,6 +331,8 @@ impl LogTaleaStore {
             registry: Arc::new(RwLock::new(registry)),
             books: Arc::new(RwLock::new(books_map)),
             batch_max,
+            segment_max: opts.segment_max,
+            snapshot_every: opts.snapshot_every,
             shut_down: AtomicBool::new(false),
             _lock: Mutex::new(Some(lock_file)),
         })
@@ -389,9 +399,15 @@ impl LogTaleaStore {
             .map_err(io_err)?;
 
         let state = Arc::new(RwLock::new(initial_state));
-        let writer = BookWriter::spawn(book_dir, state, self.batch_max)
-            .await
-            .map_err(io_err)?;
+        let writer = BookWriter::spawn_with_opts(
+            book_dir,
+            state,
+            self.batch_max,
+            self.snapshot_every,
+            self.segment_max,
+        )
+        .await
+        .map_err(io_err)?;
         guard.insert(book.to_string(), writer.clone());
         Ok(writer)
     }
@@ -978,6 +994,8 @@ impl Store for LogTaleaStore {
         let books = Arc::clone(&self.books);
         let dir = self.dir.clone();
         let batch_max = self.batch_max;
+        let segment_max = self.segment_max;
+        let snapshot_every = self.snapshot_every;
         let book = book.clone();
 
         Box::pin(async_stream::try_stream! {
@@ -1010,7 +1028,7 @@ impl Store for LogTaleaStore {
                         let mut initial_st = crate::state::BookState::default();
                         initial_st.idem.attach_dir(&book_dir, || async { Ok(vec![]) }).await.map_err(|e| StoreError::Io(Box::new(e)))?;
                         let state = Arc::new(RwLock::new(initial_st));
-                        let w = BookWriter::spawn(book_dir, state, batch_max)
+                        let w = BookWriter::spawn_with_opts(book_dir, state, batch_max, snapshot_every, segment_max)
                             .await
                             .map_err(|e| StoreError::Io(Box::new(e)))?;
                         g.insert(book.0.clone(), w.clone());
