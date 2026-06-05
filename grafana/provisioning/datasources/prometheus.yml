@@ -1,0 +1,12 @@
+# Provisioned datasource for the docker-compose `metrics` profile:
+# Grafana reaches Prometheus over the compose network.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: talea-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
