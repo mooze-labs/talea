@@ -104,9 +104,9 @@ impl PostingIndex {
         let n_sealed = self.sealed.len();
 
         // Find the first sealed chunk whose last entry has `at > t`.
-        let chunk_idx = self.sealed.partition_point(|chunk| {
-            chunk.last().map(|e| e.at <= t).unwrap_or(false)
-        });
+        let chunk_idx = self
+            .sealed
+            .partition_point(|chunk| chunk.last().map(|e| e.at <= t).unwrap_or(false));
 
         if chunk_idx < n_sealed {
             // Boundary is inside sealed[chunk_idx].
@@ -125,9 +125,9 @@ impl PostingIndex {
     pub fn partition_point_seq(&self, after: Seq) -> usize {
         let n_sealed = self.sealed.len();
 
-        let chunk_idx = self.sealed.partition_point(|chunk| {
-            chunk.last().map(|e| e.seq <= after).unwrap_or(false)
-        });
+        let chunk_idx = self
+            .sealed
+            .partition_point(|chunk| chunk.last().map(|e| e.seq <= after).unwrap_or(false));
 
         if chunk_idx < n_sealed {
             let chunk = &self.sealed[chunk_idx];
@@ -157,21 +157,19 @@ impl PostingIndex {
         let sealed_total = n_sealed * CHUNK;
 
         // Collect sealed entries starting at `idx`.
-        let sealed_iter: Box<dyn Iterator<Item = &PostingEntry>> = if idx < sealed_total {
-            let chunk_start = idx / CHUNK;
-            let local_start = idx % CHUNK;
-            Box::new(
-                self.sealed[chunk_start..]
-                    .iter()
-                    .enumerate()
-                    .flat_map(move |(ci, chunk)| {
+        let sealed_iter: Box<dyn Iterator<Item = &PostingEntry>> =
+            if idx < sealed_total {
+                let chunk_start = idx / CHUNK;
+                let local_start = idx % CHUNK;
+                Box::new(self.sealed[chunk_start..].iter().enumerate().flat_map(
+                    move |(ci, chunk)| {
                         let start = if ci == 0 { local_start } else { 0 };
                         chunk[start..].iter()
-                    }),
-            )
-        } else {
-            Box::new(std::iter::empty())
-        };
+                    },
+                ))
+            } else {
+                Box::new(std::iter::empty())
+            };
 
         let tail_start = idx.saturating_sub(sealed_total);
         let tail_iter = self.tail[tail_start.min(self.tail.len())..].iter();
@@ -390,11 +388,7 @@ impl BookState {
             let key = p.account.to_key();
             // Seed from committed balance if not yet in the overlay.
             if !scratch.raw.contains_key(&key) {
-                let committed_raw = self
-                    .accounts
-                    .get(&key)
-                    .map(|a| a.raw_balance)
-                    .unwrap_or(0);
+                let committed_raw = self.accounts.get(&key).map(|a| a.raw_balance).unwrap_or(0);
                 scratch.raw.insert(key.clone(), committed_raw);
             }
         }
@@ -408,16 +402,12 @@ impl BookState {
             match p.direction {
                 Direction::Debit => {
                     *entry = entry.checked_add(p.amount.minor()).ok_or_else(|| {
-                        StoreError::Io(
-                            format!("posting delta overflow for account {key}").into(),
-                        )
+                        StoreError::Io(format!("posting delta overflow for account {key}").into())
                     })?;
                 }
                 Direction::Credit => {
                     *entry = entry.checked_sub(p.amount.minor()).ok_or_else(|| {
-                        StoreError::Io(
-                            format!("posting delta overflow for account {key}").into(),
-                        )
+                        StoreError::Io(format!("posting delta overflow for account {key}").into())
                     })?;
                 }
             }
@@ -464,12 +454,13 @@ impl BookState {
             let key = p.account.to_key();
             if let Some(acct) = self.accounts.get_mut(&key) {
                 acct.raw_balance = match p.direction {
-                    Direction::Debit => acct
-                        .raw_balance
-                        .checked_add(p.amount.minor())
-                        .ok_or_else(|| {
-                            format!("balance overflow applying seq {seq} to account {key}")
-                        })?,
+                    Direction::Debit => {
+                        acct.raw_balance
+                            .checked_add(p.amount.minor())
+                            .ok_or_else(|| {
+                                format!("balance overflow applying seq {seq} to account {key}")
+                            })?
+                    }
                     Direction::Credit => acct
                         .raw_balance
                         .checked_sub(p.amount.minor())
@@ -600,7 +591,10 @@ mod tests {
     use talea_core::store::{AccountCfg, StoreError};
 
     fn acct(path: &str) -> AccountId {
-        AccountId { book: Book("b".into()), path: path.into() }
+        AccountId {
+            book: Book("b".into()),
+            path: path.into(),
+        }
     }
 
     fn state_with_accounts() -> BookState {
@@ -612,8 +606,15 @@ mod tests {
             st.accounts.insert(
                 acct(path).to_key(),
                 AccountState {
-                    def: AccountDef { id: acct(path), asset: AssetId::new("USD"), kind: AccountKind::Asset },
-                    cfg: AccountCfg { normal_side: normal, min_balance: min },
+                    def: AccountDef {
+                        id: acct(path),
+                        asset: AssetId::new("USD"),
+                        kind: AccountKind::Asset,
+                    },
+                    cfg: AccountCfg {
+                        normal_side: normal,
+                        min_balance: min,
+                    },
                     raw_balance: 0,
                     updated_seq: 0,
                     postings: PostingIndex::default(),
@@ -646,9 +647,19 @@ mod tests {
     fn overdraft_rejected_with_projected_would_be() {
         let st = state_with_accounts();
         let mut scratch = Scratch::default();
-        let t = tx("k1", vec![(acct("cash"), 100, Direction::Credit), (acct("rev"), 100, Direction::Debit)]);
+        let t = tx(
+            "k1",
+            vec![
+                (acct("cash"), 100, Direction::Credit),
+                (acct("rev"), 100, Direction::Debit),
+            ],
+        );
         match st.validate(&t, &mut scratch) {
-            Err(StoreError::ConstraintViolation { would_be, min_balance, .. }) => {
+            Err(StoreError::ConstraintViolation {
+                would_be,
+                min_balance,
+                ..
+            }) => {
                 assert_eq!(would_be, -100);
                 assert_eq!(min_balance, 0);
             }
@@ -660,14 +671,35 @@ mod tests {
     fn scratch_carries_earlier_batchmates_balances() {
         let st = state_with_accounts();
         let mut scratch = Scratch::default();
-        let fund = tx("k1", vec![(acct("cash"), 100, Direction::Debit), (acct("rev"), 100, Direction::Credit)]);
+        let fund = tx(
+            "k1",
+            vec![
+                (acct("cash"), 100, Direction::Debit),
+                (acct("rev"), 100, Direction::Credit),
+            ],
+        );
         st.validate(&fund, &mut scratch).unwrap();
         scratch.stage(&fund); // accepted: later batchmates see the projection
-        let spend = tx("k2", vec![(acct("cash"), 80, Direction::Credit), (acct("rev"), 80, Direction::Debit)]);
+        let spend = tx(
+            "k2",
+            vec![
+                (acct("cash"), 80, Direction::Credit),
+                (acct("rev"), 80, Direction::Debit),
+            ],
+        );
         st.validate(&spend, &mut scratch).unwrap(); // 100 - 80 = 20 >= 0: fine
         scratch.stage(&spend);
-        let over = tx("k3", vec![(acct("cash"), 30, Direction::Credit), (acct("rev"), 30, Direction::Debit)]);
-        assert!(matches!(st.validate(&over, &mut scratch), Err(StoreError::ConstraintViolation { .. })));
+        let over = tx(
+            "k3",
+            vec![
+                (acct("cash"), 30, Direction::Credit),
+                (acct("rev"), 30, Direction::Debit),
+            ],
+        );
+        assert!(matches!(
+            st.validate(&over, &mut scratch),
+            Err(StoreError::ConstraintViolation { .. })
+        ));
     }
 
     #[test]
@@ -675,10 +707,16 @@ mod tests {
         let st = state_with_accounts();
         let mut scratch = Scratch::default();
         let ghost = tx("k1", vec![(acct("nope"), 1, Direction::Debit)]);
-        assert!(matches!(st.validate(&ghost, &mut scratch), Err(StoreError::UnknownAccount(_))));
+        assert!(matches!(
+            st.validate(&ghost, &mut scratch),
+            Err(StoreError::UnknownAccount(_))
+        ));
         let mut wrong = tx("k2", vec![(acct("cash"), 1, Direction::Debit)]);
         wrong.postings[0].amount = Amount::new(1, AssetId::new("BTC"));
-        assert!(matches!(st.validate(&wrong, &mut scratch), Err(StoreError::AssetMismatch { .. })));
+        assert!(matches!(
+            st.validate(&wrong, &mut scratch),
+            Err(StoreError::AssetMismatch { .. })
+        ));
     }
 
     #[test]
@@ -687,13 +725,22 @@ mod tests {
         let mut scratch = Scratch::default();
         let mut t = tx("k1", vec![]);
         t.book = Book("_system".into());
-        assert!(matches!(st.validate(&t, &mut scratch), Err(StoreError::InvalidBook(_))));
+        assert!(matches!(
+            st.validate(&t, &mut scratch),
+            Err(StoreError::InvalidBook(_))
+        ));
     }
 
     #[test]
     fn apply_updates_balances_indexes_and_sums() {
         let mut st = state_with_accounts();
-        let t = tx("k1", vec![(acct("cash"), 100, Direction::Debit), (acct("rev"), 100, Direction::Credit)]);
+        let t = tx(
+            "k1",
+            vec![
+                (acct("cash"), 100, Direction::Debit),
+                (acct("rev"), 100, Direction::Credit),
+            ],
+        );
         let at = talea_core::store::ledger_now();
         st.apply_transaction(&t, 1, at, (1, 0));
         let cash = &st.accounts[&acct("cash").to_key()];
@@ -716,8 +763,15 @@ mod tests {
         st.accounts.insert(
             id.to_key(),
             AccountState {
-                def: AccountDef { id: id.clone(), asset: AssetId::new("USD"), kind: AccountKind::Asset },
-                cfg: AccountCfg { normal_side: Some(Direction::Debit), min_balance: None },
+                def: AccountDef {
+                    id: id.clone(),
+                    asset: AssetId::new("USD"),
+                    kind: AccountKind::Asset,
+                },
+                cfg: AccountCfg {
+                    normal_side: Some(Direction::Debit),
+                    min_balance: None,
+                },
                 raw_balance: i64::MAX,
                 updated_seq: 0,
                 postings: PostingIndex::default(),
@@ -737,7 +791,10 @@ mod tests {
         // must return InvalidBook, not UnknownAccount.
         let st = BookState::default();
         let mut scratch = Scratch::default();
-        let ghost_id = AccountId { book: Book("_x".into()), path: "nope".into() };
+        let ghost_id = AccountId {
+            book: Book("_x".into()),
+            path: "nope".into(),
+        };
         let mut t = tx("k1", vec![]);
         t.book = Book("_x".into());
         t.postings = vec![Posting {
@@ -745,7 +802,10 @@ mod tests {
             amount: Amount::new(1, AssetId::new("USD")),
             direction: Direction::Debit,
         }];
-        assert!(matches!(st.validate(&t, &mut scratch), Err(StoreError::InvalidBook(_))));
+        assert!(matches!(
+            st.validate(&t, &mut scratch),
+            Err(StoreError::InvalidBook(_))
+        ));
     }
 
     #[test]
@@ -765,7 +825,11 @@ mod tests {
             ],
         );
         match st.validate(&t, &mut scratch) {
-            Err(StoreError::ConstraintViolation { would_be, min_balance, .. }) => {
+            Err(StoreError::ConstraintViolation {
+                would_be,
+                min_balance,
+                ..
+            }) => {
                 assert_eq!(would_be, -20, "expected would_be=-20");
                 assert_eq!(min_balance, 0);
             }
@@ -778,10 +842,13 @@ mod tests {
         // Build a BookState with one account and one applied tx, then round-trip
         // through serde_json and check key fields survive.
         let mut st = state_with_accounts();
-        let t = tx("idem-key", vec![
-            (acct("cash"), 50, Direction::Debit),
-            (acct("rev"), 50, Direction::Credit),
-        ]);
+        let t = tx(
+            "idem-key",
+            vec![
+                (acct("cash"), 50, Direction::Debit),
+                (acct("rev"), 50, Direction::Credit),
+            ],
+        );
         let at = talea_core::store::ledger_now();
         st.apply_transaction(&t, 1, at, (1, 0));
 
@@ -853,7 +920,10 @@ mod tests {
         // partition_point_at mirrors partition_point_seq (seq and at both advance together).
         let t_chunk_boundary = base + chrono::Duration::seconds((CHUNK - 1) as i64);
         let pp_at = idx.partition_point_at(t_chunk_boundary);
-        assert_eq!(pp_at, CHUNK, "partition_point_at at chunk boundary must equal CHUNK");
+        assert_eq!(
+            pp_at, CHUNK,
+            "partition_point_at at chunk boundary must equal CHUNK"
+        );
 
         // get: first, last, cross-chunk.
         assert_eq!(idx.get(0).unwrap().seq, 1);
@@ -866,13 +936,19 @@ mod tests {
         let cross_start = CHUNK - 2;
         let items: Vec<Seq> = idx.iter_from(cross_start).take(5).map(|e| e.seq).collect();
         let expected: Vec<Seq> = ((cross_start + 1) as Seq..=(cross_start + 5) as Seq).collect();
-        assert_eq!(items, expected, "iter_from must cross chunk boundary seamlessly");
+        assert_eq!(
+            items, expected,
+            "iter_from must cross chunk boundary seamlessly"
+        );
 
         // Clone shares sealed chunks via Arc::ptr_eq.
         let clone = idx.clone();
         assert_eq!(clone.sealed.len(), idx.sealed.len());
         for (orig, cloned) in idx.sealed.iter().zip(clone.sealed.iter()) {
-            assert!(Arc::ptr_eq(orig, cloned), "sealed chunks must be Arc-shared after clone");
+            assert!(
+                Arc::ptr_eq(orig, cloned),
+                "sealed chunks must be Arc-shared after clone"
+            );
         }
     }
 
@@ -895,8 +971,16 @@ mod tests {
 
         assert_eq!(rt.len(), idx.len(), "round-trip must preserve entry count");
         // Re-chunking: first chunk must be sealed.
-        assert_eq!(rt.sealed.len(), 1, "one full sealed chunk expected after re-chunk");
-        assert_eq!(rt.tail.len(), 50, "tail must contain the 50 partial entries");
+        assert_eq!(
+            rt.sealed.len(),
+            1,
+            "one full sealed chunk expected after re-chunk"
+        );
+        assert_eq!(
+            rt.tail.len(),
+            50,
+            "tail must contain the 50 partial entries"
+        );
 
         // All entries in the same order.
         for i in 0..total {
@@ -904,7 +988,10 @@ mod tests {
             let got = rt.get(i).unwrap();
             assert_eq!(orig.seq, got.seq, "seq mismatch at index {i}");
             assert_eq!(orig.at, got.at, "at mismatch at index {i}");
-            assert_eq!(orig.raw_after, got.raw_after, "raw_after mismatch at index {i}");
+            assert_eq!(
+                orig.raw_after, got.raw_after,
+                "raw_after mismatch at index {i}"
+            );
         }
     }
 }

@@ -42,8 +42,8 @@ pub enum EncodeError {
 /// (the u32 frame-length field limit), preventing silent truncation.
 pub fn encode_frame(ev: &WireEvent) -> Result<Vec<u8>, EncodeError> {
     let payload = serde_json::to_vec(ev)?;
-    let len_u32 = u32::try_from(payload.len())
-        .map_err(|_| EncodeError::TooLarge { len: payload.len() })?;
+    let len_u32 =
+        u32::try_from(payload.len()).map_err(|_| EncodeError::TooLarge { len: payload.len() })?;
     let mut buf = Vec::with_capacity(HEADER_LEN + payload.len());
     buf.extend_from_slice(&len_u32.to_le_bytes());
     buf.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
@@ -79,10 +79,13 @@ pub fn decode_frame(buf: &[u8]) -> Result<Option<(WireEvent, usize)>, FrameError
         return Err(FrameError::Torn);
     };
     if crc32fast::hash(payload) != crc {
-        return Err(FrameError::Corrupt { reason: "crc mismatch".into() });
+        return Err(FrameError::Corrupt {
+            reason: "crc mismatch".into(),
+        });
     }
-    let ev = serde_json::from_slice(payload)
-        .map_err(|e| FrameError::Corrupt { reason: format!("json: {e}") })?;
+    let ev = serde_json::from_slice(payload).map_err(|e| FrameError::Corrupt {
+        reason: format!("json: {e}"),
+    })?;
     Ok(Some((ev, HEADER_LEN + len)))
 }
 
@@ -137,7 +140,10 @@ mod tests {
         let mut buf = encode_frame(&tx_event()).unwrap();
         let last = buf.len() - 1;
         buf[last] ^= 0xff; // payload damaged but full length present
-        assert!(matches!(decode_frame(&buf), Err(FrameError::Corrupt { .. })));
+        assert!(matches!(
+            decode_frame(&buf),
+            Err(FrameError::Corrupt { .. })
+        ));
     }
 
     #[test]
@@ -168,8 +174,8 @@ mod tests {
         // Craft a header claiming len = u32::MAX followed by a handful of bytes.
         let mut buf = Vec::new();
         buf.extend_from_slice(&u32::MAX.to_le_bytes()); // len field
-        buf.extend_from_slice(&0u32.to_le_bytes());     // crc field (arbitrary)
-        buf.extend_from_slice(b"tiny");                 // far fewer bytes than claimed
+        buf.extend_from_slice(&0u32.to_le_bytes()); // crc field (arbitrary)
+        buf.extend_from_slice(b"tiny"); // far fewer bytes than claimed
 
         match decode_frame(&buf) {
             Err(FrameError::Torn) => {}

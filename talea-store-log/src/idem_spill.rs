@@ -83,7 +83,10 @@ impl Bloom {
         let n = expected_n.max(1);
         let m_bits = 10 * n;
         let words = m_bits.div_ceil(64);
-        Self { bits: vec![0u64; words], m: words * 64 }
+        Self {
+            bits: vec![0u64; words],
+            m: words * 64,
+        }
     }
 
     fn hashes(&self, key: &str) -> [usize; BLOOM_K] {
@@ -105,9 +108,7 @@ impl Bloom {
         };
 
         let m = self.m as u64;
-        std::array::from_fn(|i| {
-            (h1.wrapping_add((i as u64).wrapping_mul(h2)) % m) as usize
-        })
+        std::array::from_fn(|i| (h1.wrapping_add((i as u64).wrapping_mul(h2)) % m) as usize)
     }
 
     /// Insert a key.
@@ -119,9 +120,9 @@ impl Bloom {
 
     /// `false` means definitely-not-present.  `true` means maybe-present.
     pub fn might_contain(&self, key: &str) -> bool {
-        self.hashes(key).iter().all(|&bit| {
-            (self.bits[bit / 64] >> (bit % 64)) & 1 == 1
-        })
+        self.hashes(key)
+            .iter()
+            .all(|&bit| (self.bits[bit / 64] >> (bit % 64)) & 1 == 1)
     }
 }
 
@@ -160,7 +161,9 @@ fn decode_run(bytes: &[u8]) -> Result<Vec<(String, CommittedRec)>, String> {
     let payload = &bytes[RUN_CRC_LEN..];
     let actual = crc32fast::hash(payload);
     if stored != actual {
-        return Err(format!("CRC mismatch: stored={stored:#010x} actual={actual:#010x}"));
+        return Err(format!(
+            "CRC mismatch: stored={stored:#010x} actual={actual:#010x}"
+        ));
     }
     serde_json::from_slice(payload).map_err(|e| format!("run parse: {e}"))
 }
@@ -453,17 +456,17 @@ impl TieredIdem {
             }
             let path = meta.path.clone();
             let key_owned = key.to_string();
-            let result = tokio::task::spawn_blocking(move || -> Result<Option<CommittedRec>, String> {
-                let bytes = std::fs::read(&path)
-                    .map_err(|e| format!("read: {e}"))?;
-                let pairs = decode_run(&bytes)?;
-                // Binary search by key.
-                match pairs.binary_search_by(|(k, _)| k.as_str().cmp(key_owned.as_str())) {
-                    Ok(idx) => Ok(Some(pairs[idx].1.clone())),
-                    Err(_) => Ok(None),
-                }
-            })
-            .await;
+            let result =
+                tokio::task::spawn_blocking(move || -> Result<Option<CommittedRec>, String> {
+                    let bytes = std::fs::read(&path).map_err(|e| format!("read: {e}"))?;
+                    let pairs = decode_run(&bytes)?;
+                    // Binary search by key.
+                    match pairs.binary_search_by(|(k, _)| k.as_str().cmp(key_owned.as_str())) {
+                        Ok(idx) => Ok(Some(pairs[idx].1.clone())),
+                        Err(_) => Ok(None),
+                    }
+                })
+                .await;
 
             match result {
                 Ok(Ok(Some(rec))) => return Some(rec),
@@ -641,8 +644,16 @@ impl TieredIdem {
             }
         }
 
-        let min_key = if merged.is_empty() { String::new() } else { merged[0].0.clone() };
-        let max_key = if merged.is_empty() { String::new() } else { merged[merged.len() - 1].0.clone() };
+        let min_key = if merged.is_empty() {
+            String::new()
+        } else {
+            merged[0].0.clone()
+        };
+        let max_key = if merged.is_empty() {
+            String::new()
+        } else {
+            merged[merged.len() - 1].0.clone()
+        };
         self.runs = if merged.is_empty() {
             vec![]
         } else {
@@ -823,9 +834,15 @@ mod tests {
 
         // Full lookup should still find it.
         let found = t.get(key0).await;
-        assert_eq!(found.as_ref().map(|r| r.seq), Some(rec0.seq),
-            "spilled key must still be found via run lookup");
-        assert_eq!(found.as_ref().map(|r| r.txid.clone()), Some(rec0.txid.clone()));
+        assert_eq!(
+            found.as_ref().map(|r| r.seq),
+            Some(rec0.seq),
+            "spilled key must still be found via run lookup"
+        );
+        assert_eq!(
+            found.as_ref().map(|r| r.txid.clone()),
+            Some(rec0.txid.clone())
+        );
         assert_eq!(found.as_ref().map(|r| r.at), Some(rec0.at));
     }
 
@@ -856,8 +873,10 @@ mod tests {
         // A fresh key that was never inserted will not be in the bloom filter
         // (and if not in the bloom, lookup_runs is never called).
         let fresh_key = "absolutely-fresh-key-xyz";
-        assert!(!t.bloom.might_contain(fresh_key),
-            "bloom must not contain a key that was never inserted");
+        assert!(
+            !t.bloom.might_contain(fresh_key),
+            "bloom must not contain a key that was never inserted"
+        );
 
         // Reset the counter, then perform a bloom-negative get.
         // RUN_READ_COUNT must stay at 0 — disk is skipped.
@@ -865,14 +884,17 @@ mod tests {
         let result = t.get(fresh_key).await;
         assert_eq!(result, None);
         assert_eq!(
-            test_hooks::count(), 0,
+            test_hooks::count(),
+            0,
             "bloom-negative get must not call lookup_runs (disk skip)"
         );
 
         // A bloom-positive get (spilled key that IS in the bloom) must increment
         // the counter, proving that lookup_runs is actually called for hits.
-        assert!(t.bloom.might_contain(&spilled_key),
-            "spilled_key must be in the bloom");
+        assert!(
+            t.bloom.might_contain(&spilled_key),
+            "spilled_key must be in the bloom"
+        );
         test_hooks::reset();
         let _ = t.get(&spilled_key).await;
         assert!(
@@ -936,7 +958,9 @@ mod tests {
         t2.attach_dir(dir.path(), || {
             let all = all_recs_clone.clone();
             async move { Ok(all) }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         // Phase 4: all original keys must be findable.
         for (key, rec) in &recs {
@@ -999,7 +1023,11 @@ mod tests {
             }
         }
 
-        assert!(t.runs.len() > 8, "must have more than 8 runs before merge: {}", t.runs.len());
+        assert!(
+            t.runs.len() > 8,
+            "must have more than 8 runs before merge: {}",
+            t.runs.len()
+        );
 
         // Now merge.
         t.merge_runs().await;
@@ -1104,7 +1132,10 @@ mod tests {
             .iter()
             .filter(|k| !hot_keys.contains(*k))
             .collect();
-        assert!(!actually_spilled.is_empty(), "some keys must have been spilled to runs");
+        assert!(
+            !actually_spilled.is_empty(),
+            "some keys must have been spilled to runs"
+        );
 
         // Phase 2: simulate a "crash" by asserting there is no bloom artifact
         // (the new design never writes one), then do a fresh attach_dir.
@@ -1119,7 +1150,9 @@ mod tests {
         // Phase 3: fresh TieredIdem, attach to the same dir.  The bloom must
         // be rebuilt from the run files so all spilled keys are might_contain==true.
         let mut t2 = TieredIdem::with_cap(cap);
-        t2.attach_dir(dir.path(), || async { Ok(vec![]) }).await.unwrap();
+        t2.attach_dir(dir.path(), || async { Ok(vec![]) })
+            .await
+            .unwrap();
 
         for key in &actually_spilled {
             assert!(

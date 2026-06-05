@@ -41,11 +41,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::DateTime;
 use chrono::Utc;
+use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::sync::Mutex;
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 use talea_core::events::LedgerEvent;
@@ -65,7 +65,11 @@ use std::collections::HashMap as StdHashMap;
 
 pub enum Job {
     Commit(Transaction, oneshot::Sender<Result<Committed, StoreError>>),
-    OpenAccount(AccountDef, AccountCfg, oneshot::Sender<Result<(), StoreError>>),
+    OpenAccount(
+        AccountDef,
+        AccountCfg,
+        oneshot::Sender<Result<(), StoreError>>,
+    ),
     RegisterAsset(AssetDef, oneshot::Sender<Result<(), StoreError>>),
     /// Trigger an immediate snapshot and reply when it completes.
     ///
@@ -140,7 +144,14 @@ impl BookWriter {
         batch_max: usize,
         snapshot_every: u64,
     ) -> std::io::Result<Self> {
-        Self::spawn_with_opts(dir, state, batch_max, snapshot_every, crate::segment::DEFAULT_SEGMENT_MAX).await
+        Self::spawn_with_opts(
+            dir,
+            state,
+            batch_max,
+            snapshot_every,
+            crate::segment::DEFAULT_SEGMENT_MAX,
+        )
+        .await
     }
 
     /// Full-options constructor — like [`spawn_with`] but also accepts an
@@ -152,7 +163,15 @@ impl BookWriter {
         snapshot_every: u64,
         segment_max: u64,
     ) -> std::io::Result<Self> {
-        Self::spawn_inner(dir, state, batch_max, snapshot_every, segment_max, None::<std::sync::Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>>).await
+        Self::spawn_inner(
+            dir,
+            state,
+            batch_max,
+            snapshot_every,
+            segment_max,
+            None::<std::sync::Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>>,
+        )
+        .await
     }
 
     /// Test-only constructor that installs a [`SegmentSet::sync_hook`] before
@@ -168,7 +187,15 @@ impl BookWriter {
         batch_max: usize,
         hook: Option<std::sync::Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>>,
     ) -> std::io::Result<Self> {
-        Self::spawn_inner(dir, state, batch_max, 0, crate::segment::DEFAULT_SEGMENT_MAX, hook).await
+        Self::spawn_inner(
+            dir,
+            state,
+            batch_max,
+            0,
+            crate::segment::DEFAULT_SEGMENT_MAX,
+            hook,
+        )
+        .await
     }
 
     /// Shared constructor used by all public `spawn*` variants.
@@ -186,7 +213,8 @@ impl BookWriter {
         // Single-writer guard: fail fast if another writer is already live.
         {
             let st = state.read().await;
-            if st.writer_attached
+            if st
+                .writer_attached
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()
             {
@@ -216,7 +244,16 @@ impl BookWriter {
         let ev_tx2 = ev_tx.clone();
         let snap_inflight: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
-        let handle = tokio::spawn(run_loop(rx, segments, state2, ev_tx2, batch_max, dir, snapshot_every, snap_inflight));
+        let handle = tokio::spawn(run_loop(
+            rx,
+            segments,
+            state2,
+            ev_tx2,
+            batch_max,
+            dir,
+            snapshot_every,
+            snap_inflight,
+        ));
 
         Ok(Self {
             tx,
@@ -433,7 +470,9 @@ async fn run_loop(
                         let idem_key = tx.idempotency_key.0.clone();
 
                         // Check committed idem: hot map first, then pre-resolved disk.
-                        let committed_rec = st.idem.get_hot(&idem_key)
+                        let committed_rec = st
+                            .idem
+                            .get_hot(&idem_key)
                             .cloned()
                             .or_else(|| disk_resolved.get(&idem_key).cloned());
                         if let Some(rec) = committed_rec {
@@ -443,7 +482,10 @@ async fn run_loop(
 
                         // Check within-batch idem.
                         if let Some(&staged_slot) = scratch.idem.get(&idem_key) {
-                            replies.push(Reply::DupInBatch { job_idx: idx, staged_slot });
+                            replies.push(Reply::DupInBatch {
+                                job_idx: idx,
+                                staged_slot,
+                            });
                             continue;
                         }
 
@@ -670,7 +712,10 @@ async fn run_loop(
                     }
                 }
 
-                Reply::DupInBatch { job_idx, staged_slot } => {
+                Reply::DupInBatch {
+                    job_idx,
+                    staged_slot,
+                } => {
                     let s = &staged[staged_slot];
                     // Resolve to the FIRST (staged) transaction's identity, not the
                     // duplicate's own txid — mirrors the committed-idem (Reply::Dup) path.
@@ -832,14 +877,24 @@ mod tests {
         let mut st = BookState::default();
         for path in ["cash", "rev"] {
             st.accounts.insert(
-                AccountId { book: Book("b".into()), path: path.into() }.to_key(),
+                AccountId {
+                    book: Book("b".into()),
+                    path: path.into(),
+                }
+                .to_key(),
                 AccountState {
                     def: AccountDef {
-                        id: AccountId { book: Book("b".into()), path: path.into() },
+                        id: AccountId {
+                            book: Book("b".into()),
+                            path: path.into(),
+                        },
                         asset: AssetId::new("USD"),
                         kind: AccountKind::Asset,
                     },
-                    cfg: AccountCfg { normal_side: None, min_balance: None },
+                    cfg: AccountCfg {
+                        normal_side: None,
+                        min_balance: None,
+                    },
                     raw_balance: 0,
                     updated_seq: 0,
                     postings: PostingIndex::default(),
@@ -857,12 +912,18 @@ mod tests {
             book: Book("b".into()),
             postings: vec![
                 Posting {
-                    account: AccountId { book: Book("b".into()), path: "cash".into() },
+                    account: AccountId {
+                        book: Book("b".into()),
+                        path: "cash".into(),
+                    },
                     amount: Amount::new(10, AssetId::new("USD")),
                     direction: Direction::Debit,
                 },
                 Posting {
-                    account: AccountId { book: Book("b".into()), path: "rev".into() },
+                    account: AccountId {
+                        book: Book("b".into()),
+                        path: "rev".into(),
+                    },
                     amount: Amount::new(10, AssetId::new("USD")),
                     direction: Direction::Credit,
                 },
@@ -907,10 +968,20 @@ mod tests {
         // a tx referencing a ghost account must be rejected while a valid
         // batchmate commits with the next gapless seq
         let mut bad = tx("bad");
-        bad.postings[0].account = AccountId { book: Book("b".into()), path: "ghost".into() };
+        bad.postings[0].account = AccountId {
+            book: Book("b".into()),
+            path: "ghost".into(),
+        };
         let (r_bad, r_ok) = tokio::join!(w.commit(bad), w.commit(tx("ok")));
-        assert!(matches!(r_bad, Err(talea_core::store::StoreError::UnknownAccount(_))));
-        assert_eq!(r_ok.unwrap().seq, 1, "rejected draft must not consume a seq");
+        assert!(matches!(
+            r_bad,
+            Err(talea_core::store::StoreError::UnknownAccount(_))
+        ));
+        assert_eq!(
+            r_ok.unwrap().seq,
+            1,
+            "rejected draft must not consume a seq"
+        );
     }
 
     #[tokio::test]
@@ -920,7 +991,9 @@ mod tests {
         let mut handles = vec![];
         for i in 0..64 {
             let w = w.clone();
-            handles.push(tokio::spawn(async move { w.commit(tx(&format!("k{i}"))).await }));
+            handles.push(tokio::spawn(
+                async move { w.commit(tx(&format!("k{i}"))).await },
+            ));
         }
         let mut seqs: Vec<Seq> = vec![];
         for h in handles {
@@ -966,14 +1039,21 @@ mod tests {
         let c2 = r2.expect("second commit must succeed");
 
         // Both must resolve to the SAME txid/seq/at (the first transaction's).
-        assert_eq!(c2.txid, c1.txid, "dup must resolve to the first txid, not its own");
+        assert_eq!(
+            c2.txid, c1.txid,
+            "dup must resolve to the first txid, not its own"
+        );
         assert_eq!(c2.seq, c1.seq, "dup must resolve to the first seq");
         assert_eq!(c2.at, c1.at, "dup must resolve to the first at");
 
         // Only one frame should be on disk regardless of batching.
         let seg = crate::segment::SegmentSet::open(dir.path()).await.unwrap();
         let frames = seg.scan_from(1, 1000).await.unwrap();
-        assert_eq!(frames.len(), 1, "only the first transaction should be persisted");
+        assert_eq!(
+            frames.len(),
+            1,
+            "only the first transaction should be persisted"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1015,33 +1095,50 @@ mod tests {
             .unwrap();
 
         let def = AccountDef {
-            id: AccountId { book: Book("b".into()), path: "checking".into() },
+            id: AccountId {
+                book: Book("b".into()),
+                path: "checking".into(),
+            },
             asset: AssetId::new("USD"),
             kind: AccountKind::Asset,
         };
-        let cfg = AccountCfg { normal_side: None, min_balance: None };
+        let cfg = AccountCfg {
+            normal_side: None,
+            min_balance: None,
+        };
 
         // First open — should succeed.
         let (tx1, rx1) = oneshot::channel();
-        w.submit(Job::OpenAccount(def.clone(), cfg.clone(), tx1)).await.unwrap();
+        w.submit(Job::OpenAccount(def.clone(), cfg.clone(), tx1))
+            .await
+            .unwrap();
         rx1.await.unwrap().expect("first open must succeed");
 
         // Second open with identical (def, cfg) — idempotent, no new frame.
         let (tx2, rx2) = oneshot::channel();
-        w.submit(Job::OpenAccount(def.clone(), cfg.clone(), tx2)).await.unwrap();
+        w.submit(Job::OpenAccount(def.clone(), cfg.clone(), tx2))
+            .await
+            .unwrap();
         rx2.await.unwrap().expect("idempotent open must succeed");
 
         // Exactly ONE AccountOpened frame on disk.
         let seg = crate::segment::SegmentSet::open(dir.path()).await.unwrap();
         let frames = seg.scan_from(1, 1000).await.unwrap();
-        assert_eq!(frames.len(), 1, "idempotent open must not append a second frame");
+        assert_eq!(
+            frames.len(),
+            1,
+            "idempotent open must not append a second frame"
+        );
 
         // The next commit must get seq 2 (open consumed seq 1; idempotent hit consumed none).
         // To commit we need the account to exist; it does now. Add a counterpart.
         let state_ref = state.read().await;
         let next = state_ref.next_seq;
         drop(state_ref);
-        assert_eq!(next, 2, "seq must be 2 after one open + one idempotent no-op");
+        assert_eq!(
+            next, 2,
+            "seq must be 2 after one open + one idempotent no-op"
+        );
     }
 
     #[tokio::test]
@@ -1053,20 +1150,33 @@ mod tests {
             .unwrap();
 
         let def = AccountDef {
-            id: AccountId { book: Book("b".into()), path: "savings".into() },
+            id: AccountId {
+                book: Book("b".into()),
+                path: "savings".into(),
+            },
             asset: AssetId::new("USD"),
             kind: AccountKind::Asset,
         };
-        let cfg1 = AccountCfg { normal_side: None, min_balance: None };
-        let cfg2 = AccountCfg { normal_side: Some(Direction::Debit), min_balance: Some(0) };
+        let cfg1 = AccountCfg {
+            normal_side: None,
+            min_balance: None,
+        };
+        let cfg2 = AccountCfg {
+            normal_side: Some(Direction::Debit),
+            min_balance: Some(0),
+        };
 
         let (tx1, rx1) = oneshot::channel();
-        w.submit(Job::OpenAccount(def.clone(), cfg1, tx1)).await.unwrap();
+        w.submit(Job::OpenAccount(def.clone(), cfg1, tx1))
+            .await
+            .unwrap();
         rx1.await.unwrap().expect("first open must succeed");
 
         // Re-open same id but different cfg → AlreadyExists.
         let (tx2, rx2) = oneshot::channel();
-        w.submit(Job::OpenAccount(def.clone(), cfg2, tx2)).await.unwrap();
+        w.submit(Job::OpenAccount(def.clone(), cfg2, tx2))
+            .await
+            .unwrap();
         let err = rx2.await.unwrap().expect_err("conflicting open must fail");
         assert!(
             matches!(err, talea_core::store::StoreError::AlreadyExists { .. }),
@@ -1091,14 +1201,20 @@ mod tests {
 
         let (reply_tx, reply_rx) = oneshot::channel();
         w.submit(Job::RegisterAsset(def, reply_tx)).await.unwrap();
-        reply_rx.await.unwrap().expect("register asset must succeed");
+        reply_rx
+            .await
+            .unwrap()
+            .expect("register asset must succeed");
 
         // Exactly ONE AssetRegistered frame on disk.
         let seg = crate::segment::SegmentSet::open(dir.path()).await.unwrap();
         let frames = seg.scan_from(1, 1000).await.unwrap();
         assert_eq!(frames.len(), 1, "one AssetRegistered frame expected");
         assert!(
-            matches!(frames[0].event, talea_core::events::LedgerEvent::AssetRegistered(_)),
+            matches!(
+                frames[0].event,
+                talea_core::events::LedgerEvent::AssetRegistered(_)
+            ),
             "expected AssetRegistered event",
         );
     }
@@ -1115,7 +1231,10 @@ mod tests {
 
         // Bad tx: ghost account → will be rejected.
         let mut bad = tx("bad");
-        bad.postings[0].account = AccountId { book: Book("b".into()), path: "ghost".into() };
+        bad.postings[0].account = AccountId {
+            book: Book("b".into()),
+            path: "ghost".into(),
+        };
 
         // Good tx: valid accounts.
         let good = tx("good");
@@ -1130,12 +1249,11 @@ mod tests {
         assert_eq!(ev.seq, good_seq, "broadcast event must be the accepted tx");
 
         // No further event within a short timeout — the rejected tx emits nothing.
-        let second = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            rx.recv(),
-        )
-        .await;
-        assert!(second.is_err(), "no second broadcast event expected after rejected draft");
+        let second = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
+        assert!(
+            second.is_err(),
+            "no second broadcast event expected after rejected draft"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1151,14 +1269,24 @@ mod tests {
         let mut st = BookState::default();
         for path in ["cash", "rev"] {
             st.accounts.insert(
-                AccountId { book: Book("b".into()), path: path.into() }.to_key(),
+                AccountId {
+                    book: Book("b".into()),
+                    path: path.into(),
+                }
+                .to_key(),
                 AccountState {
                     def: AccountDef {
-                        id: AccountId { book: Book("b".into()), path: path.into() },
+                        id: AccountId {
+                            book: Book("b".into()),
+                            path: path.into(),
+                        },
                         asset: AssetId::new("USD"),
                         kind: AccountKind::Asset,
                     },
-                    cfg: AccountCfg { normal_side: None, min_balance: None },
+                    cfg: AccountCfg {
+                        normal_side: None,
+                        min_balance: None,
+                    },
                     raw_balance: 0,
                     updated_seq: 0,
                     postings: PostingIndex::default(),
@@ -1166,14 +1294,9 @@ mod tests {
             );
         }
         let state = Arc::new(RwLock::new(st));
-        let w = BookWriter::spawn_for_test(
-            dir.to_path_buf(),
-            Arc::clone(&state),
-            1024,
-            hook,
-        )
-        .await
-        .unwrap();
+        let w = BookWriter::spawn_for_test(dir.to_path_buf(), Arc::clone(&state), 1024, hook)
+            .await
+            .unwrap();
         (w, state)
     }
 
@@ -1206,7 +1329,9 @@ mod tests {
 
         // Reset and repeat for a second batch.
         synced.store(false, Ordering::SeqCst);
-        w.commit(tx("k2")).await.expect("second commit must succeed");
+        w.commit(tx("k2"))
+            .await
+            .expect("second commit must succeed");
         assert!(
             synced.load(Ordering::SeqCst),
             "ack must arrive only after sync_hook set synced=true (second commit)"
@@ -1241,13 +1366,10 @@ mod tests {
             w.commit(tx(key)).await.expect("commit must succeed");
 
             // Receive the broadcast event.
-            let _ev = tokio::time::timeout(
-                std::time::Duration::from_millis(500),
-                rx.recv(),
-            )
-            .await
-            .expect("broadcast timeout")
-            .expect("broadcast channel closed");
+            let _ev = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+                .await
+                .expect("broadcast timeout")
+                .expect("broadcast channel closed");
 
             // The sync count must be at least 1 (one sync per batch minimum).
             let sc = sync_count.load(Ordering::SeqCst);
@@ -1285,10 +1407,16 @@ mod tests {
 
         // Commit a tx that references a ghost account → must be rejected.
         let mut bad = tx("ghost-tx");
-        bad.postings[0].account = AccountId { book: Book("b".into()), path: "ghost".into() };
+        bad.postings[0].account = AccountId {
+            book: Book("b".into()),
+            path: "ghost".into(),
+        };
         let result = w.commit(bad).await;
         assert!(
-            matches!(result, Err(talea_core::store::StoreError::UnknownAccount(_))),
+            matches!(
+                result,
+                Err(talea_core::store::StoreError::UnknownAccount(_))
+            ),
             "ghost-account tx must be rejected, got {result:?}"
         );
 

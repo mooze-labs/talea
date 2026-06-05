@@ -308,7 +308,13 @@ mod tests {
         ])
         .unwrap_err();
         assert!(
-            matches!(&err, ConfigError::Invalid { var: "TALEA_LOG_SNAPSHOT_EVERY", .. }),
+            matches!(
+                &err,
+                ConfigError::Invalid {
+                    var: "TALEA_LOG_SNAPSHOT_EVERY",
+                    ..
+                }
+            ),
             "expected Invalid for TALEA_LOG_SNAPSHOT_EVERY, got: {err:?}"
         );
     }
@@ -321,7 +327,13 @@ mod tests {
         ])
         .unwrap_err();
         assert!(
-            matches!(&err, ConfigError::Invalid { var: "TALEA_LOG_IDEM_HOT_CAP", .. }),
+            matches!(
+                &err,
+                ConfigError::Invalid {
+                    var: "TALEA_LOG_IDEM_HOT_CAP",
+                    ..
+                }
+            ),
             "expected Invalid for TALEA_LOG_IDEM_HOT_CAP, got: {err:?}"
         );
     }
@@ -334,7 +346,13 @@ mod tests {
         ])
         .unwrap_err();
         assert!(
-            matches!(&err, ConfigError::Invalid { var: "TALEA_LOG_SEGMENT_MAX", .. }),
+            matches!(
+                &err,
+                ConfigError::Invalid {
+                    var: "TALEA_LOG_SEGMENT_MAX",
+                    ..
+                }
+            ),
             "expected Invalid for TALEA_LOG_SEGMENT_MAX, got: {err:?}"
         );
     }
