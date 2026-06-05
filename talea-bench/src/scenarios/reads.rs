@@ -145,10 +145,20 @@ pub async fn seed_depth(
             Ok::<(), String>(())
         }));
     }
+    let mut result: Result<(), String> = Ok(());
     for h in handles {
-        h.await
-            .map_err(|e| format!("seed worker panicked: {e}"))??;
+        match h.await.map_err(|e| format!("seed worker panicked: {e}")) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                result = Err(e);
+                break;
+            }
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
+        }
     }
     monitor.abort();
-    Ok(())
+    result
 }
