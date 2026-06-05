@@ -6,3 +6,6 @@ talea.db-wal
 
 .DS_Store
 bench-results/
+
+# untracked working documents (specs/plans) — see docs/README.md
+docs/superpowers/
