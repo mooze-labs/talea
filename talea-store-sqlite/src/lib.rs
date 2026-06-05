@@ -22,6 +22,17 @@ pub struct SqliteTaleaStore {
 }
 
 impl SqliteTaleaStore {
+    /// Begin a WRITE transaction. SQLite write transactions must take the
+    /// write lock up front (`BEGIN IMMEDIATE`): a deferred `BEGIN` only
+    /// upgrades at its first write statement, where contention surfaces as
+    /// immediate `SQLITE_BUSY` / `SQLITE_BUSY_SNAPSHOT` -- errors that
+    /// `busy_timeout` cannot absorb. Immediate writers queue on the write
+    /// lock (honoring `busy_timeout`) instead of failing under cross-book
+    /// write concurrency.
+    async fn begin_write(&self) -> Result<DbTx<'static, Sqlite>, sqlx::Error> {
+        self.pool.begin_with("BEGIN IMMEDIATE").await
+    }
+
     pub fn new(pool: SqlitePool) -> Self {
         let (publisher, _) = broadcast::channel(1024);
         Self { pool, publisher }
@@ -527,7 +538,7 @@ async fn find_committed(
 #[async_trait]
 impl Store for SqliteTaleaStore {
     async fn register_asset(&self, asset: &AssetDef) -> Result<(), StoreError> {
-        let mut db = self.pool.begin().await.map_err(io_err)?;
+        let mut db = self.begin_write().await.map_err(io_err)?;
 
         if let Some(row) = sqlx::query(
             "SELECT class, network, native_id, precision, name FROM assets WHERE id = ?1",
@@ -589,7 +600,7 @@ impl Store for SqliteTaleaStore {
             return Err(StoreError::InvalidBook(def.id.book.clone()));
         }
         let key = def.id.to_key();
-        let mut db = self.pool.begin().await.map_err(io_err)?;
+        let mut db = self.begin_write().await.map_err(io_err)?;
 
         let asset_exists = sqlx::query("SELECT 1 FROM assets WHERE id = ?1")
             .bind(def.asset.as_str())
@@ -661,7 +672,7 @@ impl Store for SqliteTaleaStore {
         if transaction.book.is_reserved() {
             return Err(StoreError::InvalidBook(transaction.book.clone()));
         }
-        let mut db = self.pool.begin().await.map_err(io_err)?;
+        let mut db = self.begin_write().await.map_err(io_err)?;
         match commit_draft(&mut db, transaction).await {
             Ok(committed) => {
                 db.commit().await.map_err(io_err)?;
@@ -672,6 +683,7 @@ impl Store for SqliteTaleaStore {
             // the winner's result
             Err(e) if is_unique_violation(&e) => {
                 drop(db);
+                // read-only lookup of the winner: deferred BEGIN is right here
                 let mut db = self.pool.begin().await.map_err(io_err)?;
                 if let Some(prior) =
                     find_committed(&mut db, &transaction.book, &transaction.idempotency_key).await?
@@ -692,7 +704,7 @@ impl Store for SqliteTaleaStore {
         if txs.is_empty() {
             return Vec::new();
         }
-        let mut db = match self.pool.begin().await {
+        let mut db = match self.begin_write().await {
             Ok(db) => db,
             Err(e) => {
                 let msg = format!("failed to begin batch transaction: {e}");

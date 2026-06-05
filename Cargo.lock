@@ -2843,6 +2843,7 @@ dependencies = [
  "sqlx",
  "talea-core",
  "talea-store-conformance",
+ "tempfile",
  "tokio",
  "uuid",
 ]

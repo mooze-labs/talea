@@ -194,8 +194,7 @@ pub async fn get_history(
     responses(
         (status = 200, description = "the committed transaction with its postings", body = TransactionView),
         (status = 401, description = "missing or invalid bearer token", body = ApiError),
-        (status = 403, description = "token scope does not cover this book", body = ApiError),
-        (status = 404, description = "unknown transaction id", body = ApiError),
+        (status = 404, description = "unknown transaction id, or one outside the token's book scope (indistinguishable by design: a 403 would confirm the id exists)", body = ApiError),
         (status = 408, description = "server-side timeout; safe to retry (read)", body = ApiError),
         (status = 503, description = "saturated; honor Retry-After and retry", body = ApiError),
     ), security(("bearer" = [])), tag = "ledger")]
@@ -209,8 +208,13 @@ pub async fn get_transaction(
         .transaction(&tx_id)
         .await
         .map_err(ApiFailure)?;
+    // Out-of-scope reads answer exactly like a true miss. The tx id is
+    // global (not book-prefixed like the other routes), so a 403 here
+    // would be an existence oracle and name a book the token can't see.
     if !scope.allows_read(&view.book) {
-        return Err(forbid(&view.book));
+        return Err(ApiFailure(ApiError::NotFound {
+            what: format!("transaction {tx_id}"),
+        }));
     }
     Ok(Json(view))
 }

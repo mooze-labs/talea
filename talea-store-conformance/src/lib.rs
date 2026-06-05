@@ -766,6 +766,42 @@ pub async fn commit_batch_empty_returns_empty(store: &impl Store) {
 /// sqlite), so `(seq, at)` is jointly monotonic — the property `as_of`
 /// precision depends on. Guards against any backend capturing time outside
 /// the lock or from a per-instance clock.
+pub async fn concurrent_cross_book_commits_all_succeed(store: &impl Store) {
+    // Writers to DIFFERENT books contend only at the storage layer. On
+    // SQLite (one WAL writer) they must queue behind the write lock —
+    // never surface BUSY/BUSY_SNAPSHOT as commit errors. Regression test
+    // for deferred-BEGIN write transactions failing their lock upgrade
+    // under cross-book write concurrency. NOTE: this only exercises real
+    // contention on a multi-connection pool; the single-connection
+    // in-memory sqlite harness serializes at the pool (see the dedicated
+    // real-pool test in talea-store-sqlite).
+    const BOOKS: usize = 4;
+    const TXS_PER_BOOK: usize = 25;
+    let mut books = Vec::new();
+    for _ in 0..BOOKS {
+        books.push(setup_book(store).await);
+    }
+    let mut commits = Vec::new();
+    for (book, asset_id) in &books {
+        for i in 0..TXS_PER_BOOK {
+            commits.push(async move {
+                let tx = transfer(book, &format!("x{i}"), "deposits", "cash", asset_id, 1);
+                store.commit(&tx).await
+            });
+        }
+    }
+    for result in futures::future::join_all(commits).await {
+        result.expect("cross-book concurrent commit must succeed");
+    }
+    for (book, _) in &books {
+        let bal = store
+            .balance(&account_id(book, "cash"), None)
+            .await
+            .unwrap();
+        assert_eq!(bal.amount.minor(), TXS_PER_BOOK as i64);
+    }
+}
+
 pub async fn committed_at_is_monotonic_per_book(store: &impl Store) {
     let (book, asset_id) = setup_book(store).await;
     for i in 0..4 {

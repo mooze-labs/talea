@@ -143,6 +143,7 @@ A `balance` matching what you posted is the round-trip proof.
 
 - **`ApiError::Unauthorized`** — token missing/wrong; the builder needs `.bearer_token(...)` whenever the server has any token configured (`TALEA_API_TOKEN` or `TALEA_TOKENS_FILE`).
 - **`ApiError::Forbidden { book }`** — the token is valid but scoped to other books (`TALEA_TOKENS_FILE`). Not retried; fix the token's scope or use the right token for that book.
+- **`ApiError::NotFound` on a transaction id you know exists** — same scope problem in disguise: `GET /v1/transactions/{tx_id}` answers `404` (never `403`) when the transaction's book is outside the token's scope, so out-of-scope ids are indistinguishable from unknown ones. Check the token's `books` list before chasing the id.
 - **`ApiError::Transport` after several seconds** — retry budget exhausted against an unreachable or saturated server. Posting again with the same idempotency key is safe.
 - **Stream ends with `Transport`** — persistent (not transient) failure; reconnect by calling `subscribe` again from your last processed `seq + 1`.
 - **Base URL with a path prefix** — supported: a client built for `http://host/api` calls `/api/v1/...`. Don't include `/v1` yourself.
