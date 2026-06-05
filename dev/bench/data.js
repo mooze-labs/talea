@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780639746625,
+  "lastUpdate": 1780668371259,
   "repoUrl": "https://github.com/mooze-labs/talea",
   "entries": {
     "bench-push-bigger": [
@@ -175,6 +175,60 @@ window.BENCHMARK_DATA = {
           {
             "name": "reads/postgres/peak-throughput",
             "value": 2758.2,
+            "unit": "ops/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "h4vismat@mooze.app",
+            "name": "havis",
+            "username": "h4vismat"
+          },
+          "committer": {
+            "email": "h4vismat@mooze.app",
+            "name": "havis",
+            "username": "h4vismat"
+          },
+          "distinct": true,
+          "id": "bb79655d9fa95c542d3ad034c6c2f8bf43bdc74e",
+          "message": "Merge worktree-bench-log-leg: CI bench leg + caveats for the log backend\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-05T10:54:47-03:00",
+          "tree_id": "189d5e66ec00b6d36e3fff5375de5e740334e66d",
+          "url": "https://github.com/mooze-labs/talea/commit/bb79655d9fa95c542d3ad034c6c2f8bf43bdc74e"
+        },
+        "date": 1780668370264,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "post-one-book/sqlite/peak-throughput",
+            "value": 1601.5,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/sqlite/peak-throughput",
+            "value": 10106.1,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/postgres/peak-throughput",
+            "value": 488.8,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/postgres/peak-throughput",
+            "value": 2776.8,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/log/peak-throughput",
+            "value": 4817.4,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/log/peak-throughput",
+            "value": 26903.4,
             "unit": "ops/s"
           }
         ]
