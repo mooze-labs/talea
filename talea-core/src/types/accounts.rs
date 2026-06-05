@@ -123,4 +123,20 @@ mod tests {
         assert_eq!(id("onramp", "treasury:btc").to_key(), "onramp:treasury:btc");
         assert_eq!(id("_system", "events").to_key(), "_system:events");
     }
+
+    /// Brute-force the invariant over awkward fragments: distinct
+    /// (book, path) pairs must never share a key.
+    #[test]
+    fn to_key_is_injective_over_awkward_fragments() {
+        let fragments = ["a", "a:", "a\\", ":", "\\", "\\:", ":a", "a:b"];
+        let mut seen = std::collections::HashMap::new();
+        for book in fragments {
+            for path in fragments {
+                let key = id(book, path).to_key();
+                if let Some(prior) = seen.insert(key.clone(), (book, path)) {
+                    panic!("{prior:?} and {:?} both map to {key:?}", (book, path));
+                }
+            }
+        }
+    }
 }

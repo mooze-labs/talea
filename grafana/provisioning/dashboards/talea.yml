@@ -5,5 +5,6 @@ providers:
   - name: talea
     folder: ""
     type: file
+    allowUiUpdates: true # dev-only stack; let people tweak panels live
     options:
       path: /var/lib/grafana/dashboards
