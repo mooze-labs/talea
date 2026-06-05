@@ -19,7 +19,7 @@ Add as a dev-dependency and call the suite functions from your backend's tests, 
 ```bash
 cargo test -p talea-store-sqlite        # no setup
 TALEA_TEST_PG_URL=postgres://postgres:dev@localhost:5432 \
-    cargo test -p talea_store_postgres  # against live Postgres
+    cargo test -p talea-store-postgres  # against live Postgres
 ```
 
 See the [workspace README](../README.md) for the full picture.

@@ -1,5 +1,5 @@
 [package]
-name = "talea_core"
+name = "talea-core"
 version = "0.1.0"
 edition = "2024"
 description = "Core contracts for the talea ledger: domain types, the Store persistence trait, and the LedgerApi service trait"

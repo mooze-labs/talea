@@ -154,7 +154,7 @@ open http://localhost:9090                                      # query any tale
 ```bash
 cargo test --workspace                 # everything; Postgres conformance skips without a DB
 TALEA_TEST_PG_URL=postgres://postgres:dev@localhost:5432 \
-    cargo test -p talea_store_postgres # the same conformance suite, live
+    cargo test -p talea-store-postgres # the same conformance suite, live
 cargo clippy --workspace --all-targets
 ```
 
