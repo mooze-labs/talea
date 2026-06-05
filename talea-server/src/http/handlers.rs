@@ -65,6 +65,7 @@ pub async fn open_account(
         (status = 401, body = ApiError),
         (status = 404, description = "unknown account", body = ApiError),
         (status = 409, description = "min_balance violation", body = ApiError),
+        (status = 429, description = "per-book write queue full; retry with the same idempotency key", body = ApiError),
     ), security(("bearer" = [])), tag = "ledger")]
 pub async fn post_transaction(
     State(state): State<AppState>,

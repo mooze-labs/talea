@@ -44,6 +44,9 @@ pub enum ApiError {
         message: String,
     },
     Unauthorized,
+    /// The per-book write queue is full. Retry with the same idempotency
+    /// key — overload degrades to "retry later", never "maybe applied twice".
+    Overloaded,
     Internal {
         message: String,
     },
