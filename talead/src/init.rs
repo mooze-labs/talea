@@ -71,9 +71,14 @@ pub async fn connect_store(db_url: &str) -> Result<Arc<dyn Store>, Box<dyn std::
             .await
             .map_err(|e| format!("couldn't open {db_url}: {e}"))?;
         Ok(Arc::new(store))
+    } else if let Some(path) = db_url.strip_prefix("log://") {
+        let store = talea_store_log::LogTaleaStore::open(std::path::Path::new(path))
+            .await
+            .map_err(|e| format!("couldn't open log store at {path}: {e}"))?;
+        Ok(Arc::new(store))
     } else {
         Err(format!(
-            "unsupported db url scheme: {db_url} (expected postgres://... or sqlite://...)"
+            "unsupported db url scheme: {db_url} (expected postgres://..., sqlite://..., or log://<dir>)"
         )
         .into())
     }
@@ -132,6 +137,14 @@ mod tests {
         assert!(env.contains("# TALEA_DB_POOL=10\n"));
         assert!(env.contains("# TALEA_MAX_INFLIGHT=256\n"));
         assert!(env.contains("# TALEA_METRICS_BIND=127.0.0.1:9100\n"));
+    }
+
+    #[tokio::test]
+    async fn log_scheme_opens_a_log_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("log://{}", dir.path().display());
+        let store = connect_store(&url).await.unwrap();
+        assert!(store.asset(&talea_core::types::AssetId::new("X")).await.unwrap().is_none());
     }
 
     #[test]

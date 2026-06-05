@@ -173,9 +173,18 @@ async fn connect_store(
         let store = talea_store_sqlite::SqliteTaleaStore::new(pool);
         store.migrate().await.map_err(box_store_err)?;
         Ok((Arc::new(store), sampler, "sqlite"))
+    } else if let Some(path) = config.db_url.strip_prefix("log://") {
+        let store = talea_store_log::LogTaleaStore::open(std::path::Path::new(path))
+            .await
+            .map_err(box_store_err)?;
+        // The log store has no connection pool; report zeros for the pool gauges.
+        // The dashboard tolerates zero-valued series and the metrics are labelled
+        // with the backend name, so consumers can distinguish pool-less backends.
+        let sampler: Box<dyn Fn() -> (u32, usize) + Send> = Box::new(|| (0, 0));
+        Ok((Arc::new(store), sampler, "log"))
     } else {
         Err(format!(
-            "unsupported TALEA_DB_URL scheme: {} (expected postgres://... or sqlite://...)",
+            "unsupported TALEA_DB_URL scheme: {} (expected postgres://..., sqlite://..., or log://<dir>)",
             config.db_url
         )
         .into())
