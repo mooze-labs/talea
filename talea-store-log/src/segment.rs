@@ -262,6 +262,60 @@ impl SegmentSet {
         Ok(results)
     }
 
+    /// Like [`scan_from`] but each event is paired with its [`FramePos`]
+    /// `(segment_base, byte_offset_of_frame_start)`.
+    ///
+    /// The offset recorded is where the frame begins within its segment file.
+    /// Passing it back to [`read_at`] with the matching `segment_base` and
+    /// the event's `seq` will round-trip the exact same event.
+    pub async fn scan_with_pos(
+        &self,
+        from: Seq,
+        limit: usize,
+    ) -> std::io::Result<Vec<(WireEvent, crate::state::FramePos)>> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+
+        // Pick the starting segment: last base <= from, else first.
+        let start_base = self
+            .segments
+            .range(..=from)
+            .next_back()
+            .map(|(k, _)| *k)
+            .unwrap_or_else(|| *self.segments.keys().next().unwrap());
+
+        let mut results = Vec::new();
+        for (&seg_base, path) in self.segments.range(start_base..) {
+            if results.len() >= limit {
+                break;
+            }
+            let bytes = tokio::fs::read(path).await?;
+            let mut byte_offset: u64 = 0;
+            loop {
+                if results.len() >= limit {
+                    break;
+                }
+                match decode_frame(&bytes[byte_offset as usize..]) {
+                    Ok(None) => break,
+                    Ok(Some((ev, consumed))) => {
+                        let frame_start = byte_offset;
+                        byte_offset += consumed as u64;
+                        if ev.seq >= from {
+                            results.push((ev, (seg_base, frame_start)));
+                        }
+                    }
+                    Err(e) => {
+                        return Err(std::io::Error::other(format!(
+                            "decode error in {path:?} at offset {byte_offset}: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(results)
+    }
+
     /// Returns `(active_segment_base, active_len)` — position of the NEXT append.
     pub fn next_pos(&self) -> (Seq, u64) {
         let base = *self.segments.keys().next_back().unwrap();
@@ -478,6 +532,35 @@ mod tests {
             actual_len, good_len,
             "file must be truncated back to {good_len}, found {actual_len}"
         );
+    }
+
+    /// Append 3 frames, call scan_with_pos, then use read_at to round-trip
+    /// each returned position and verify the same event comes back.
+    #[tokio::test]
+    async fn scan_with_pos_round_trips_via_read_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seg = SegmentSet::open(dir.path()).await.unwrap();
+        for s in 1..=3i64 {
+            seg.append(&encode_frame(&ev(s)).unwrap()).await.unwrap();
+        }
+        seg.sync().await.unwrap();
+
+        let pairs = seg.scan_with_pos(1, 100).await.unwrap();
+        assert_eq!(pairs.len(), 3);
+
+        for (wire, (seg_base, offset)) in &pairs {
+            let from_disk = seg.read_at(*seg_base, *offset, wire.seq).await.unwrap();
+            assert_eq!(from_disk.seq, wire.seq, "read_at must return the same seq at the recorded pos");
+            // Verify the event type round-trips too.
+            let ok = matches!(
+                (&wire.event, &from_disk.event),
+                (
+                    talea_core::events::LedgerEvent::AccountOpened { .. },
+                    talea_core::events::LedgerEvent::AccountOpened { .. },
+                )
+            );
+            assert!(ok, "event variant must match after read_at");
+        }
     }
 
     /// Force a rotation so a fresh empty active segment exists; reopen without

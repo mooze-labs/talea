@@ -159,8 +159,29 @@ impl BookWriter {
     pub fn close(&self) {}
 
     /// Await the writer task (idempotent: second call is a no-op).
+    ///
+    /// NOTE: callers must ensure that `self` is the LAST `BookWriter` clone
+    /// alive before calling this; otherwise the writer task will block forever
+    /// waiting for the channel to close. Use [`shutdown`] to safely do both
+    /// at once when consuming a clone.
     pub async fn join(&self) {
         let maybe_handle = self.handle.lock().await.take();
+        if let Some(h) = maybe_handle {
+            let _ = h.await;
+        }
+    }
+
+    /// Drop this sender clone and await the writer task.
+    ///
+    /// Consumes `self` so the `mpsc::Sender` inside this clone is dropped
+    /// first, then extracts and awaits the `JoinHandle`. If other clones of
+    /// this `BookWriter` are still alive the task will not exit; callers must
+    /// ensure this is the last clone.
+    pub async fn shutdown(self) {
+        let maybe_handle = self.handle.lock().await.take();
+        // Drop `self` (and its Sender) BEFORE awaiting the task.
+        // This is the key: the task exits when the last Sender is gone.
+        drop(self);
         if let Some(h) = maybe_handle {
             let _ = h.await;
         }
