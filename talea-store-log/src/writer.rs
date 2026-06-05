@@ -57,6 +57,8 @@ use crate::segment::{SegmentCatalog, SegmentSet};
 use crate::snapshot;
 use crate::state::{BookState, CommittedRec, FramePos, Scratch};
 
+use std::collections::HashMap as StdHashMap;
+
 // ---------------------------------------------------------------------------
 // Public job type
 // ---------------------------------------------------------------------------
@@ -288,8 +290,18 @@ async fn run_loop(
         }
 
         // ----------------------------------------------------------------
-        // 2. Classify each job under a read lock.
-        //    Snapshot jobs are noted by index for processing post-apply.
+        // 2. Two-phase classification to avoid holding a lock during disk I/O.
+        //
+        // Phase 2a (read lock): check hot idem map and Bloom filter.
+        //   - Hot hit  → classify as Dup immediately.
+        //   - Bloom negative → key is definitely absent from spill runs; proceed.
+        //   - Bloom positive → collect key for disk lookup (phase 2b).
+        //   - Snapshot jobs are noted by index for processing post-apply.
+        //
+        // Phase 2b (no lock): async run-file lookups for bloom-positive misses.
+        //
+        // Phase 2c (read lock again): full classification using pre-resolved
+        //   disk results.
         // ----------------------------------------------------------------
         let mut replies: Vec<Reply> = Vec::with_capacity(jobs.len());
         let mut staged: Vec<Staged> = Vec::new();
@@ -297,6 +309,50 @@ async fn run_loop(
         // Indices of Job::Snapshot entries in `jobs`.
         let mut snap_job_idxs: Vec<usize> = Vec::new();
 
+        // ---- Phase 2a: first read lock pass — identify bloom-positive keys ----
+        let bloom_positive_keys: Vec<String> = {
+            let st = state.read().await;
+            let mut bp = Vec::new();
+            for slot in jobs.iter() {
+                let job = slot.as_ref().expect("job slots are Some until taken");
+                if let Job::Commit(tx, _) = job {
+                    let key = tx.idempotency_key.0.as_str();
+                    // Hot miss + bloom positive → needs disk lookup.
+                    if st.idem.get_hot(key).is_none() && st.idem.bloom_might_contain(key) {
+                        bp.push(tx.idempotency_key.0.clone());
+                    }
+                }
+            }
+            bp
+        }; // drop read lock
+
+        // ---- Phase 2b: resolve bloom-positive keys from run files (no lock) ----
+        let mut disk_resolved: StdHashMap<String, CommittedRec> = StdHashMap::new();
+        for key in &bloom_positive_keys {
+            let st = state.read().await;
+            let idem_ref: &crate::idem_spill::TieredIdem = &st.idem;
+            // Double-check hot (may have changed between phase 2a and now).
+            if let Some(rec) = idem_ref.get_hot(key) {
+                disk_resolved.insert(key.clone(), rec.clone());
+                continue;
+            }
+            // Clone the runs metadata so we can drop the read lock during I/O.
+            let runs_snapshot = idem_ref.runs.clone();
+            let key_clone = key.clone();
+            drop(st); // release read lock before disk I/O
+
+            // Search run files (spawns blocking).
+            let tmp_tiered = {
+                let mut t = crate::idem_spill::TieredIdem::with_cap(1);
+                t.runs = runs_snapshot;
+                t
+            };
+            if let Some(rec) = tmp_tiered.lookup_runs(&key_clone).await {
+                disk_resolved.insert(key_clone, rec);
+            }
+        }
+
+        // ---- Phase 2c: second read lock pass — full classification ----
         {
             let st = state.read().await;
 
@@ -316,9 +372,12 @@ async fn run_loop(
                     Job::Commit(tx, _) => {
                         let idem_key = tx.idempotency_key.0.clone();
 
-                        // Check committed idem index first.
-                        if let Some(rec) = st.idem.get(&idem_key) {
-                            replies.push(Reply::Dup(idx, rec.clone()));
+                        // Check committed idem: hot map first, then pre-resolved disk.
+                        let committed_rec = st.idem.get_hot(&idem_key)
+                            .cloned()
+                            .or_else(|| disk_resolved.get(&idem_key).cloned());
+                        if let Some(rec) = committed_rec {
+                            replies.push(Reply::Dup(idx, rec));
                             continue;
                         }
 
@@ -478,6 +537,35 @@ async fn run_loop(
                         st.bump_seq(s.wire.seq, s.wire.at);
                     }
                 }
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // 5.5 Idem spill flush (post-apply, no lock needed for I/O).
+        //
+        // If the hot map grew past cap during this batch, drain the oldest
+        // half to a new on-disk run.  The flush happens BETWEEN batches (not
+        // on the lookup path) so it never delays commit acknowledgements.
+        //
+        // Failure: tracing::error + hot map retained (retry next batch).
+        // ----------------------------------------------------------------
+        {
+            let needs_flush = {
+                let st = state.read().await;
+                st.idem.needs_flush()
+            };
+            if needs_flush {
+                // Clone out just the idem tier metadata we need, flush outside
+                // the lock, then re-take the write lock to update in-place.
+                //
+                // We hold the write lock for the swap so `get_hot` callers see
+                // a consistent view (no partial flush).
+                let mut st = state.write().await;
+                // flush_spill is async (writes files) but we hold the write lock.
+                // The write lock is only held by this task, so no reader is
+                // blocked by another writer.  The flush I/O is bounded-small
+                // (cap/2 JSON entries) and runs in the writer task's context.
+                st.idem.flush_spill().await;
             }
         }
 

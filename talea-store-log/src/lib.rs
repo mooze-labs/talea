@@ -2,6 +2,7 @@
 //! writer task per book over in-memory state, strict fsync-per-batch.
 
 pub mod frame;
+pub mod idem_spill;
 pub mod segment;
 pub mod snapshot;
 pub mod state;
@@ -26,9 +27,32 @@ use talea_core::store::{
 };
 use talea_core::types::{AccountDef, AccountId, Amount, AssetDef, AssetId, Book, Direction, Seq, Transaction, TxId};
 
+use crate::idem_spill::DEFAULT_IDEM_HOT_CAP;
 use crate::segment::SegmentSet;
 use crate::state::{BookState, effective};
 use crate::writer::{BookWriter, Job};
+
+/// Options for opening a [`LogTaleaStore`].
+#[derive(Debug, Clone)]
+pub struct LogStoreOptions {
+    /// Maximum number of hot idempotency keys kept in memory.
+    /// Overflow drains the oldest half to on-disk spill runs.
+    pub idem_hot_cap: usize,
+    /// Events between automatic snapshots (0 = disabled).
+    pub snapshot_every: u64,
+    /// Maximum bytes per segment file before rotation.
+    pub segment_max: u64,
+}
+
+impl Default for LogStoreOptions {
+    fn default() -> Self {
+        Self {
+            idem_hot_cap: DEFAULT_IDEM_HOT_CAP,
+            snapshot_every: BookWriter::DEFAULT_SNAPSHOT_EVERY,
+            segment_max: crate::segment::DEFAULT_SEGMENT_MAX,
+        }
+    }
+}
 
 /// An append-log implementation of [`Store`].
 ///
@@ -92,7 +116,14 @@ fn validate_book_name(book: &str) -> Result<(), StoreError> {
 }
 
 impl LogTaleaStore {
-    /// Open (or create) the store at `dir`.
+    /// Open (or create) the store at `dir` with default options.
+    ///
+    /// See [`open_with`] for the full option set.
+    pub async fn open(dir: &Path) -> Result<Self, StoreError> {
+        Self::open_with(dir, LogStoreOptions::default()).await
+    }
+
+    /// Open (or create) the store at `dir` with explicit options.
     ///
     /// 1. Creates `<dir>/books/` if missing.
     /// 2. Acquires an exclusive fs4 advisory lock on `<dir>/LOCK`.
@@ -100,7 +131,10 @@ impl LogTaleaStore {
     ///    in-memory state, then spawns a `BookWriter` per book.
     /// 4. `_system` is treated like any other book for replay; `AssetRegistered`
     ///    events also populate the in-memory asset registry.
-    pub async fn open(dir: &Path) -> Result<Self, StoreError> {
+    /// 5. For each book, calls `idem.attach_dir(...)` to load spill runs and
+    ///    rebuild the Bloom filter.  If any run's CRC fails or the Bloom file
+    ///    is missing/corrupt, a full log scan is performed to rebuild the runs.
+    pub async fn open_with(dir: &Path, opts: LogStoreOptions) -> Result<Self, StoreError> {
         use fs4::fs_std::FileExt;
 
         // 1. Create dirs.
@@ -187,6 +221,9 @@ impl LogTaleaStore {
                     }
                 };
 
+            // Apply idem_hot_cap option to the loaded state.
+            st.idem.cap = opts.idem_hot_cap;
+
             // Replay the tail starting at `replay_from` (full replay when no snapshot).
             let pairs = seg.scan_with_pos(replay_from, usize::MAX).await.map_err(io_err)?;
 
@@ -194,10 +231,10 @@ impl LogTaleaStore {
             // Use try_apply_transaction (not apply_transaction) so a corrupt or
             // hand-edited log that contains arithmetic-impossible postings
             // returns StoreError::Io instead of panicking.
-            for (wire, pos) in pairs {
-                match wire.event {
-                    LedgerEvent::TransactionPosted(ref tx) => {
-                        st.try_apply_transaction(tx, wire.seq, wire.at, pos)
+            for (wire, pos) in &pairs {
+                match &wire.event {
+                    LedgerEvent::TransactionPosted(tx) => {
+                        st.try_apply_transaction(tx, wire.seq, wire.at, *pos)
                             .map_err(|msg| {
                                 // Encode enough context for the operator to locate the corrupt frame.
                                 let (seg_base, off) = pos;
@@ -206,10 +243,10 @@ impl LogTaleaStore {
                                 ))
                             })?;
                     }
-                    LedgerEvent::AccountOpened { ref def, ref cfg } => {
+                    LedgerEvent::AccountOpened { def, cfg } => {
                         st.apply_account_opened(def, cfg, wire.seq, wire.at);
                     }
-                    LedgerEvent::AssetRegistered(ref def) => {
+                    LedgerEvent::AssetRegistered(def) => {
                         st.bump_seq(wire.seq, wire.at);
                         // Populate registry regardless of which book the event
                         // lives in (though the writer only appends these to _system).
@@ -218,14 +255,62 @@ impl LogTaleaStore {
                 }
             }
 
+            // Attach idem spill runs + bloom from disk.
+            // The rebuild_fn supplies all committed idem keys from the full log
+            // (both the snapshot-sourced hot map and tail replay), so that if any
+            // run is corrupt/missing the index can be rebuilt accurately.
+            //
+            // Note: we do a second pass over `pairs` only for the rebuild path
+            // (rare).  The all_idem_pairs closure is only called if CRC fails.
+            let all_idem_snap: Vec<(String, crate::state::CommittedRec)> = {
+                // Pre-snapshot idem keys come from st.idem.hot (already in hot).
+                // tail-replay idem keys are also already in st.idem.hot at this point.
+                // For rebuild, we need ALL committed keys: hot map is authoritative
+                // for recent, runs hold older. The rebuild_fn produces the UNION
+                // of all committed keys that are NOT already in hot, so pass an
+                // empty vec here (hot is the only source of truth right now; runs
+                // will be rebuilt from the log scan that follows).
+                //
+                // Actually: we need to provide all keys so rebuild can reconstruct
+                // the full set.  `st.idem.hot` has all keys from replay at this point
+                // (runs will be empty since they're being validated).
+                // Pass all pairs from the full log so the rebuild_fn has complete data.
+                pairs
+                    .iter()
+                    .filter_map(|(wire, _)| {
+                        if let LedgerEvent::TransactionPosted(tx) = &wire.event {
+                            Some((
+                                tx.idempotency_key.0.clone(),
+                                crate::state::CommittedRec {
+                                    txid: tx.id.clone(),
+                                    seq: wire.seq,
+                                    at: wire.at,
+                                },
+                            ))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+
+            st.idem
+                .attach_dir(&book_dir, move || {
+                    let snap = all_idem_snap;
+                    async move { Ok(snap) }
+                })
+                .await
+                .map_err(io_err)?;
+
             // Drop the replay SegmentSet — BookWriter::spawn re-opens it for writes.
             drop(seg);
 
             // Spawn writer over the replayed state.
-            let writer = BookWriter::spawn(
+            let writer = BookWriter::spawn_with(
                 book_dir,
                 Arc::new(RwLock::new(st)),
                 batch_max,
+                opts.snapshot_every,
             )
             .await
             .map_err(io_err)?;
@@ -294,7 +379,16 @@ impl LogTaleaStore {
         }
 
         let book_dir = self.dir.join("books").join(book);
-        let state = Arc::new(RwLock::new(BookState::default()));
+        // For a brand-new book, attach_dir with an empty rebuild_fn (no existing log).
+        let mut initial_state = BookState::default();
+        tokio::fs::create_dir_all(&book_dir).await.map_err(io_err)?;
+        initial_state
+            .idem
+            .attach_dir(&book_dir, || async { Ok(vec![]) })
+            .await
+            .map_err(io_err)?;
+
+        let state = Arc::new(RwLock::new(initial_state));
         let writer = BookWriter::spawn(book_dir, state, self.batch_max)
             .await
             .map_err(io_err)?;
@@ -913,7 +1007,10 @@ impl Store for LogTaleaStore {
                         w
                     } else {
                         let book_dir = dir.join("books").join(&book.0);
-                        let state = Arc::new(RwLock::new(crate::state::BookState::default()));
+                        tokio::fs::create_dir_all(&book_dir).await.map_err(|e| StoreError::Io(Box::new(e)))?;
+                        let mut initial_st = crate::state::BookState::default();
+                        initial_st.idem.attach_dir(&book_dir, || async { Ok(vec![]) }).await.map_err(|e| StoreError::Io(Box::new(e)))?;
+                        let state = Arc::new(RwLock::new(initial_st));
                         let w = BookWriter::spawn(book_dir, state, batch_max)
                             .await
                             .map_err(|e| StoreError::Io(Box::new(e)))?;
@@ -1020,6 +1117,7 @@ mod tests {
     use super::*;
     use talea_core::store::{AccountCfg, Store};
     use talea_core::types::*;
+    use crate::writer::BookWriter;
 
     fn mk_tx(key: &str, minor: i64) -> Transaction {
         Transaction {
@@ -1567,6 +1665,65 @@ mod tests {
                 dup.seq, orig_seq,
                 "idem key k{i} must resolve to original seq {orig_seq} after reopen, got {}",
                 dup.seq
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 13: Snapshot interplay with spilled idem runs
+    // -----------------------------------------------------------------------
+
+    /// Commit enough transactions to overflow the hot idem cap (forcing spills),
+    /// take a snapshot, reopen, and verify that BOTH hot (recent) and spilled
+    /// (older) idem keys dedup correctly.
+    ///
+    /// Uses a small `idem_hot_cap` (8) so a handful of commits forces overflow.
+    #[tokio::test]
+    async fn snapshot_interplay_hot_and_spilled_keys_dedup() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Open with a tiny hot cap so we force spills with few commits.
+        let opts = LogStoreOptions {
+            idem_hot_cap: 8,
+            snapshot_every: BookWriter::DEFAULT_SNAPSHOT_EVERY,
+            segment_max: crate::segment::DEFAULT_SEGMENT_MAX,
+        };
+
+        let orig_seqs: Vec<talea_core::types::Seq>;
+        {
+            let store = LogTaleaStore::open_with(dir.path(), opts.clone()).await.unwrap();
+            store.register_asset(&usd()).await.unwrap();
+            let cfg = AccountCfg { normal_side: None, min_balance: None };
+            store.open_account(&cash_def(), &cfg).await.unwrap();
+            store.open_account(&rev_def(), &cfg).await.unwrap();
+
+            // Commit 20 transactions (enough to spill with cap=8).
+            let n = 20usize;
+            let mut seqs = Vec::with_capacity(n);
+            for i in 0..n {
+                let c = store.commit(&mk_tx(&format!("spill-idem-{i:03}"), 1)).await.unwrap();
+                seqs.push(c.seq);
+            }
+
+            // Take a snapshot so the next open uses it.
+            store.snapshot_now("b").await.unwrap();
+
+            orig_seqs = seqs;
+
+            store.shutdown().await;
+        }
+
+        // Reopen with the same small cap — spill run files should be present.
+        let store2 = LogTaleaStore::open_with(dir.path(), opts).await.unwrap();
+
+        // ALL 20 keys must dedup to their original seq/txid.
+        for (i, &orig_seq) in orig_seqs.iter().enumerate() {
+            let key = format!("spill-idem-{i:03}");
+            let dup = store2.commit(&mk_tx(&key, 1)).await.unwrap();
+            assert_eq!(
+                dup.seq, orig_seq,
+                "idem key {key} must resolve to orig seq {orig_seq} after reopen with spilled runs; got {}",
+                dup.seq,
             );
         }
     }

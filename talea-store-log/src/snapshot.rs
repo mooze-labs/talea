@@ -238,6 +238,8 @@ mod tests {
         *st.sums.entry(asset).or_insert((0, 0)) = (42, 0);
         st.next_seq = 2;
         st.last_at = Some(at);
+        // Note: idem.runs_dir is empty (not attached to a dir) in this test helper;
+        // the hot map contains the key, so round-trip tests work without attach_dir.
         st
     }
 
@@ -263,10 +265,10 @@ mod tests {
             st.accounts[&id.to_key()].raw_balance,
             "raw_balance must survive round-trip"
         );
-        // Idempotency key survives.
-        assert!(got.idem.contains_key("idem-key"), "idem must survive round-trip");
-        let orig_rec = &st.idem["idem-key"];
-        let got_rec = &got.idem["idem-key"];
+        // Idempotency key survives (in the hot map — the dir is not attached in this test).
+        assert!(got.idem.hot.contains_key("idem-key"), "idem must survive round-trip");
+        let orig_rec = &st.idem.hot["idem-key"];
+        let got_rec = &got.idem.hot["idem-key"];
         assert_eq!(got_rec.seq, orig_rec.seq, "idem record seq must match");
         // txids survive.
         assert_eq!(got.txids.len(), st.txids.len(), "txids must survive round-trip");
@@ -333,5 +335,59 @@ mod tests {
             vec![20, 30],
             "only the two newest snapshots must be retained; found seqs: {snaps:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 13 extras (cheap gap-closers from Task 12 review)
+    // -----------------------------------------------------------------------
+
+    /// A stray `.snap.tmp` file left by a crashed write must be ignored by
+    /// `load_latest`.  Only `.snap` (not `.snap.tmp`) files should be
+    /// enumerated.
+    #[tokio::test]
+    async fn stray_snap_tmp_is_ignored_by_load_latest() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = make_state();
+
+        // Write a valid snapshot at seq 5.
+        write_snapshot(dir.path(), &st, 5).await.unwrap();
+
+        // Drop a stray .tmp file (simulating a crash mid-write).
+        let stray = dir.path().join("snapshot-00000000000000000099.snap.tmp");
+        std::fs::write(&stray, b"garbage").unwrap();
+
+        // load_latest must return the seq-5 snapshot, not error and not treat
+        // the .tmp as a valid snapshot file.
+        let loaded = load_latest(dir.path()).await.unwrap();
+        assert!(loaded.is_some(), "load_latest must return Some (seq-5 snapshot)");
+        let (_, got_seq) = loaded.unwrap();
+        assert_eq!(got_seq, 5, "must return the seq-5 snapshot, ignoring the .tmp file");
+    }
+
+    /// When ALL snapshot files are corrupt, `load_latest` must return
+    /// `Ok(None)` rather than `Err`.
+    #[tokio::test]
+    async fn all_snapshots_corrupt_returns_ok_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = make_state();
+
+        // Write two valid snapshots.
+        write_snapshot(dir.path(), &st, 10).await.unwrap();
+        write_snapshot(dir.path(), &st, 20).await.unwrap();
+
+        // Corrupt both by zeroing their payloads.
+        for seq in [10i64, 20] {
+            let path = dir.path().join(snap_name(seq));
+            let mut bytes = std::fs::read(&path).unwrap();
+            // Zero the payload (after the 4-byte CRC) so CRC mismatch.
+            for b in bytes.iter_mut().skip(4) {
+                *b = 0;
+            }
+            std::fs::write(&path, &bytes).unwrap();
+        }
+
+        let result = load_latest(dir.path()).await;
+        assert!(result.is_ok(), "load_latest must return Ok even with all snapshots corrupt");
+        assert!(result.unwrap().is_none(), "load_latest must return None when all snapshots are corrupt");
     }
 }

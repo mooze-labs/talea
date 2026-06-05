@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use crate::idem_spill::TieredIdem;
+
 use chrono::{DateTime, Utc};
 use talea_core::store::{AccountCfg, Committed, StoreError};
 use talea_core::types::*;
@@ -73,7 +75,12 @@ pub struct BookState {
     /// Keyed by `AccountId::to_key()`.
     pub accounts: HashMap<String, AccountState>,
     /// Idempotency key → committed record.
-    pub idem: HashMap<String, CommittedRec>,
+    ///
+    /// Tiered: hot in-memory HashMap + on-disk spill runs + Bloom filter.
+    /// The `runs_dir`, `runs`, and `bloom` fields of `TieredIdem` are
+    /// `#[serde(skip)]` and must be reattached via `idem.attach_dir()`
+    /// after deserialization (or at store-open time).
+    pub idem: TieredIdem,
     /// TxId UUID → (seq, frame position).
     pub txids: HashMap<Uuid, (Seq, FramePos)>,
     /// Per-asset lifetime (debits, credits) sums.
@@ -96,7 +103,7 @@ impl Default for BookState {
         Self {
             next_seq: 1,
             accounts: HashMap::new(),
-            idem: HashMap::new(),
+            idem: TieredIdem::default(),
             txids: HashMap::new(),
             sums: HashMap::new(),
             last_at: None,
@@ -345,6 +352,8 @@ impl BookState {
                 at,
             },
         );
+        // Note: flush_spill (overflow drain to disk) is triggered by the
+        // writer post-apply, not here, so we never do disk I/O inside apply.
         self.txids.insert(tx.id.0, (seq, pos));
         self.next_seq = seq + 1;
         self.last_at = Some(at);
@@ -519,7 +528,7 @@ mod tests {
         assert_eq!(cash.postings.len(), 1);
         assert_eq!(cash.postings[0].raw_after, 100);
         assert_eq!(st.sums[&AssetId::new("USD")], (100, 100));
-        assert!(st.idem.contains_key("k1"));
+        assert!(st.idem.hot.contains_key("k1"));
         assert!(st.txids.contains_key(&t.id.0));
         assert_eq!(st.next_seq, 2);
     }
@@ -610,8 +619,8 @@ mod tests {
             rt.accounts[&acct("cash").to_key()].raw_balance,
             st.accounts[&acct("cash").to_key()].raw_balance,
         );
-        assert!(rt.idem.contains_key("idem-key"));
-        assert_eq!(rt.idem["idem-key"], st.idem["idem-key"]);
+        assert!(rt.idem.hot.contains_key("idem-key"));
+        assert_eq!(rt.idem.hot["idem-key"], st.idem.hot["idem-key"]);
         // txids has a Uuid key — verify it round-trips
         assert_eq!(rt.txids.len(), 1);
         assert!(rt.txids.contains_key(&t.id.0));
