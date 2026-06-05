@@ -4,4 +4,5 @@
 pub mod frame;
 pub mod segment;
 pub mod state;
+pub mod writer;
 pub use frame::WireEvent;
