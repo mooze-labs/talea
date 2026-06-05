@@ -10,6 +10,17 @@ use talea_core::{events::*, store::*, types::*};
 mod helpers;
 pub use helpers::book_channel_name;
 
+/// Which implementation strategy a commit_batch call used. Exposed for
+/// tests; the `talea_commit_batch_path` counter carries the same signal
+/// to operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchPath {
+    /// Set-based single-transaction fast path.
+    Fast,
+    /// Per-draft savepoint loop (the semantic reference).
+    Fallback,
+}
+
 #[derive(Debug, Clone)]
 pub struct PgTaleaStore {
     pool: PgPool,
@@ -36,6 +47,61 @@ impl PgTaleaStore {
             .run(&self.pool)
             .await
             .map_err(io_err)
+    }
+
+    /// commit_batch with the chosen path exposed. The Store trait method
+    /// delegates here; tests assert path selection without a metrics
+    /// recorder.
+    pub async fn commit_batch_traced(
+        &self,
+        txs: &[Transaction],
+    ) -> (BatchPath, Vec<Result<Committed, StoreError>>) {
+        (BatchPath::Fallback, self.commit_batch_per_draft(txs).await)
+    }
+
+    /// Group commit: the whole batch shares one storage transaction (one
+    /// fsync), each draft isolated by a savepoint. Each draft's pg_notify is
+    /// queued within its savepoint, so a rolled-back draft (or an aborted
+    /// outer commit) never emits a wake-up. See commit_in_savepoint.
+    ///
+    /// Operational notes: a draft blocked on a foreign row lock (e.g. the
+    /// book counter held by another instance) head-of-line-blocks its
+    /// batchmates and pins this connection until the lock resolves — no
+    /// lock_timeout or idle_in_transaction_session_timeout is set, on the
+    /// assumption that drafts commit quickly. If sustained cross-instance
+    /// book contention shows up, a lock_timeout on this transaction is the
+    /// hardening knob: it would turn an indefinite stall into a bounded
+    /// per-draft failure that the savepoint already isolates.
+    async fn commit_batch_per_draft(
+        &self,
+        txs: &[Transaction],
+    ) -> Vec<Result<Committed, StoreError>> {
+        if txs.is_empty() {
+            return Vec::new();
+        }
+        let mut db = match self.pool.begin().await {
+            Ok(db) => db,
+            Err(e) => {
+                let msg = format!("failed to begin batch transaction: {e}");
+                return txs
+                    .iter()
+                    .map(|_| Err(StoreError::Io(msg.clone().into())))
+                    .collect();
+            }
+        };
+        let mut results = Vec::with_capacity(txs.len());
+        for (i, tx) in txs.iter().enumerate() {
+            results.push(commit_in_savepoint(&mut db, i, tx).await);
+        }
+        if let Err(e) = db.commit().await {
+            // nothing became durable: every recorded success is void
+            let msg = format!("batch commit failed: {e}");
+            return txs
+                .iter()
+                .map(|_| Err(StoreError::Io(msg.clone().into())))
+                .collect();
+        }
+        results
     }
 }
 
@@ -728,45 +794,15 @@ impl Store for PgTaleaStore {
         }
     }
 
-    /// Group commit: the whole batch shares one storage transaction (one
-    /// fsync), each draft isolated by a savepoint. Each draft's pg_notify is
-    /// queued within its savepoint, so a rolled-back draft (or an aborted
-    /// outer commit) never emits a wake-up. See commit_in_savepoint.
-    ///
-    /// Operational notes: a draft blocked on a foreign row lock (e.g. the
-    /// book counter held by another instance) head-of-line-blocks its
-    /// batchmates and pins this connection until the lock resolves — no
-    /// lock_timeout or idle_in_transaction_session_timeout is set, on the
-    /// assumption that drafts commit quickly. If sustained cross-instance
-    /// book contention shows up, a lock_timeout on this transaction is the
-    /// hardening knob: it would turn an indefinite stall into a bounded
-    /// per-draft failure that the savepoint already isolates.
+    /// Delegates to commit_batch_traced; see commit_batch_per_draft for
+    /// operational notes (savepoint semantics, head-of-line-blocking, etc.).
     async fn commit_batch(&self, txs: &[Transaction]) -> Vec<Result<Committed, StoreError>> {
-        if txs.is_empty() {
-            return Vec::new();
-        }
-        let mut db = match self.pool.begin().await {
-            Ok(db) => db,
-            Err(e) => {
-                let msg = format!("failed to begin batch transaction: {e}");
-                return txs
-                    .iter()
-                    .map(|_| Err(StoreError::Io(msg.clone().into())))
-                    .collect();
-            }
+        let (path, results) = self.commit_batch_traced(txs).await;
+        let label = match path {
+            BatchPath::Fast => "fast",
+            BatchPath::Fallback => "fallback",
         };
-        let mut results = Vec::with_capacity(txs.len());
-        for (i, tx) in txs.iter().enumerate() {
-            results.push(commit_in_savepoint(&mut db, i, tx).await);
-        }
-        if let Err(e) = db.commit().await {
-            // nothing became durable: every recorded success is void
-            let msg = format!("batch commit failed: {e}");
-            return txs
-                .iter()
-                .map(|_| Err(StoreError::Io(msg.clone().into())))
-                .collect();
-        }
+        metrics::counter!("talea_commit_batch_path", "path" => label).increment(1);
         results
     }
 
