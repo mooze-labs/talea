@@ -4,6 +4,7 @@ use std::time::Duration;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use talea_bench::Ctx;
+use talea_bench::progress::Progress;
 use talea_bench::report::{self, RunJson, StepJson};
 use talea_bench::scenarios::{mixed, overload, post_many_books, post_one_book, reads};
 use talea_bench::workload::MixWeights;
@@ -99,6 +100,7 @@ async fn main() {
         run_id: started_at.format("%Y%m%dT%H%M%S%.3f").to_string(),
         warmup: Duration::from_secs(cli.warmup_secs),
         duration: Duration::from_secs(cli.duration_secs),
+        progress: Progress::auto(),
     };
 
     let (scenario, config, result): (&str, serde_json::Value, Result<Vec<StepJson>, String>) =

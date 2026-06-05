@@ -174,6 +174,12 @@ impl SeedBar {
         }
     }
 
+    pub fn set_pos(&self, n: u64) {
+        if let Some(b) = &self.bar {
+            b.set_position(n);
+        }
+    }
+
     pub fn finish(self) {
         if let Some(b) = &self.bar {
             b.finish_and_clear();

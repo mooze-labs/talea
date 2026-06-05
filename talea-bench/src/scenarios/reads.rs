@@ -5,11 +5,13 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use serde::Serialize;
 use talea_client::{LedgerApi, TaleaClient};
 use talea_core::api::Page;
 
+use crate::progress::{LiveCounters, Progress};
 use crate::report::{self, StepJson};
 use crate::runner::{OpOutcome, StepConfig, classify, run_step};
 use crate::scenarios::validate_sweep;
@@ -29,7 +31,7 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
     validate_sweep(&opts.concurrencies, "concurrency")?;
     let client = Arc::new(ctx.client()?);
     seed::seed_read_book(client.as_ref()).await?;
-    seed_depth(&client, opts.depth, opts.seed_workers).await?;
+    seed_depth(&client, &ctx.progress, opts.depth, opts.seed_workers).await?;
     // Probe gives the top seq — the cursor space for history pagination.
     let top_seq = verify::probe_seq(client.as_ref(), READ_BOOK, &ctx.run_id, "reads").await?;
 
@@ -74,18 +76,22 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
                     }
                 }
             };
+            let label = format!("{ep}/c{c}");
+            let counters = Arc::new(LiveCounters::default());
+            let bar = ctx.progress.step(&label, ctx.warmup, ctx.duration, counters.clone());
             let r = run_step(
                 StepConfig {
                     workers: c,
                     warmup: ctx.warmup,
                     duration: ctx.duration,
                 },
-                None,
+                Some(counters),
                 op,
             )
             .await;
-            let step = report::summarize(format!("{ep}/c{c}"), &r);
-            eprintln!("{}", report::step_line(&step));
+            bar.finish();
+            let step = report::summarize(label, &r);
+            ctx.progress.println(report::step_line(&step));
             steps.push(step);
         }
     }
@@ -96,10 +102,27 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
 /// keys, partitioned across workers. Re-running dedups (free).
 pub async fn seed_depth(
     client: &Arc<TaleaClient>,
+    progress: &Progress,
     depth: usize,
     workers: usize,
 ) -> Result<(), String> {
     let done = Arc::new(AtomicUsize::new(0));
+    let progress_enabled = progress.is_enabled();
+    let bar = progress.seed(depth as u64);
+    let monitor = {
+        let done = done.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let d = done.load(Ordering::Relaxed) as u64;
+                bar.set_pos(d);
+                if d >= depth as u64 {
+                    bar.finish();
+                    break;
+                }
+            }
+        })
+    };
     let mut handles = Vec::with_capacity(workers);
     for w in 0..workers.max(1) {
         let client = client.clone();
@@ -114,7 +137,7 @@ pub async fn seed_depth(
                     .await
                     .map_err(|e| format!("depth seed post {n}: {e:?}"))?;
                 let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-                if d.is_multiple_of(5000) {
+                if !progress_enabled && d.is_multiple_of(5000) {
                     eprintln!("depth seed: {d}/{depth}");
                 }
                 n += stride;
@@ -126,5 +149,6 @@ pub async fn seed_depth(
         h.await
             .map_err(|e| format!("seed worker panicked: {e}"))??;
     }
+    monitor.abort();
     Ok(())
 }

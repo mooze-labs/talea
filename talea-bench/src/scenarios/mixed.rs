@@ -13,6 +13,7 @@ use talea_client::LedgerApi;
 use talea_core::api::Page;
 use talea_core::types::Seq;
 
+use crate::progress::LiveCounters;
 use crate::report::{self, StepJson, latency_json};
 use crate::runner::{OpOutcome, StepConfig, classify, run_step};
 use crate::scenarios::validate_sweep;
@@ -50,6 +51,7 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
     for i in 0..opts.sse_subscribers {
         let client = client.clone();
         let lag = lag.clone();
+        let progress = ctx.progress.clone();
         let (book, from) = {
             let (b, s) = &probes[i % opts.books];
             (b.clone(), *s + 1)
@@ -58,7 +60,7 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
             let mut stream = match client.subscribe(&book, from).await {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("sse subscribe({book}) failed: {e:?}");
+                    progress.println(format!("sse subscribe({book}) failed: {e:?}"));
                     return;
                 }
             };
@@ -147,20 +149,24 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
                 }
             }
         };
+        let label = format!("c{c}");
+        let counters = Arc::new(LiveCounters::default());
+        let bar = ctx.progress.step(&label, ctx.warmup, ctx.duration, counters.clone());
         let r = run_step(
             StepConfig {
                 workers: c,
                 warmup: ctx.warmup,
                 duration: ctx.duration,
             },
-            None,
+            Some(counters),
             op,
         )
         .await;
+        bar.finish();
         committed += r.total_committed;
         ambiguous += r.total_ambiguous;
-        let step = report::summarize(format!("c{c}"), &r);
-        eprintln!("{}", report::step_line(&step));
+        let step = report::summarize(label, &r);
+        ctx.progress.println(report::step_line(&step));
         steps.push(step);
     }
 
@@ -203,7 +209,7 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
     )
     .await?;
     for w in &warnings {
-        eprintln!("WARN: {w}");
+        ctx.progress.println(format!("WARN: {w}"));
     }
     if let Some(step) = sse_step {
         steps.push(step);

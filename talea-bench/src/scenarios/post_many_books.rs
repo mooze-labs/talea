@@ -7,6 +7,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use talea_client::LedgerApi;
 
+use crate::progress::LiveCounters;
 use crate::report::{self, StepJson};
 use crate::runner::{OpOutcome, StepConfig, classify, run_step};
 use crate::scenarios::validate_sweep;
@@ -68,20 +69,24 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
                 }
             }
         };
+        let label = format!("books{n}");
+        let counters = Arc::new(LiveCounters::default());
+        let bar = ctx.progress.step(&label, ctx.warmup, ctx.duration, counters.clone());
         let r = run_step(
             StepConfig {
                 workers,
                 warmup: ctx.warmup,
                 duration: ctx.duration,
             },
-            None,
+            Some(counters),
             op,
         )
         .await;
+        bar.finish();
         committed += r.total_committed;
         ambiguous += r.total_ambiguous;
-        let step = report::summarize(format!("books{n}"), &r);
-        eprintln!("{}", report::step_line(&step));
+        let step = report::summarize(label, &r);
+        ctx.progress.println(report::step_line(&step));
         steps.push(step);
     }
 
@@ -95,7 +100,7 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
     )
     .await?;
     for w in &warnings {
-        eprintln!("WARN: {w}");
+        ctx.progress.println(format!("WARN: {w}"));
     }
     Ok(steps)
 }

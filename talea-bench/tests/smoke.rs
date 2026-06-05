@@ -7,6 +7,7 @@ mod harness;
 use std::time::Duration;
 
 use talea_bench::Ctx;
+use talea_bench::progress::Progress;
 use talea_bench::scenarios::{mixed, overload, post_many_books, post_one_book, reads};
 use talea_bench::workload::MixWeights;
 
@@ -17,6 +18,7 @@ fn smoke_ctx(url: String, run_id: &str) -> Ctx {
         run_id: run_id.into(),
         warmup: Duration::ZERO,
         duration: Duration::from_millis(300),
+        progress: Progress::hidden(),
     }
 }
 

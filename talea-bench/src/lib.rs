@@ -14,6 +14,8 @@ use std::time::Duration;
 
 use talea_client::{RetryPolicy, TaleaClient};
 
+use crate::progress::Progress;
+
 /// Shared run context: where the server is and how each step is timed.
 pub struct Ctx {
     pub url: String,
@@ -22,6 +24,8 @@ pub struct Ctx {
     pub run_id: String,
     pub warmup: Duration,
     pub duration: Duration,
+    /// Bars + line routing; Progress::hidden() in tests and non-TTY runs.
+    pub progress: Progress,
 }
 
 impl Ctx {
@@ -49,6 +53,7 @@ mod tests {
             run_id: "t".into(),
             warmup: Duration::ZERO,
             duration: Duration::ZERO,
+            progress: Progress::hidden(),
         }
     }
 
