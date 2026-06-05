@@ -24,6 +24,7 @@ impl IntoResponse for ApiFailure {
             | ApiError::InvalidDraft { .. }
             | ApiError::AssetMismatch { .. } => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
+            ApiError::Forbidden { .. } => StatusCode::FORBIDDEN,
             ApiError::Overloaded => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Timeout => StatusCode::REQUEST_TIMEOUT,
             ApiError::UnknownAsset { .. }
@@ -62,6 +63,10 @@ mod tests {
                 StatusCode::BAD_REQUEST,
             ),
             (ApiError::Unauthorized, StatusCode::UNAUTHORIZED),
+            (
+                ApiError::Forbidden { book: "b".into() },
+                StatusCode::FORBIDDEN,
+            ),
             (
                 ApiError::NotFound { what: "t".into() },
                 StatusCode::NOT_FOUND,
