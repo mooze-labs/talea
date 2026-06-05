@@ -91,4 +91,5 @@ A global in-flight limit (`TALEA_MAX_INFLIGHT`, default 256) sheds excess load i
 
 - [HTTP API reference](reference-http-api.md) — the wire contract these decisions produce
 - [How to run on Postgres](howto-run-on-postgres.md) — the operational consequences (LB config, PgBouncer, pool sizing)
+- [Why the append-log store works this way](explanation-log-store.md) — how the embedded backend meets the same invariants without a database
 - [README — Design notes and limits](../README.md#design-notes-and-limits) — accepted limitations in brief
