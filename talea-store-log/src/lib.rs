@@ -828,6 +828,12 @@ impl Store for LogTaleaStore {
         let book = book.clone();
 
         Box::pin(async_stream::try_stream! {
+            // Validate the book name before touching the filesystem.  Every
+            // other entry point calls validate_book_name via book_writer /
+            // existing_book; subscribe builds the path directly, so we must
+            // check here.
+            validate_book_name(&book.0)?;
+
             // Step 1: get-or-create the BookWriter inside the async stream so we
             // can await it. This mirrors sqlite's behaviour: subscribing to a book
             // that has never been written to still works; future writes will be
@@ -1417,6 +1423,27 @@ mod tests {
     // -----------------------------------------------------------------------
     // Task 8: subscribe catch-up + live tail
     // -----------------------------------------------------------------------
+
+    /// subscribe with an invalid book name must yield Err as the first item and
+    /// must NOT create any directory outside the books/ subtree.
+    #[tokio::test]
+    async fn subscribe_invalid_book_yields_err_and_creates_nothing() {
+        use futures::StreamExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = LogTaleaStore::open(dir.path()).await.unwrap();
+
+        let mut stream = store.subscribe(&Book("../evil".into()), 1);
+        let first = stream.next().await.expect("stream must yield at least one item");
+        assert!(first.is_err(), "first item must be Err for invalid book name");
+
+        // The directory that would have been created by path traversal must not exist.
+        let evil_dir = dir.path().join("evil");
+        assert!(
+            !evil_dir.exists(),
+            "subscribe must not create the traversal target directory, but {:?} exists",
+            evil_dir,
+        );
+    }
 
     #[tokio::test]
     async fn subscribe_catch_up_then_live() {
