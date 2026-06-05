@@ -153,6 +153,7 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
                 warmup: ctx.warmup,
                 duration: ctx.duration,
             },
+            None,
             op,
         )
         .await;
