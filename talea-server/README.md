@@ -29,7 +29,7 @@ The crate ships a `talea-server` binary configured purely from the environment, 
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TALEA_DB_URL` | required | `postgres://...` or `sqlite://path.db` (`:memory:` is rejected) |
+| `TALEA_DB_URL` | required | `postgres://...`, `sqlite://path.db` (`:memory:` is rejected), or `log://<dir>` |
 | `TALEA_BIND` | `127.0.0.1:8080` | Listen address |
 | `TALEA_API_TOKEN` | unset | Bearer token; equivalent to an unnamed all-books `rw` entry |
 | `TALEA_TOKENS_FILE` | unset | TOML file of per-book scoped tokens (see the workspace README's "Scoped tokens") |
@@ -38,6 +38,7 @@ The crate ships a `talea-server` binary configured purely from the environment, 
 | `TALEA_WRITE_QUEUE_DEPTH` | `256` | Per-book write queue length; a full queue answers 429 + `Retry-After` |
 | `TALEA_WRITE_BATCH_MAX` | `64` | Max drafts group-committed in one DB transaction per book |
 | `TALEA_METRICS_BIND` | unset | Optional Prometheus listener; unset = no metrics endpoint |
+| `TALEA_LOG_SNAPSHOT_EVERY` / `TALEA_LOG_IDEM_HOT_CAP` / `TALEA_LOG_SEGMENT_MAX` | unset | Append-log store tuning; only read for `log://` URLs — see [`talea-store-log`](../talea-store-log/README.md) |
 
 Store selection is by URL scheme. The server owns pool sizing so admission control (acquire timeout → 503) is configurable in one place. Overload responses pair with the idempotency design: retrying with the same key is always safe, and the client SDK does it automatically.
 

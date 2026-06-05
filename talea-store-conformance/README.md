@@ -2,7 +2,7 @@
 
 Backend-agnostic conformance suite for the `Store` trait from `talea-core` — the persistence contract of the [talea](https://github.com/mooze-labs/talea) ledger, in executable form. Not published; consumed as a dev-dependency by the store crates.
 
-Both `talea-store-postgres` and `talea-store-sqlite` run this identical suite. If you write a new backend, passing this suite is the definition of done.
+`talea-store-postgres`, `talea-store-sqlite`, and `talea-store-log` all run this identical suite. If you write a new backend, passing this suite is the definition of done.
 
 ## What it checks
 

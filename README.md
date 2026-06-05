@@ -134,7 +134,7 @@ Server (`talead serve` / `talea-server`, via env or `.env`):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TALEA_DB_URL` | required | `postgres://...` or `sqlite://path.db` (`:memory:` is rejected) |
+| `TALEA_DB_URL` | required | `postgres://...`, `sqlite://path.db` (`:memory:` is rejected), or `log://<dir>` |
 | `TALEA_BIND` | `127.0.0.1:8080` | Listen address |
 | `TALEA_API_TOKEN` | unset | Bearer token; unset means OPEN dev mode (logged loudly) |
 | `TALEA_TOKENS_FILE` | unset | Path to a TOML file of scoped bearer tokens (see below). Additive with `TALEA_API_TOKEN`, which stays equivalent to an unnamed all-books `rw` entry |
