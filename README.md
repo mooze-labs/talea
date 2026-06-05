@@ -58,7 +58,8 @@ Or browse [`docs/`](docs/README.md). A running instance serves its own interacti
 | `talea-core` | Domain types (books, accounts, assets, transactions), the `Store` trait (persistence contract), and the `LedgerApi` trait (server/client contract) |
 | `talea-store-postgres` | `Store` over Postgres. LISTEN/NOTIFY for live subscriptions |
 | `talea-store-sqlite` | `Store` over SQLite (WAL). In-process broadcast for subscriptions |
-| `talea-store-conformance` | One backend-agnostic test suite both stores must pass; the contract in executable form |
+| `talea-store-log` | `Store` over an append-only CRC-framed JSON event log. No external services; single-writer per book, group commit, fsync-per-batch |
+| `talea-store-conformance` | One backend-agnostic test suite all stores must pass; the contract in executable form |
 | `talea-server` | `LedgerService` (implements `LedgerApi` over any `Store`) + axum REST/SSE transport with bearer auth and admission control |
 | `talead` | Daemon binary: `init` (migrate, token, seed, `.env`) and `serve` |
 | `talea-client` | `TaleaClient` SDK (also implements `LedgerApi`) + the `talea` CLI binary |

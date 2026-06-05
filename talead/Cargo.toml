@@ -15,6 +15,7 @@ rand = "0.9"
 serde = { version = "1.0.228", features = ["derive"] }
 talea-core = { path = "../talea-core/", version = "0.1.0" }
 talea-server = { path = "../talea-server/", version = "0.1.0" }
+talea-store-log = { path = "../talea-store-log/", version = "0.1.0" }
 talea-store-postgres = { path = "../talea-store-postgres/", version = "0.1.0" }
 talea-store-sqlite = { path = "../talea-store-sqlite/", version = "0.1.0" }
 thiserror = "2.0.18"

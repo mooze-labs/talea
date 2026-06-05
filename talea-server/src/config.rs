@@ -18,6 +18,17 @@ pub struct Config {
     /// Path to a TOML file of scoped bearer tokens (see README "Scoped
     /// tokens"). Additive with TALEA_API_TOKEN.
     pub tokens_file: Option<String>,
+
+    // ---- log:// store tuning -----------------------------------------------
+    /// Events between automatic snapshots (0 = disabled). Only applies when
+    /// TALEA_DB_URL uses the `log://` scheme. Default: 100_000.
+    pub log_snapshot_every: Option<u64>,
+    /// Max hot idempotency keys in memory; overflow drains oldest half to disk.
+    /// Only applies to the `log://` backend. Default: 1_000_000.
+    pub log_idem_hot_cap: Option<usize>,
+    /// Max bytes per segment file before rotation. Only applies to `log://`.
+    /// Default: 128 MiB.
+    pub log_segment_max: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -72,6 +83,27 @@ impl Config {
             })?;
         let write_queue_depth = Self::parse_nonzero(&get, "TALEA_WRITE_QUEUE_DEPTH", 256)?;
         let write_batch_max = Self::parse_nonzero(&get, "TALEA_WRITE_BATCH_MAX", 64)?;
+        let log_snapshot_every = get("TALEA_LOG_SNAPSHOT_EVERY")
+            .map(|v| v.parse::<u64>())
+            .transpose()
+            .map_err(|e| ConfigError::Invalid {
+                var: "TALEA_LOG_SNAPSHOT_EVERY",
+                reason: format!("{e}"),
+            })?;
+        let log_idem_hot_cap = get("TALEA_LOG_IDEM_HOT_CAP")
+            .map(|v| v.parse::<usize>())
+            .transpose()
+            .map_err(|e| ConfigError::Invalid {
+                var: "TALEA_LOG_IDEM_HOT_CAP",
+                reason: format!("{e}"),
+            })?;
+        let log_segment_max = get("TALEA_LOG_SEGMENT_MAX")
+            .map(|v| v.parse::<u64>())
+            .transpose()
+            .map_err(|e| ConfigError::Invalid {
+                var: "TALEA_LOG_SEGMENT_MAX",
+                reason: format!("{e}"),
+            })?;
         Ok(Self {
             db_url,
             bind,
@@ -82,6 +114,9 @@ impl Config {
             write_queue_depth,
             write_batch_max,
             tokens_file: get("TALEA_TOKENS_FILE"),
+            log_snapshot_every,
+            log_idem_hot_cap,
+            log_segment_max,
         })
     }
 
@@ -229,6 +264,79 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(c.tokens_file.as_deref(), Some("/etc/talea/tokens.toml"));
+    }
+
+    // ---- log store option parsing ------------------------------------------
+
+    #[test]
+    fn log_opts_default_to_none() {
+        let c = cfg(&[("TALEA_DB_URL", "log:///tmp/x")]).unwrap();
+        assert!(c.log_snapshot_every.is_none());
+        assert!(c.log_idem_hot_cap.is_none());
+        assert!(c.log_segment_max.is_none());
+    }
+
+    #[test]
+    fn log_opts_parse_valid_values() {
+        let c = cfg(&[
+            ("TALEA_DB_URL", "log:///tmp/x"),
+            ("TALEA_LOG_SNAPSHOT_EVERY", "500"),
+            ("TALEA_LOG_IDEM_HOT_CAP", "2000"),
+            ("TALEA_LOG_SEGMENT_MAX", "65536"),
+        ])
+        .unwrap();
+        assert_eq!(c.log_snapshot_every, Some(500u64));
+        assert_eq!(c.log_idem_hot_cap, Some(2000usize));
+        assert_eq!(c.log_segment_max, Some(65536u64));
+    }
+
+    #[test]
+    fn log_opts_snapshot_every_zero_is_valid() {
+        let c = cfg(&[
+            ("TALEA_DB_URL", "log:///tmp/x"),
+            ("TALEA_LOG_SNAPSHOT_EVERY", "0"),
+        ])
+        .unwrap();
+        assert_eq!(c.log_snapshot_every, Some(0u64));
+    }
+
+    #[test]
+    fn log_opts_garbage_snapshot_every_errors_with_var_name() {
+        let err = cfg(&[
+            ("TALEA_DB_URL", "log:///tmp/x"),
+            ("TALEA_LOG_SNAPSHOT_EVERY", "not-a-number"),
+        ])
+        .unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Invalid { var: "TALEA_LOG_SNAPSHOT_EVERY", .. }),
+            "expected Invalid for TALEA_LOG_SNAPSHOT_EVERY, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn log_opts_garbage_idem_hot_cap_errors_with_var_name() {
+        let err = cfg(&[
+            ("TALEA_DB_URL", "log:///tmp/x"),
+            ("TALEA_LOG_IDEM_HOT_CAP", "bad"),
+        ])
+        .unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Invalid { var: "TALEA_LOG_IDEM_HOT_CAP", .. }),
+            "expected Invalid for TALEA_LOG_IDEM_HOT_CAP, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn log_opts_garbage_segment_max_errors_with_var_name() {
+        let err = cfg(&[
+            ("TALEA_DB_URL", "log:///tmp/x"),
+            ("TALEA_LOG_SEGMENT_MAX", "???"),
+        ])
+        .unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Invalid { var: "TALEA_LOG_SEGMENT_MAX", .. }),
+            "expected Invalid for TALEA_LOG_SEGMENT_MAX, got: {err:?}"
+        );
     }
 
     #[test]
