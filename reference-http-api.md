@@ -201,7 +201,7 @@ On Postgres, each subscription pins one database connection for its lifetime (LI
 
 ### `GET /health`
 
-Open route. `200 ok` with an `X-Talea-Backend: postgres | sqlite` header identifying the store. **Sits inside the admission limits**: under saturation it returns `503` like everything else, so wire it to load-balancer *readiness* (busy), not *liveness* (dead) — see [Run on Postgres](howto-run-on-postgres.md).
+Open route. `200 ok` with an `X-Talea-Backend: postgres | sqlite | log` header identifying the store. **Sits inside the admission limits**: under saturation it returns `503` like everything else, so wire it to load-balancer *readiness* (busy), not *liveness* (dead) — see [Run on Postgres](howto-run-on-postgres.md).
 
 ### `GET /docs`, `GET /openapi.json`
 
