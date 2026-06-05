@@ -7,6 +7,7 @@ pub mod report;
 pub mod runner;
 pub mod scenarios;
 pub mod seed;
+pub mod summarize;
 pub mod verify;
 pub mod workload;
 
