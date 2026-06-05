@@ -16,8 +16,37 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 
     let (store, pool_sampler, backend) = connect_store(&config).await?;
 
-    if config.api_token.is_none() {
-        tracing::warn!("TALEA_API_TOKEN not set - the API is OPEN (dev mode)");
+    let mut entries = AuthConfig::single(config.api_token.clone()).entries;
+    if let Some(path) = &config.tokens_file {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("reading TALEA_TOKENS_FILE {path}: {e}"))?;
+        let file_entries = crate::http::auth::parse_tokens(&text)
+            .map_err(|e| format!("TALEA_TOKENS_FILE {path}: {e}"))?;
+        // a fat-fingered file silently yielding zero entries must never
+        // downgrade the server to open mode
+        if file_entries.is_empty() {
+            return Err(
+                format!("TALEA_TOKENS_FILE {path}: no [tokens.<name>] entries found").into(),
+            );
+        }
+        // a duplicate against the legacy env token is as fatal as within the file
+        for (secret, scope) in &file_entries {
+            if entries.iter().any(|(s, _)| s == secret) {
+                return Err(format!(
+                    "TALEA_TOKENS_FILE {path}: entry '{}' duplicates TALEA_API_TOKEN",
+                    scope.name
+                )
+                .into());
+            }
+        }
+        entries.extend(file_entries);
+    }
+    if entries.is_empty() {
+        tracing::warn!(
+            "TALEA_API_TOKEN and TALEA_TOKENS_FILE not set - the API is OPEN (dev mode)"
+        );
+    } else {
+        tracing::info!(tokens = entries.len(), "auth: scoped bearer tokens active");
     }
 
     if let Some(bind) = config.metrics_bind {
@@ -53,9 +82,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     });
     let app = router(
         service,
-        AuthConfig {
-            token: config.api_token.clone(),
-        },
+        AuthConfig { entries },
         config.max_inflight,
         backend,
     );

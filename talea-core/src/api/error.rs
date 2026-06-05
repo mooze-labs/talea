@@ -44,6 +44,11 @@ pub enum ApiError {
         message: String,
     },
     Unauthorized,
+    /// The token is valid but its scope does not cover this book/operation.
+    /// For the global asset registry the book field carries "*".
+    Forbidden {
+        book: String,
+    },
     /// The per-book write queue is full. Retry with the same idempotency
     /// key — overload degrades to "retry later", never "maybe applied twice".
     Overloaded,

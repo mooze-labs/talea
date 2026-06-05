@@ -15,6 +15,9 @@ pub struct Config {
     pub write_queue_depth: usize,
     /// Max drafts group-committed in one storage transaction per book.
     pub write_batch_max: usize,
+    /// Path to a TOML file of scoped bearer tokens (see README "Scoped
+    /// tokens"). Additive with TALEA_API_TOKEN.
+    pub tokens_file: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -78,6 +81,7 @@ impl Config {
             metrics_bind,
             write_queue_depth,
             write_batch_max,
+            tokens_file: get("TALEA_TOKENS_FILE"),
         })
     }
 
@@ -213,6 +217,18 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn tokens_file_passthrough() {
+        let c = cfg(&[("TALEA_DB_URL", "sqlite://x.db")]).unwrap();
+        assert!(c.tokens_file.is_none());
+        let c = cfg(&[
+            ("TALEA_DB_URL", "sqlite://x.db"),
+            ("TALEA_TOKENS_FILE", "/etc/talea/tokens.toml"),
+        ])
+        .unwrap();
+        assert_eq!(c.tokens_file.as_deref(), Some("/etc/talea/tokens.toml"));
     }
 
     #[test]

@@ -87,6 +87,7 @@ pub fn error_kind(e: &ApiError) -> &'static str {
         ApiError::NotFound { .. } => "not_found",
         ApiError::Transport { .. } => "transport",
         ApiError::Unauthorized => "unauthorized",
+        ApiError::Forbidden { .. } => "forbidden",
         ApiError::Overloaded => "overloaded",
         ApiError::Timeout => "timeout",
         ApiError::Internal { .. } => "internal",
@@ -246,6 +247,10 @@ mod tests {
             OpOutcome::Saturated
         ));
         assert!(matches!(classify(ApiError::Timeout), OpOutcome::Saturated));
+        assert!(matches!(
+            classify(ApiError::Forbidden { book: "acme".into() }),
+            OpOutcome::Failed { ref kind } if kind == "forbidden"
+        ));
     }
 
     #[tokio::test]
