@@ -61,7 +61,7 @@ Run a production-shaped talea: Postgres storage, bearer auth, metrics, and the l
    TALEA_TOKENS_FILE=/etc/talea/tokens.toml cargo run -p talead -- serve
    ```
 
-   A leaked `payments` token now cannot touch any other book: out-of-scope requests answer `403 {"error":"forbidden","book":...}`. Registering assets needs an `rw` token scoped `["*"]`. `TALEA_API_TOKEN` keeps working alongside the file as an unnamed all-books `rw` token — drop it from `.env` once every service has a scoped token. Rotation = edit the file, restart (the file is read once at startup; a syntactically broken or empty file fails startup rather than silently opening the API).
+   A leaked `payments` token now cannot touch any other book: out-of-scope requests answer `403 {"error":"forbidden","book":...}` — except `GET /v1/transactions/{tx_id}`, which answers `404` exactly like an unknown id, so a scoped token cannot probe which transaction ids exist. Registering assets needs an `rw` token scoped `["*"]`. `TALEA_API_TOKEN` keeps working alongside the file as an unnamed all-books `rw` token — drop it from `.env` once every service has a scoped token. Rotation = edit the file, restart (the file is read once at startup; a syntactically broken or empty file fails startup rather than silently opening the API).
 
 5. Configure your load balancer against `/health` — as **readiness, not liveness**. `/health` sits inside the admission limits on purpose: under saturation it returns `503`, which means *busy*, not *dead*. Treating it as liveness will restart healthy instances exactly under load. ([Why](explanation-architecture.md#admission-control-and-why-health-is-inside-it).)
 
