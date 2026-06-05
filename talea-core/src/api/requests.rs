@@ -14,6 +14,8 @@ pub struct WireAmount {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AssetDraft {
     pub id: String,
+    /// One of: `fiat`, `crypto`. Crypto requires `network`; `native_id`
+    /// distinguishes tokens from the chain's base coin.
     pub class: String,
     pub network: Option<String>, // required for crypto, e.g. "bitcoin", "ethereum".
     pub native_id: Option<String>, // contract / asset id; null for a chain base coin.
@@ -27,6 +29,7 @@ pub struct AccountDraft {
     pub book: String,
     pub path: String,
     pub asset: String,
+    /// One of: `asset`, `liability`, `income`, `expense`, `equity`, `clearing`.
     pub kind: String,
     pub normal_side: Option<Direction>, // null = clearing
     pub min_balance: Option<i64>,       // null = unconstrained

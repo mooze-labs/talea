@@ -368,6 +368,94 @@ async fn openapi_spec_is_complete_and_open() {
 }
 
 #[tokio::test]
+async fn openapi_spec_is_generator_clean() {
+    let app = app(None).await;
+    let (s, spec) = send(&app, "GET", "/openapi.json", None, None).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // generators want a servers entry
+    assert!(
+        spec["servers"].as_array().is_some_and(|s| !s.is_empty()),
+        "servers must be present and non-empty"
+    );
+
+    for (path, ops) in spec["paths"].as_object().expect("paths") {
+        for (method, op) in ops.as_object().unwrap() {
+            let id = format!("{method} {path}");
+
+            // params named in the template are Path; everything else is Query.
+            // utoipa defaults IntoParams to Path — without parameter_in = Query
+            // generated clients refuse query args (query?: never) and demand
+            // them as path substitutions.
+            if let Some(params) = op["parameters"].as_array() {
+                for p in params {
+                    let name = p["name"].as_str().unwrap();
+                    let location = p["in"].as_str().unwrap();
+                    let expected = if path.contains(&format!("{{{name}}}")) {
+                        "path"
+                    } else {
+                        "query"
+                    };
+                    assert_eq!(location, expected, "{id}: param {name} misplaced");
+                }
+            }
+
+            // summaries + response descriptions surface in generated SDK docs
+            assert!(
+                op["summary"].as_str().is_some_and(|s| !s.is_empty()),
+                "{id}: missing summary"
+            );
+            let responses = op["responses"].as_object().unwrap();
+            for (status, resp) in responses {
+                assert!(
+                    resp["description"].as_str().is_some_and(|d| !d.is_empty()),
+                    "{id}: response {status} has empty description"
+                );
+            }
+
+            // the admission layer applies to every route: 503 everywhere,
+            // 408 everywhere except the SSE stream (which has no timeout layer)
+            assert!(responses.contains_key("503"), "{id}: 503 undocumented");
+            if path != "/v1/books/{book}/events" {
+                assert!(responses.contains_key("408"), "{id}: 408 undocumented");
+            }
+        }
+    }
+
+    // the SSE payload type must be reachable from the spec, not orphaned
+    let sse_schema = &spec["paths"]["/v1/books/{book}/events"]["get"]["responses"]["200"]["content"]
+        ["text/event-stream"]["schema"];
+    assert_eq!(
+        sse_schema["$ref"].as_str(),
+        Some("#/components/schemas/EventEnvelope"),
+        "SSE 200 must reference EventEnvelope"
+    );
+
+    // free-string wire fields must document their accepted values
+    let kind_desc =
+        spec["components"]["schemas"]["AccountDraft"]["properties"]["kind"]["description"]
+            .as_str()
+            .unwrap_or("");
+    for v in [
+        "asset",
+        "liability",
+        "income",
+        "expense",
+        "equity",
+        "clearing",
+    ] {
+        assert!(kind_desc.contains(v), "AccountDraft.kind must list `{v}`");
+    }
+    let class_desc =
+        spec["components"]["schemas"]["AssetDraft"]["properties"]["class"]["description"]
+            .as_str()
+            .unwrap_or("");
+    for v in ["fiat", "crypto"] {
+        assert!(class_desc.contains(v), "AssetDraft.class must list `{v}`");
+    }
+}
+
+#[tokio::test]
 async fn swagger_ui_serves_without_token() {
     let app = app(Some("sekrit")).await;
     let res = app

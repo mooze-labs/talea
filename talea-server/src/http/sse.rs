@@ -10,21 +10,26 @@ use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::{Stream, StreamExt};
 use serde::Deserialize;
-use talea_core::api::{ApiError, LedgerApi};
+use talea_core::api::{ApiError, EventEnvelope, LedgerApi};
 
 use crate::http::error::ApiFailure;
 use crate::http::routes::AppState;
 
+// parameter_in = Query is load-bearing: utoipa defaults IntoParams to Path,
+// which makes generated clients pass `from` as a path substitution.
 #[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct EventsQuery {
     pub from: Option<i64>,
 }
 
+/// SSE stream of a book's events: catch-up, then live tail.
 #[utoipa::path(get, path = "/v1/books/{book}/events",
     params(("book" = String, Path), EventsQuery),
     responses(
-        (status = 200, description = "SSE stream (text/event-stream): each event carries id: <seq> and an EventEnvelope JSON body; ?from= and Last-Event-ID both mean 'last seen seq' (header wins); reconnect resumes from the cursor", content_type = "text/event-stream"),
-        (status = 401, body = ApiError),
+        (status = 200, description = "SSE stream (text/event-stream): each event carries id: <seq> and an EventEnvelope JSON body; ?from= and Last-Event-ID both mean 'last seen seq' (header wins); reconnect resumes from the cursor", body = EventEnvelope, content_type = "text/event-stream"),
+        (status = 401, description = "missing or invalid bearer token", body = ApiError),
+        (status = 503, description = "saturated; honor Retry-After and reconnect", body = ApiError),
     ), security(("bearer" = [])), tag = "stream")]
 pub async fn events(
     State(state): State<AppState>,
