@@ -30,6 +30,18 @@ CAVEATS:
              against other SQLite runs.",
         );
     }
+    if backend == "log" {
+        out.push_str(
+            "\n  3. The log store group-commits at the fsync: c1 throughput IS \
+             the per-fsync floor BY DESIGN and says nothing about capacity — \
+             judge the high-concurrency plateau. Cross-book scaling \
+             (post-many-books) shares one device's fsync bandwidth, so many \
+             books knee where the disk saturates, not where the store does. \
+             Absolute numbers diverge ~10x between macOS (F_FULLFSYNC) and \
+             Linux (fdatasync) rigs; compare log runs only against log runs \
+             on the same OS.",
+        );
+    }
     out
 }
 
@@ -281,14 +293,20 @@ mod tests {
     fn caveats_are_backend_conditional() {
         let pg = caveats("postgres");
         let lite = caveats("sqlite");
+        let log = caveats("log");
         // the two universal caveats appear for every backend
-        for c in [&pg, &lite] {
+        for c in [&pg, &lite, &log] {
             assert!(c.contains("coordinated"));
             assert!(c.contains("Docker Desktop"));
         }
         // the single-writer note appears only for sqlite
         assert!(lite.contains("single WAL writer"));
         assert!(!pg.contains("single WAL writer"));
+        assert!(!log.contains("single WAL writer"));
+        // the fsync-floor note appears only for the log store
+        assert!(log.contains("per-fsync floor"));
+        assert!(!pg.contains("per-fsync floor"));
+        assert!(!lite.contains("per-fsync floor"));
     }
 
     #[test]
