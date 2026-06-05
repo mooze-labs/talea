@@ -107,24 +107,40 @@ pub struct Scratch {
     /// Seeded by `validate`; advanced by `stage`.
     pub raw: HashMap<String, i64>,
     /// Idempotency keys accepted earlier in this batch.
+    ///
+    /// Populated and read by the per-book writer; this file only declares the
+    /// field.
     pub idem: HashMap<String, usize>,
 }
 
 impl Scratch {
     /// Fold an ACCEPTED transaction's postings into the projected balances.
     ///
-    /// This method is meaningful only after a successful call to
-    /// [`BookState::validate`] for the same transaction, which seeds the
-    /// starting committed balances into `scratch.raw`. Subsequent batchmates
-    /// will see the updated projections when their own `validate` is called.
+    /// MUST be called at most once per transaction, and only for transactions
+    /// that [`BookState::validate`] returned `Ok` for. `validate` seeds
+    /// `scratch.raw` for every account the transaction touches; `stage` then
+    /// advances those projections so later batchmates see the updated balances.
+    ///
+    /// Panics if called for a transaction whose accounts were not seeded by
+    /// `validate` (a caller-contract violation).
     pub fn stage(&mut self, tx: &Transaction) {
         for p in &tx.postings {
             let key = p.account.to_key();
-            // Entry must have been seeded by validate; get_mut is safe here.
-            let raw = self.raw.entry(key).or_insert(0);
+            let raw = self
+                .raw
+                .get_mut(&key)
+                .expect("stage called for a tx that validate did not seed");
             match p.direction {
-                Direction::Debit => *raw += p.amount.minor(),
-                Direction::Credit => *raw -= p.amount.minor(),
+                Direction::Debit => {
+                    *raw = raw
+                        .checked_add(p.amount.minor())
+                        .expect("overflow rejected by validate");
+                }
+                Direction::Credit => {
+                    *raw = raw
+                        .checked_sub(p.amount.minor())
+                        .expect("overflow rejected by validate");
+                }
             }
         }
     }
@@ -142,8 +158,15 @@ impl BookState {
     /// On success the scratch's `raw` entries are seeded for every account
     /// this transaction touches (using committed balance as the base for
     /// accounts not yet in the scratch), but the transaction's own effects
-    /// are NOT folded in — call [`Scratch::stage`] after acceptance to do
-    /// that so later batchmates see the projection.
+    /// are NOT folded in — this method is idempotent: it only seeds, never
+    /// advances the overlay. Call [`Scratch::stage`] after acceptance to fold
+    /// this transaction's effects in so later batchmates see the projection.
+    ///
+    /// # Idempotency
+    ///
+    /// Idempotency is NOT checked here: the caller (the per-book writer) must
+    /// dedup against [`BookState::idem`] (committed) and [`Scratch::idem`]
+    /// (earlier in this batch) BEFORE validating.
     pub fn validate(&self, tx: &Transaction, scratch: &mut Scratch) -> Result<(), StoreError> {
         // 1. Reserved-book check.
         if tx.book.is_reserved() {
@@ -189,8 +212,20 @@ impl BookState {
             let base = *scratch.raw.get(&key).unwrap_or(&0);
             let entry = projected.entry(key.clone()).or_insert(base);
             match p.direction {
-                Direction::Debit => *entry += p.amount.minor(),
-                Direction::Credit => *entry -= p.amount.minor(),
+                Direction::Debit => {
+                    *entry = entry.checked_add(p.amount.minor()).ok_or_else(|| {
+                        StoreError::Io(
+                            format!("posting delta overflow for account {key}").into(),
+                        )
+                    })?;
+                }
+                Direction::Credit => {
+                    *entry = entry.checked_sub(p.amount.minor()).ok_or_else(|| {
+                        StoreError::Io(
+                            format!("posting delta overflow for account {key}").into(),
+                        )
+                    })?;
+                }
             }
         }
 
@@ -227,10 +262,16 @@ impl BookState {
         for p in &tx.postings {
             let key = p.account.to_key();
             if let Some(acct) = self.accounts.get_mut(&key) {
-                match p.direction {
-                    Direction::Debit => acct.raw_balance += p.amount.minor(),
-                    Direction::Credit => acct.raw_balance -= p.amount.minor(),
-                }
+                acct.raw_balance = match p.direction {
+                    Direction::Debit => acct
+                        .raw_balance
+                        .checked_add(p.amount.minor())
+                        .expect("overflow rejected by validate"),
+                    Direction::Credit => acct
+                        .raw_balance
+                        .checked_sub(p.amount.minor())
+                        .expect("overflow rejected by validate"),
+                };
                 acct.updated_seq = seq;
                 let raw_after = acct.raw_balance;
                 acct.postings.push(PostingEntry {
@@ -243,11 +284,32 @@ impl BookState {
                 });
             }
 
-            // Lifetime sums.
+            // Lifetime debit/credit sums. These are not validated like balances
+            // and can overflow even when individual balances don't. Saturate
+            // rather than panic post-fsync: trial_balance accuracy degrades but
+            // the store stays alive.
             let sums = self.sums.entry(p.amount.asset().clone()).or_insert((0, 0));
             match p.direction {
-                Direction::Debit => sums.0 += p.amount.minor(),
-                Direction::Credit => sums.1 += p.amount.minor(),
+                Direction::Debit => {
+                    let new = sums.0.saturating_add(p.amount.minor());
+                    if new == i64::MAX && sums.0 != i64::MAX {
+                        tracing::warn!(
+                            asset = p.amount.asset().as_str(),
+                            "lifetime debit sum saturated at i64::MAX; trial_balance accuracy degraded"
+                        );
+                    }
+                    sums.0 = new;
+                }
+                Direction::Credit => {
+                    let new = sums.1.saturating_add(p.amount.minor());
+                    if new == i64::MAX && sums.1 != i64::MAX {
+                        tracing::warn!(
+                            asset = p.amount.asset().as_str(),
+                            "lifetime credit sum saturated at i64::MAX; trial_balance accuracy degraded"
+                        );
+                    }
+                    sums.1 = new;
+                }
             }
         }
 
@@ -266,8 +328,12 @@ impl BookState {
 
     /// Apply an account-opened event to the in-memory state.
     ///
-    /// Idempotent on replay: if the account already exists (from a prior
-    /// replay pass), the first insertion is kept and the duplicate is ignored.
+    /// Defensive against a double-applied event or malformed log — NOT a
+    /// normal replay path: a valid log contains each open at most once (the
+    /// writer rejects `AlreadyExists` before appending). A duplicate with a
+    /// differing definition is silently ignored here because the writer already
+    /// rejects such opens before append; replay only ever sees writer-accepted
+    /// events.
     pub fn apply_account_opened(
         &mut self,
         def: &AccountDef,
@@ -406,5 +472,98 @@ mod tests {
         assert!(st.idem.contains_key("k1"));
         assert!(st.txids.contains_key(&t.id.0));
         assert_eq!(st.next_seq, 2);
+    }
+
+    #[test]
+    fn overflow_in_projection_is_rejected_not_wrapped() {
+        // Account with balance i64::MAX; a debit of 1 would wrap silently
+        // without checked arithmetic. validate must return Err(StoreError::Io).
+        let mut st = BookState::default();
+        let id = acct("cash");
+        st.accounts.insert(
+            id.to_key(),
+            AccountState {
+                def: AccountDef { id: id.clone(), asset: AssetId::new("USD"), kind: AccountKind::Asset },
+                cfg: AccountCfg { normal_side: Some(Direction::Debit), min_balance: None },
+                raw_balance: i64::MAX,
+                updated_seq: 0,
+                postings: vec![],
+            },
+        );
+        let mut scratch = Scratch::default();
+        let t = tx("k1", vec![(id, 1, Direction::Debit)]);
+        match st.validate(&t, &mut scratch) {
+            Err(StoreError::Io(_)) => {}
+            other => panic!("expected StoreError::Io for overflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reserved_book_wins_over_unknown_account() {
+        // A tx on a reserved book with a posting to a nonexistent account
+        // must return InvalidBook, not UnknownAccount.
+        let st = BookState::default();
+        let mut scratch = Scratch::default();
+        let ghost_id = AccountId { book: Book("_x".into()), path: "nope".into() };
+        let mut t = tx("k1", vec![]);
+        t.book = Book("_x".into());
+        t.postings = vec![Posting {
+            account: ghost_id,
+            amount: Amount::new(1, AssetId::new("USD")),
+            direction: Direction::Debit,
+        }];
+        assert!(matches!(st.validate(&t, &mut scratch), Err(StoreError::InvalidBook(_))));
+    }
+
+    #[test]
+    fn same_account_twice_in_one_tx_folds_cumulatively() {
+        // cash has min_balance 0 and balance 0.
+        // tx: debit 100, credit 60, credit 60 → net = 100 - 60 - 60 = -20 < 0.
+        // The ConstraintViolation's would_be must be -20.
+        let st = state_with_accounts(); // cash min=0, balance=0
+        let mut scratch = Scratch::default();
+        let id = acct("cash");
+        let t = tx(
+            "k1",
+            vec![
+                (id.clone(), 100, Direction::Debit),
+                (id.clone(), 60, Direction::Credit),
+                (id.clone(), 60, Direction::Credit),
+            ],
+        );
+        match st.validate(&t, &mut scratch) {
+            Err(StoreError::ConstraintViolation { would_be, min_balance, .. }) => {
+                assert_eq!(would_be, -20, "expected would_be=-20");
+                assert_eq!(min_balance, 0);
+            }
+            other => panic!("expected ConstraintViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn book_state_serde_round_trips() {
+        // Build a BookState with one account and one applied tx, then round-trip
+        // through serde_json and check key fields survive.
+        let mut st = state_with_accounts();
+        let t = tx("idem-key", vec![
+            (acct("cash"), 50, Direction::Debit),
+            (acct("rev"), 50, Direction::Credit),
+        ]);
+        let at = talea_core::store::ledger_now();
+        st.apply_transaction(&t, 1, at, (1, 0));
+
+        let json = serde_json::to_string(&st).expect("serialize");
+        let rt: BookState = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(rt.next_seq, st.next_seq);
+        assert_eq!(
+            rt.accounts[&acct("cash").to_key()].raw_balance,
+            st.accounts[&acct("cash").to_key()].raw_balance,
+        );
+        assert!(rt.idem.contains_key("idem-key"));
+        assert_eq!(rt.idem["idem-key"], st.idem["idem-key"]);
+        // txids has a Uuid key — verify it round-trips
+        assert_eq!(rt.txids.len(), 1);
+        assert!(rt.txids.contains_key(&t.id.0));
     }
 }
