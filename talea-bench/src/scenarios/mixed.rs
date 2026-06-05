@@ -190,7 +190,7 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
                 measured_secs: 0.0,
                 throughput_ops_s: 0.0,
                 successes: count,
-                saturated_503: 0,
+                saturated: 0,
                 deduplicated: 0,
                 errors: HashMap::new(),
                 invalid: false,

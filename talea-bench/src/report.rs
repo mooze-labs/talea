@@ -46,7 +46,9 @@ pub struct StepJson {
     /// All successful ops per second across kinds.
     pub throughput_ops_s: f64,
     pub successes: u64,
-    pub saturated_503: u64,
+    /// Shed by backpressure: 503 admission shedding + 429 per-book
+    /// write-queue rejection. Both mean "retry later", never an error.
+    pub saturated: u64,
     pub deduplicated: u64,
     pub errors: HashMap<String, u64>,
     /// Error rate over 1% — numbers from this step are not trustworthy.
@@ -68,7 +70,7 @@ pub fn summarize(label: impl Into<String>, r: &StepReport) -> StepJson {
             0.0
         },
         successes: r.successes,
-        saturated_503: r.saturated,
+        saturated: r.saturated,
         deduplicated: r.deduplicated,
         errors: r.errors.clone(),
         invalid,
@@ -86,7 +88,7 @@ pub fn render_table(steps: &[StepJson]) -> String {
     }
     let mut out = format!(
         "{:<24} {:<14} {:>10} {:>9} {:>9} {:>9} {:>9} {:>10} {:>6} {:>6}\n",
-        "step", "op", "ops/s", "p50ms", "p90ms", "p99ms", "p99.9ms", "maxms", "503s", "errs"
+        "step", "op", "ops/s", "p50ms", "p90ms", "p99ms", "p99.9ms", "maxms", "shed", "errs"
     );
     for s in steps {
         let errs: u64 = s.errors.values().sum();
@@ -114,14 +116,14 @@ pub fn render_table(steps: &[StepJson]) -> String {
                 ms(l.p99_us),
                 ms(l.p999_us),
                 ms(l.max_us),
-                s.saturated_503,
+                s.saturated,
                 errs
             ));
         }
         if s.latency.is_empty() {
             out.push_str(&format!(
-                "{:<24} {:<14} {:>10} (no successful ops; 503s={} errs={})\n",
-                label, "-", "-", s.saturated_503, errs
+                "{:<24} {:<14} {:>10} (no successful ops; shed={} errs={})\n",
+                label, "-", "-", s.saturated, errs
             ));
         }
     }
@@ -132,11 +134,11 @@ pub fn render_table(steps: &[StepJson]) -> String {
 pub fn step_line(s: &StepJson) -> String {
     let p99: u64 = s.latency.values().map(|l| l.p99_us).max().unwrap_or(0);
     format!(
-        "step {} done: {:.1} ops/s, worst p99 {:.1}ms, 503s={}, invalid={}",
+        "step {} done: {:.1} ops/s, worst p99 {:.1}ms, shed={}, invalid={}",
         s.label,
         s.throughput_ops_s,
         p99 as f64 / 1000.0,
-        s.saturated_503,
+        s.saturated,
         s.invalid
     )
 }
@@ -230,6 +232,10 @@ mod tests {
         assert!(t.contains("ops/s"));
         assert!(t.contains("c4"));
         assert!(t.contains("post"));
+        // shed counts BOTH 503 admission shedding and 429 write-queue
+        // rejection — the old "503s" name lied after the write-queue landed
+        assert!(t.contains("shed"));
+        assert!(!t.contains("503s"));
     }
 
     #[test]
