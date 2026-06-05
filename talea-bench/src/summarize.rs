@@ -6,6 +6,7 @@
 //! metric names) is an error, not a warning.
 
 use serde::Serialize;
+use std::collections::HashSet;
 
 use crate::report::RunJson;
 
@@ -34,11 +35,26 @@ pub fn summarize_runs(runs: &[RunJson], rep_workers: usize) -> Result<Summary, S
     for run in runs {
         summarize_run(run, rep_workers, &mut summary)?;
     }
+    let mut seen = HashSet::new();
+    for m in summary.bigger.iter().chain(summary.smaller.iter()) {
+        if !seen.insert(m.name.as_str()) {
+            return Err(format!(
+                "duplicate metric {:?} — did two legs bench the same backend?",
+                m.name
+            ));
+        }
+    }
     Ok(summary)
 }
 
 fn summarize_run(run: &RunJson, rep_workers: usize, out: &mut Summary) -> Result<(), String> {
     let tag = format!("{}/{}", run.scenario, run.backend);
+    if run.backend == "unknown" {
+        return Err(format!(
+            "{}: backend is \"unknown\" (health probe failed); refusing to mislabel trend data",
+            run.scenario
+        ));
+    }
     for s in run.steps.iter().filter(|s| s.invalid) {
         eprintln!(
             "WARN: {tag}: step {} invalid (>1% errors), excluded",
@@ -63,6 +79,9 @@ fn summarize_run(run: &RunJson, rep_workers: usize, out: &mut Summary) -> Result
     if run.scenario == "overload" {
         // No p99 here: 1024 closed-loop workers far past capacity measure
         // queueing, not the server. Clean shedding is the signal instead.
+        // NB: this denominator includes `saturated`, unlike the `invalid`
+        // flag in report::summarize (successes + errors only) — a step that
+        // only shed traffic is valid there but has zero error-rate ops here.
         for s in &valid {
             let errs: u64 = s.errors.values().sum();
             let denom = s.successes + s.saturated + errs;
@@ -245,5 +264,28 @@ mod tests {
         dead.latency = HashMap::new();
         let err = summarize_runs(&[run("overload", "sqlite", vec![dead])], 8).unwrap_err();
         assert!(err.contains("no operations"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_backend_is_an_error() {
+        let runs = vec![run(
+            "post-one-book",
+            "unknown",
+            vec![step("c8", 8, 500.0, 9000)],
+        )];
+        let err = summarize_runs(&runs, 8).unwrap_err();
+        assert!(err.contains("unknown"), "got: {err}");
+    }
+
+    #[test]
+    fn duplicate_metric_names_are_an_error() {
+        // Two reports for the same scenario/backend — e.g. both workflow legs
+        // accidentally benched sqlite because of a misconfigured --db-url.
+        let runs = vec![
+            run("post-one-book", "sqlite", vec![step("c8", 8, 500.0, 9000)]),
+            run("post-one-book", "sqlite", vec![step("c8", 8, 510.0, 9100)]),
+        ];
+        let err = summarize_runs(&runs, 8).unwrap_err();
+        assert!(err.contains("duplicate metric"), "got: {err}");
     }
 }
