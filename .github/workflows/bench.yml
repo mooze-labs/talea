@@ -24,7 +24,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  PROFILE: ${{ github.event_name == 'schedule' && 'full' || github.event_name == 'workflow_dispatch' && inputs.profile || 'trimmed' }}
+  # Value-selecting && / ||: schedule => 'full'; dispatch => its profile input;
+  # push (inputs.profile is '') => 'trimmed'. Keep operands truthy: a falsy
+  # selected value would silently fall through to 'trimmed'.
+  PROFILE: >-
+    ${{ github.event_name == 'schedule' && 'full'
+        || (github.event_name == 'workflow_dispatch' && inputs.profile)
+        || 'trimmed' }}
 
 jobs:
   bench:
@@ -66,7 +72,7 @@ jobs:
       - name: Upload raw reports (full fidelity)
         uses: actions/upload-artifact@v4
         with:
-          name: bench-reports-${{ env.PROFILE }}-${{ github.run_id }}
+          name: bench-reports-${{ env.PROFILE }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: reports/
 
       - name: Summarize
