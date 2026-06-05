@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use sqlx::sqlite::SqlitePoolOptions;
-use talea_server::http::auth::AuthConfig;
+use talea_server::http::auth::{Access, AuthConfig, BookSet, TokenScope};
 use talea_server::service::LedgerService;
 use talea_store_sqlite::SqliteTaleaStore;
 use tower::ServiceExt;
@@ -751,6 +752,218 @@ mod overload {
 async fn body_json(res: axum::response::Response) -> serde_json::Value {
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap_or(serde_json::json!(null))
+}
+
+/// Router over fresh sqlite with explicit (secret, books, access) entries.
+/// books = ["*"] means all books; access is "ro" or "rw".
+async fn scoped_app(entries: &[(&str, &[&str], &str)]) -> axum::Router {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let store = SqliteTaleaStore::new(pool);
+    store.migrate().await.unwrap();
+    let service = Arc::new(LedgerService::new(Arc::new(store)));
+    let entries = entries
+        .iter()
+        .map(|(secret, books, access)| {
+            let books = if books.len() == 1 && books[0] == "*" {
+                BookSet::All
+            } else {
+                BookSet::Named(books.iter().map(|b| b.to_string()).collect::<HashSet<_>>())
+            };
+            let access = match *access {
+                "ro" => Access::ReadOnly,
+                _ => Access::ReadWrite,
+            };
+            (
+                secret.to_string(),
+                Arc::new(TokenScope {
+                    name: format!("entry-{secret}"),
+                    books,
+                    access,
+                }),
+            )
+        })
+        .collect();
+    talea_server::http::routes::router(service, AuthConfig { entries }, 256, "sqlite")
+}
+
+#[tokio::test]
+async fn scoped_tokens_gate_books() {
+    let app = scoped_app(&[
+        ("admin", &["*"], "rw"),
+        ("payments", &["onramp"], "rw"),
+        ("reporting", &["*"], "ro"),
+        ("other-svc", &["other"], "rw"),
+    ])
+    .await;
+
+    // setup via admin: USD + cash/deposits in "onramp" (existing fixtures)
+    let (s, _) = send(&app, "POST", "/v1/assets", Some("admin"), Some(usd())).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    for (path, kind, side) in [
+        ("cash", "asset", "debit"),
+        ("deposits", "liability", "credit"),
+    ] {
+        let (s, _) = send(
+            &app,
+            "POST",
+            "/v1/accounts",
+            Some("admin"),
+            Some(account(path, kind, side)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NO_CONTENT);
+    }
+
+    // scoped rw writes its own book
+    let (s, posted) = send(
+        &app,
+        "POST",
+        "/v1/transactions",
+        Some("payments"),
+        Some(transfer_body("t1", 100)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // ro token reads...
+    let (s, _) = send(
+        &app,
+        "GET",
+        "/v1/books/onramp/accounts/cash/balance",
+        Some("reporting"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    // ...but cannot write
+    let (s, body) = send(
+        &app,
+        "POST",
+        "/v1/transactions",
+        Some("reporting"),
+        Some(transfer_body("t2", 100)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "forbidden");
+    assert_eq!(body["book"], "onramp");
+
+    // foreign-book read is forbidden, naming the book
+    let (s, body) = send(
+        &app,
+        "GET",
+        "/v1/books/onramp/trial-balance",
+        Some("other-svc"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(body["book"], "onramp");
+
+    // history shares allows_read with trial-balance; pin it explicitly
+    let (s, body) = send(
+        &app,
+        "GET",
+        "/v1/books/onramp/accounts/cash/history",
+        Some("other-svc"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(body["book"], "onramp");
+
+    // account-opening shares allows_write with tx-posting; pin it explicitly
+    let (s, body) = send(
+        &app,
+        "POST",
+        "/v1/accounts",
+        Some("other-svc"),
+        Some(account("savings", "asset", "debit")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(body["book"], "onramp");
+
+    // foreign-book write (book lives in the BODY) is forbidden
+    let (s, body) = send(
+        &app,
+        "POST",
+        "/v1/transactions",
+        Some("other-svc"),
+        Some(transfer_body("t3", 100)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(body["book"], "onramp");
+
+    // registry needs *: scoped rw is forbidden with book "*"
+    let (s, body) = send(&app, "POST", "/v1/assets", Some("payments"), Some(usd())).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(body["book"], "*");
+    // ro-all is forbidden too (registry needs rw)
+    let (s, _) = send(&app, "POST", "/v1/assets", Some("reporting"), Some(usd())).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // tx-by-id: the book is only known after the load
+    let tx_id = posted["tx_id"].as_str().unwrap();
+    let (s, _) = send(
+        &app,
+        "GET",
+        &format!("/v1/transactions/{tx_id}"),
+        Some("payments"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, body) = send(
+        &app,
+        "GET",
+        &format!("/v1/transactions/{tx_id}"),
+        Some("other-svc"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(body["book"], "onramp");
+
+    // SSE: foreign book forbidden before any stream output
+    let (s, body) = send(
+        &app,
+        "GET",
+        "/v1/books/onramp/events",
+        Some("other-svc"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "forbidden");
+    // ...and the in-scope subscribe still answers 200 (stream starts).
+    // NOTE: send() collects the whole body, which would hang on a live SSE
+    // stream — assert via a raw request, reading only the response head:
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/books/onramp/events")
+        .header(header::AUTHORIZATION, "Bearer reporting")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // unknown token is 401 (distinct from 403)
+    let (s, body) = send(
+        &app,
+        "GET",
+        "/v1/books/onramp/trial-balance",
+        Some("nope"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "unauthorized");
 }
 
 #[tokio::test]

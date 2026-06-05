@@ -2,7 +2,9 @@
 //! id: <seq>; reconnects resume via Last-Event-ID (wins) or ?from=,
 //! both meaning "last seen seq" — the stream starts at value + 1.
 
+use axum::Extension;
 use axum::extract::{Path, State};
+use std::sync::Arc;
 
 // Envelope-rejection wrapper, not stock axum (bad ?from= -> 400 envelope).
 use crate::http::extract::Query;
@@ -12,6 +14,7 @@ use futures::{Stream, StreamExt};
 use serde::Deserialize;
 use talea_core::api::{ApiError, LedgerApi};
 
+use crate::http::auth::TokenScope;
 use crate::http::error::ApiFailure;
 use crate::http::routes::AppState;
 
@@ -28,10 +31,14 @@ pub struct EventsQuery {
     ), security(("bearer" = [])), tag = "stream")]
 pub async fn events(
     State(state): State<AppState>,
+    Extension(scope): Extension<Arc<TokenScope>>,
     Path(book): Path<String>,
     headers: HeaderMap,
     Query(q): Query<EventsQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiFailure> {
+    if !scope.allows_read(&book) {
+        return Err(ApiFailure(ApiError::Forbidden { book }));
+    }
     let last_seen = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())

@@ -1,6 +1,8 @@
 //! Thin handlers: parse -> LedgerApi -> JSON. No logic beyond extraction.
 
+use axum::Extension;
 use axum::extract::{Path, State};
+use std::sync::Arc;
 
 // Envelope-rejection wrappers, not stock axum (415 kept, 422/413 -> 400).
 use crate::http::extract::{Json, Query};
@@ -9,8 +11,16 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use talea_core::api::*;
 
+use crate::http::auth::TokenScope;
 use crate::http::error::ApiFailure;
 use crate::http::routes::AppState;
+
+/// 403 with the offending book; "*" stands for the global registry.
+fn forbid(book: &str) -> ApiFailure {
+    ApiFailure(ApiError::Forbidden {
+        book: book.to_string(),
+    })
+}
 
 #[derive(Deserialize, utoipa::IntoParams)]
 pub struct AsOfQuery {
@@ -32,8 +42,12 @@ pub struct HistoryQuery {
     ), security(("bearer" = [])), tag = "registry")]
 pub async fn register_asset(
     State(state): State<AppState>,
+    Extension(scope): Extension<Arc<TokenScope>>,
     Json(draft): Json<AssetDraft>,
 ) -> Result<StatusCode, ApiFailure> {
+    if !scope.allows_registry() {
+        return Err(forbid("*"));
+    }
     state
         .service
         .register_asset(draft)
@@ -52,8 +66,12 @@ pub async fn register_asset(
     ), security(("bearer" = [])), tag = "registry")]
 pub async fn open_account(
     State(state): State<AppState>,
+    Extension(scope): Extension<Arc<TokenScope>>,
     Json(draft): Json<AccountDraft>,
 ) -> Result<StatusCode, ApiFailure> {
+    if !scope.allows_write(&draft.book) {
+        return Err(forbid(&draft.book));
+    }
     state
         .service
         .open_account(draft)
@@ -74,8 +92,12 @@ pub async fn open_account(
     ), security(("bearer" = [])), tag = "ledger")]
 pub async fn post_transaction(
     State(state): State<AppState>,
+    Extension(scope): Extension<Arc<TokenScope>>,
     Json(draft): Json<TransactionDraft>,
 ) -> Result<Json<Posted>, ApiFailure> {
+    if !scope.allows_write(&draft.book) {
+        return Err(forbid(&draft.book));
+    }
     Ok(Json(state.service.post(draft).await.map_err(ApiFailure)?))
 }
 
@@ -91,9 +113,13 @@ pub async fn post_transaction(
     ), security(("bearer" = [])), tag = "reads")]
 pub async fn get_balance(
     State(state): State<AppState>,
+    Extension(scope): Extension<Arc<TokenScope>>,
     Path((book, path)): Path<(String, String)>,
     Query(q): Query<AsOfQuery>,
 ) -> Result<Json<BalanceView>, ApiFailure> {
+    if !scope.allows_read(&book) {
+        return Err(forbid(&book));
+    }
     Ok(Json(
         state
             .service
@@ -114,9 +140,13 @@ pub async fn get_balance(
     ), security(("bearer" = [])), tag = "reads")]
 pub async fn get_history(
     State(state): State<AppState>,
+    Extension(scope): Extension<Arc<TokenScope>>,
     Path((book, path)): Path<(String, String)>,
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<Paged<PostingView>>, ApiFailure> {
+    if !scope.allows_read(&book) {
+        return Err(forbid(&book));
+    }
     let page = Page {
         after_seq: q.after_seq,
         limit: q.limit.unwrap_or(100).min(1000),
@@ -138,15 +168,18 @@ pub async fn get_history(
     ), security(("bearer" = [])), tag = "ledger")]
 pub async fn get_transaction(
     State(state): State<AppState>,
+    Extension(scope): Extension<Arc<TokenScope>>,
     Path(tx_id): Path<String>,
 ) -> Result<Json<TransactionView>, ApiFailure> {
-    Ok(Json(
-        state
-            .service
-            .transaction(&tx_id)
-            .await
-            .map_err(ApiFailure)?,
-    ))
+    let view = state
+        .service
+        .transaction(&tx_id)
+        .await
+        .map_err(ApiFailure)?;
+    if !scope.allows_read(&view.book) {
+        return Err(forbid(&view.book));
+    }
+    Ok(Json(view))
 }
 
 #[utoipa::path(get, path = "/v1/books/{book}/trial-balance",
@@ -157,9 +190,13 @@ pub async fn get_transaction(
     ), security(("bearer" = [])), tag = "reads")]
 pub async fn get_trial_balance(
     State(state): State<AppState>,
+    Extension(scope): Extension<Arc<TokenScope>>,
     Path(book): Path<String>,
     Query(q): Query<AsOfQuery>,
 ) -> Result<Json<TrialBalance>, ApiFailure> {
+    if !scope.allows_read(&book) {
+        return Err(forbid(&book));
+    }
     Ok(Json(
         state
             .service
