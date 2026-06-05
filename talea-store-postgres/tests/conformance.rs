@@ -50,3 +50,4 @@ pg_test!(account_history_pages_exclusively);
 pg_test!(account_history_never_splits_a_transaction);
 pg_test!(transaction_round_trip);
 pg_test!(trial_balance_sums_per_asset);
+pg_test!(committed_at_is_monotonic_per_book);

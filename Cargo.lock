@@ -2593,6 +2593,7 @@ dependencies = [
  "sqlx",
  "talea-core",
  "talea-server",
+ "talea-store-postgres",
  "talea-store-sqlite",
  "tokio",
  "tracing",
