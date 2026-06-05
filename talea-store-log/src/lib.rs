@@ -151,11 +151,21 @@ impl LogTaleaStore {
             let pairs = seg.scan_with_pos(1, usize::MAX).await.map_err(io_err)?;
 
             // Fold into a fresh BookState.
+            // Use try_apply_transaction (not apply_transaction) so a corrupt or
+            // hand-edited log that contains arithmetic-impossible postings
+            // returns StoreError::Io instead of panicking.
             let mut st = BookState::default();
             for (wire, pos) in pairs {
                 match wire.event {
                     LedgerEvent::TransactionPosted(ref tx) => {
-                        st.apply_transaction(tx, wire.seq, wire.at, pos);
+                        st.try_apply_transaction(tx, wire.seq, wire.at, pos)
+                            .map_err(|msg| {
+                                // Encode enough context for the operator to locate the corrupt frame.
+                                let (seg_base, off) = pos;
+                                io_str(format!(
+                                    "corrupt log in book {name} at segment {seg_base} offset {off}: {msg}"
+                                ))
+                            })?;
                     }
                     LedgerEvent::AccountOpened { ref def, ref cfg } => {
                         st.apply_account_opened(def, cfg, wire.seq, wire.at);
@@ -192,6 +202,28 @@ impl LogTaleaStore {
             shut_down: AtomicBool::new(false),
             _lock: Mutex::new(Some(lock_file)),
         })
+    }
+
+    /// Look up an existing `BookWriter` without creating one.
+    ///
+    /// Returns:
+    /// - `Err(StoreError::Io)` if the store has been shut down (same behaviour
+    ///   as `book_writer` — a shut-down store should not silently report that
+    ///   every book is absent).
+    /// - `Ok(None)` if the book does not exist yet (read lock only, no I/O).
+    /// - `Ok(Some(w))` if the book is already loaded.
+    ///
+    /// Read paths (e.g. `balance`) use this so they never create a book
+    /// directory on disk as a side effect of querying a nonexistent book.
+    /// Write paths (`commit`, `open_account`, `register_asset`) continue to
+    /// use `book_writer`, which creates the book on first access.
+    async fn existing_book(&self, book: &str) -> Result<Option<BookWriter>, StoreError> {
+        if self.shut_down.load(Ordering::SeqCst) {
+            return Err(io_str("store has been shut down"));
+        }
+        validate_book_name(book)?;
+        let guard = self.books.read().await;
+        Ok(guard.get(book).cloned())
     }
 
     /// Get or create the `BookWriter` for `book`.
@@ -387,10 +419,19 @@ impl Store for LogTaleaStore {
         }
         let mut pending: Vec<PendingSubmit> = Vec::with_capacity(txs.len());
 
+        // Also track the original error message per book so duplicate slots
+        // for the same failing book get a consistent (not generic) error.
+        // StoreError is not Clone, so we store the message text and produce a
+        // fresh Io error for each affected slot.
+        let mut book_err_msgs: HashMap<String, String> = HashMap::new();
+
         for (i, tx) in txs.iter().enumerate() {
             let book = tx.book.0.clone();
             if !writers_cache.contains_key(&book) {
                 let w = self.book_writer(&book).await;
+                if let Err(ref e) = w {
+                    book_err_msgs.insert(book.clone(), e.to_string());
+                }
                 writers_cache.insert(book.clone(), w);
             }
             match &writers_cache[&book] {
@@ -399,7 +440,11 @@ impl Store for LogTaleaStore {
                     // Placeholder rx slot will be skipped; record error.
                     // We need to keep indices aligned, so push a dummy rx and
                     // record the error separately.
-                    errs.insert(i, io_str("failed to get book writer"));
+                    let msg = book_err_msgs
+                        .get(&book)
+                        .cloned()
+                        .unwrap_or_else(|| "failed to get book writer".into());
+                    errs.insert(i, io_str(msg));
                 }
             }
         }
@@ -410,10 +455,8 @@ impl Store for LogTaleaStore {
 
         for ps in &pending {
             let i = ps.tx_idx;
-            let writer = match writers_cache[&ps.book].as_ref() {
-                Ok(w) => w.clone(),
-                Err(_) => continue,
-            };
+            // pending only contains entries whose book resolved Ok; unwrap is safe.
+            let writer = writers_cache[&ps.book].as_ref().expect("pending entry must have Ok writer").clone();
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
             let submit_result = writer.submit(Job::Commit(txs[i].clone(), reply_tx)).await;
             match submit_result {
@@ -459,6 +502,11 @@ impl Store for LogTaleaStore {
     ///
     /// `as_of: None` returns the current (fully-applied) balance from
     /// in-memory state. `as_of: Some(_)` is not yet implemented (task 7).
+    ///
+    /// Uses `existing_book` (read-only lookup) so querying an account in a
+    /// book that has never been written to does NOT create that book's
+    /// directory on disk.  An absent book means the account cannot exist →
+    /// `StoreError::UnknownAccount`.
     async fn balance(
         &self,
         account: &AccountId,
@@ -468,7 +516,10 @@ impl Store for LogTaleaStore {
             todo!("task 7: point-in-time balance replay")
         }
 
-        let writer = self.book_writer(&account.book.0).await?;
+        let writer = self
+            .existing_book(&account.book.0)
+            .await?
+            .ok_or_else(|| StoreError::UnknownAccount(account.clone()))?;
         let st = writer.state.read().await;
         let key = account.to_key();
         let acct = st
@@ -693,5 +744,120 @@ mod tests {
         assert!(res.is_err(), "empty book name must be rejected");
         let err_msg = format!("{:?}", res.unwrap_err());
         assert!(err_msg.contains("invalid book name"), "error should mention invalid book name: {err_msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix 1: read paths must not create books
+    // -----------------------------------------------------------------------
+
+    /// `balance` for an account in a book that was never written must return
+    /// `UnknownAccount` and must NOT create the book directory on disk.
+    #[tokio::test]
+    async fn balance_on_unknown_book_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LogTaleaStore::open(dir.path()).await.unwrap();
+
+        let typo_account = AccountId {
+            book: Book("typo".into()),
+            path: "cash".into(),
+        };
+        let res = store.balance(&typo_account, None).await;
+
+        assert!(
+            matches!(res, Err(talea_core::store::StoreError::UnknownAccount(_))),
+            "expected UnknownAccount for nonexistent book, got {res:?}",
+        );
+
+        // The book directory must NOT have been created.
+        let book_dir = dir.path().join("books").join("typo");
+        assert!(
+            !book_dir.exists(),
+            "balance must not create books/typo on disk, but it exists: {book_dir:?}",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix 2: replay of corrupt log must error, not panic
+    // -----------------------------------------------------------------------
+
+    /// Build a valid store, shut it down, hand-append a structurally valid
+    /// (correct CRC) but arithmetically impossible frame (debits i64::MAX
+    /// from an account whose balance is already > 0), then reopen.  The open
+    /// must return `Err(StoreError::Io(…))` mentioning "corrupt log", not
+    /// panic.
+    #[tokio::test]
+    async fn replay_of_overflowing_log_errors_not_panics() {
+        use crate::frame::{WireEvent, encode_frame};
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // 1. Build a valid store with one committed transaction.
+        {
+            let store = seeded(dir.path()).await;
+            // commit one tx so cash has balance > 0 (raw_balance = 100)
+            store.commit(&mk_tx("k1", 100)).await.unwrap();
+            store.shutdown().await;
+        }
+        // At this point next_seq in book "b" is 4 (seq1=cash open, seq2=rev
+        // open, seq3=k1 tx).  We forge seq 4 outside the store.
+
+        // 2. Find the segment file for book "b" (always segment-00000000000000000001.log
+        //    since the test store is small and never rotates).
+        let book_dir = dir.path().join("books").join("b");
+        let seg_path = book_dir.join("segment-00000000000000000001.log");
+        assert!(seg_path.exists(), "segment file must exist: {seg_path:?}");
+
+        // 3. Forge a frame that is structurally valid (correct CRC) but whose
+        //    debit of i64::MAX against a balance of 100 cannot fit in i64.
+        let forged_tx = Transaction {
+            id: TxId(uuid::Uuid::now_v7()),
+            book: Book("b".into()),
+            postings: vec![
+                Posting {
+                    account: AccountId { book: Book("b".into()), path: "cash".into() },
+                    amount: Amount::new(i64::MAX, AssetId::new("USD")),
+                    direction: Direction::Debit,
+                },
+                Posting {
+                    account: AccountId { book: Book("b".into()), path: "rev".into() },
+                    amount: Amount::new(i64::MAX, AssetId::new("USD")),
+                    direction: Direction::Credit,
+                },
+            ],
+            idempotency_key: IdempotencyKey("overflow-forge".into()),
+            external_refs: vec![],
+            metadata: serde_json::Value::Null,
+            occurred_at: chrono::Utc::now(),
+        };
+        let forged_wire = WireEvent {
+            seq: 4, // next after the 3 valid events
+            at: chrono::Utc::now(),
+            event: talea_core::events::LedgerEvent::TransactionPosted(forged_tx),
+        };
+        let frame_bytes = encode_frame(&forged_wire).expect("encode must succeed");
+
+        // Append the forged frame directly.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&seg_path)
+                .expect("segment file must exist for append");
+            f.write_all(&frame_bytes).unwrap();
+        }
+
+        // 4. Reopen — must return Err mentioning "corrupt log", not panic.
+        let result = LogTaleaStore::open(dir.path()).await;
+        match result {
+            Err(StoreError::Io(ref msg)) => {
+                let s = msg.to_string();
+                assert!(
+                    s.contains("corrupt log"),
+                    "error must mention 'corrupt log', got: {s}",
+                );
+            }
+            Ok(_) => panic!("open must fail on overflow replay, but it succeeded"),
+            Err(other) => panic!("expected StoreError::Io, got {other:?}"),
+        }
     }
 }
