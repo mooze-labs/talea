@@ -29,7 +29,7 @@ pub async fn spawn_pg_server(pg_url: &str) -> String {
     let store = talea_store_postgres::PgTaleaStore::new(pool);
     store.migrate().await.unwrap();
     let service = Arc::new(LedgerService::new(Arc::new(store)));
-    let app = router(service, AuthConfig { token: None }, 256, "postgres");
+    let app = router(service, AuthConfig::open(), 256, "postgres");
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
@@ -50,9 +50,7 @@ pub async fn spawn_server(token: Option<&str>) -> String {
     let service = Arc::new(LedgerService::new(Arc::new(store)));
     let app = router(
         service,
-        AuthConfig {
-            token: token.map(String::from),
-        },
+        AuthConfig::single(token.map(String::from)),
         256,
         "sqlite",
     );

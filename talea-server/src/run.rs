@@ -53,9 +53,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     });
     let app = router(
         service,
-        AuthConfig {
-            token: config.api_token.clone(),
-        },
+        AuthConfig::single(config.api_token.clone()),
         config.max_inflight,
         backend,
     );

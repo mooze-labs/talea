@@ -20,9 +20,7 @@ async fn app(token: Option<&str>) -> axum::Router {
     let service = Arc::new(LedgerService::new(Arc::new(store)));
     talea_server::http::routes::router(
         service,
-        AuthConfig {
-            token: token.map(String::from),
-        },
+        AuthConfig::single(token.map(String::from)),
         256,
         "sqlite",
     )
@@ -690,8 +688,7 @@ mod overload {
                 ..Default::default()
             },
         ));
-        let app =
-            talea_server::http::routes::router(service, AuthConfig { token: None }, 256, "sqlite");
+        let app = talea_server::http::routes::router(service, AuthConfig::open(), 256, "sqlite");
 
         // first request: committer takes it and hangs
         {
