@@ -93,6 +93,8 @@ talea history        --book b --path cash [--after-seq 3] [--limit 100]
 talea tx             <tx_id>
 talea trial-balance  --book b
 talea tail           --book b [--from 1]                       # SSE as JSON lines
+talea completions    zsh > ~/.zfunc/_talea                     # bash/zsh/fish/elvish/powershell
+talea man            --out-dir ./man                           # talea.1 + one page per subcommand
 ```
 
 `--url` / `TALEA_URL` (default `http://127.0.0.1:8080`) and `--token` / `TALEA_TOKEN` apply to every command. Posting syntax is `<account>:<asset>:<minor>`, parsed from the right, so account paths containing `:` (like `treasury:btc`) work. `--idem` is required and never auto-generated: a generated key would defeat retry safety.
