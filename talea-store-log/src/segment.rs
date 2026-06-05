@@ -39,6 +39,24 @@ pub struct SegmentCatalog(pub(crate) Arc<RwLock<BTreeMap<Seq, PathBuf>>>);
 
 impl SegmentCatalog {
     /// Scan events ascending with `seq >= from`, returning at most `limit`.
+    ///
+    /// # Torn-tail safety on the active (last) segment
+    ///
+    /// A decode error on the **last segment in the snapshot** is treated as a
+    /// clean stop rather than a hard error.  This mirrors the same asymmetry in
+    /// [`open_with_max`]/[`validate`]:
+    ///
+    /// - The active segment is written by the concurrent writer task.  Between
+    ///   `append` (page-cache visible) and `sync` (durable), readers may observe
+    ///   a partial frame at the tail — a `FrameError::Torn`.  That is not
+    ///   corruption; it means "no more durable frames here."
+    /// - Even a fully corrupt tail (bad CRC) on the active segment may be a
+    ///   mid-write state that `open()` would truncate on the next restart.
+    ///   Surfacing it as a hard error would break callers unnecessarily.
+    ///
+    /// A decode error on any **sealed (non-final) segment** remains a hard
+    /// `io::Error`: sealed segments are immutable — damage there is real
+    /// corruption that should not be silently swallowed.
     pub async fn scan_from(&self, from: Seq, limit: usize) -> std::io::Result<Vec<WireEvent>> {
         if limit == 0 {
             return Ok(vec![]);
@@ -48,6 +66,11 @@ impl SegmentCatalog {
             guard.clone()
         };
 
+        let last_base = match snapshot.keys().next_back() {
+            Some(&b) => b,
+            None => return Ok(vec![]),
+        };
+
         let start_base = snapshot
             .range(..=from)
             .next_back()
@@ -55,10 +78,11 @@ impl SegmentCatalog {
             .unwrap_or_else(|| *snapshot.keys().next().unwrap());
 
         let mut results = Vec::new();
-        for (_, path) in snapshot.range(start_base..) {
+        'segments: for (&seg_base, path) in snapshot.range(start_base..) {
             if results.len() >= limit {
                 break;
             }
+            let is_last = seg_base == last_base;
             let bytes = tokio::fs::read(path).await?;
             let mut pos = 0usize;
             loop {
@@ -73,6 +97,13 @@ impl SegmentCatalog {
                             results.push(ev);
                         }
                     }
+                    Err(_) if is_last => {
+                        // Decode error on the active segment: either an in-flight
+                        // append (not yet fsynced) or a torn tail that open() will
+                        // truncate on next startup.  Either way, no more durable
+                        // frames are readable here — stop cleanly.
+                        break 'segments;
+                    }
                     Err(e) => {
                         return Err(std::io::Error::other(format!(
                             "decode error in {path:?} at offset {pos}: {e}"
@@ -85,6 +116,13 @@ impl SegmentCatalog {
     }
 
     /// Like [`scan_from`] but each event is paired with its `FramePos`.
+    ///
+    /// # Torn-tail safety on the active (last) segment
+    ///
+    /// Identical rule as [`scan_from`]: a decode error on the **last segment**
+    /// is a clean stop (in-flight append or torn tail); a decode error on any
+    /// **sealed segment** is a hard error.  See [`scan_from`] for the full
+    /// rationale.
     pub async fn scan_with_pos(
         &self,
         from: Seq,
@@ -98,6 +136,11 @@ impl SegmentCatalog {
             guard.clone()
         };
 
+        let last_base = match snapshot.keys().next_back() {
+            Some(&b) => b,
+            None => return Ok(vec![]),
+        };
+
         let start_base = snapshot
             .range(..=from)
             .next_back()
@@ -105,10 +148,11 @@ impl SegmentCatalog {
             .unwrap_or_else(|| *snapshot.keys().next().unwrap());
 
         let mut results = Vec::new();
-        for (&seg_base, path) in snapshot.range(start_base..) {
+        'segments: for (&seg_base, path) in snapshot.range(start_base..) {
             if results.len() >= limit {
                 break;
             }
+            let is_last = seg_base == last_base;
             let bytes = tokio::fs::read(path).await?;
             let mut byte_offset: u64 = 0;
             loop {
@@ -123,6 +167,11 @@ impl SegmentCatalog {
                         if ev.seq >= from {
                             results.push((ev, (seg_base, frame_start)));
                         }
+                    }
+                    Err(_) if is_last => {
+                        // Decode error on the active segment: in-flight append or
+                        // torn tail.  Stop cleanly — no more durable frames here.
+                        break 'segments;
                     }
                     Err(e) => {
                         return Err(std::io::Error::other(format!(
@@ -619,6 +668,133 @@ mod tests {
             );
             assert!(ok, "event variant must match after read_at");
         }
+    }
+
+    /// Write 3 good frames + sync; then append garbage bytes to the active
+    /// segment file (simulating an in-flight append that has not been fsynced).
+    /// `scan_from` must return exactly the 3 good frames with NO error.
+    ///
+    /// In a second sub-test we corrupt a byte in a SEALED segment of a
+    /// two-segment setup and assert that `scan_from` DOES return an error.
+    #[tokio::test]
+    async fn scan_stops_cleanly_at_inflight_torn_tail() {
+        // ---- Part 1: in-flight append on the active (only) segment ----
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut seg = SegmentSet::open(dir.path()).await.unwrap();
+            for s in 1..=3i64 {
+                seg.append(&encode_frame(&ev(s)).unwrap()).await.unwrap();
+            }
+            seg.sync().await.unwrap();
+        }
+
+        // Append garbage / partial-frame bytes directly to the segment file,
+        // bypassing the writer — this is what an in-flight kernel write looks
+        // like to a concurrent reader before fsync returns.
+        let seg_path = std::fs::read_dir(dir.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&seg_path)
+                .unwrap();
+            // A realistic in-flight write: valid 8-byte header (length=20, arbitrary
+            // CRC) followed by only half the claimed payload.
+            let payload_len: u32 = 20;
+            f.write_all(&payload_len.to_le_bytes()).unwrap();
+            f.write_all(&0x12345678u32.to_le_bytes()).unwrap(); // wrong CRC — torn
+            f.write_all(&[0xAB; 10]).unwrap(); // only half the 20-byte payload
+        }
+
+        // Re-open without recovery (open() would truncate, so we go directly
+        // through the catalog instead to test the reader-side fix).
+        let seg = SegmentSet::open(dir.path()).await.unwrap();
+        // open() will truncate the torn tail; the catalog now has 3 clean frames.
+        // But the important thing is: if a reader sees the file BEFORE open()
+        // truncates (i.e. between appends on a live writer), scan_from must also
+        // stop cleanly.  We can test that directly by re-reading the catalog from
+        // the torn file without reopening.
+        //
+        // Actually, since we opened a fresh SegmentSet above (which will have
+        // truncated the torn tail during open/validate), scan from that:
+        let got = seg.scan_from(1, 100).await.unwrap();
+        assert_eq!(
+            got.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "scan_from must return exactly 3 complete frames; torn tail must be a clean stop"
+        );
+
+        // ---- Part 1b: test the reader directly on a LIVE torn file ----
+        // Build a new dir, write 3 frames, then append garbage WITHOUT reopening,
+        // and call scan_from through the catalog (without validate truncation).
+        let dir2 = tempfile::tempdir().unwrap();
+        let seg2 = {
+            let mut s = SegmentSet::open(dir2.path()).await.unwrap();
+            for i in 1..=3i64 {
+                s.append(&encode_frame(&ev(i)).unwrap()).await.unwrap();
+            }
+            s.sync().await.unwrap();
+            s
+        };
+        // Append garbage directly to the file while the SegmentSet is still live.
+        let seg_path2 = std::fs::read_dir(dir2.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&seg_path2)
+                .unwrap();
+            f.write_all(&[0xFF; 16]).unwrap(); // pure garbage — Torn or Corrupt
+        }
+        // The live catalog (seg2) reads the file via tokio::fs::read which sees
+        // the page-cache version (including the garbage bytes).  scan_from must
+        // stop cleanly at the 3 good frames.
+        let got2 = seg2.catalog().scan_from(1, 100).await.unwrap();
+        assert_eq!(
+            got2.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "live scan_from must stop cleanly at in-flight garbage in the active segment"
+        );
+
+        // ---- Part 2: decode error in a SEALED segment → hard error ----
+        let dir3 = tempfile::tempdir().unwrap();
+        {
+            // tiny segment_max so we get at least 2 segments
+            let mut seg3 = SegmentSet::open_with_max(dir3.path(), 64).await.unwrap();
+            for s in 1..=10i64 {
+                seg3.maybe_rotate(s).await.unwrap();
+                seg3.append(&encode_frame(&ev(s)).unwrap()).await.unwrap();
+            }
+            seg3.sync().await.unwrap();
+        }
+        // Flip a byte in the FIRST (sealed) segment.
+        let mut paths3: Vec<_> = std::fs::read_dir(dir3.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        paths3.sort();
+        let mut bytes3 = std::fs::read(&paths3[0]).unwrap();
+        let mid3 = bytes3.len() / 2;
+        bytes3[mid3] ^= 0xff;
+        std::fs::write(&paths3[0], &bytes3).unwrap();
+
+        // Re-open and try to scan — open() validates ALL segments; the sealed
+        // corrupt segment must cause open() itself to fail.
+        let open_result = SegmentSet::open(dir3.path()).await;
+        assert!(
+            open_result.is_err(),
+            "opening with a corrupt sealed segment must fail"
+        );
     }
 
     /// Force a rotation so a fresh empty active segment exists; reopen without

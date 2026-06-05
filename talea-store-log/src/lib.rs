@@ -709,6 +709,20 @@ impl Store for LogTaleaStore {
             Some(t) => {
                 // Disk replay: scan all events, fold TransactionPosted with at <= t.
                 // Rare operation; documented as slow path.
+                //
+                // Durability watermark: the writer appends → syncs → applies-to-state
+                // → acks.  `state.next_seq` advances only AFTER fsync, so any frame
+                // with `seq < ceiling` (where `ceiling = next_seq - 1`) is guaranteed
+                // to be both durable on disk and reflected in the in-memory state.
+                // Frames beyond the ceiling may be in the page cache but not yet
+                // fsynced (the writer hasn't applied them yet); surfacing them would
+                // be a dirty read — they could vanish on crash.  We therefore stop
+                // scanning once `wire.seq > ceiling`.
+                let ceiling: Seq = {
+                    let st = writer.state.read().await;
+                    st.next_seq.saturating_sub(1)
+                };
+
                 let events = writer
                     .catalog
                     .scan_from(1, usize::MAX)
@@ -717,6 +731,9 @@ impl Store for LogTaleaStore {
 
                 let mut sums: HashMap<AssetId, (i64, i64)> = HashMap::new();
                 for wire in events {
+                    if wire.seq > ceiling {
+                        break; // beyond durability watermark — stop
+                    }
                     if wire.at > t {
                         break; // committed_at is non-decreasing; can stop early
                     }
@@ -756,6 +773,18 @@ impl Store for LogTaleaStore {
     ///
     /// Edge semantics matching sqlite:
     /// - Unknown book → empty vec (sqlite returns no rows).
+    ///
+    /// # Durability watermark
+    ///
+    /// Log-replay reads must never surface frames that the in-memory state
+    /// hasn't applied yet.  The writer pipeline is: append → fsync →
+    /// apply-to-state → ack.  `state.next_seq` advances only after fsync AND
+    /// apply, so `ceiling = next_seq - 1` is the highest seq that is both
+    /// durable on disk and consistent with the in-memory index.  Frames with
+    /// `seq > ceiling` may be page-cache-visible but not fsynced; returning
+    /// them would be a dirty read — they could vanish on crash or diverge from
+    /// in-memory state.  We drop the state lock before scanning and filter out
+    /// any frames that exceed the ceiling.
     async fn read_events(
         &self,
         book: &Book,
@@ -767,6 +796,13 @@ impl Store for LogTaleaStore {
             Some(w) => w,
         };
 
+        // Read the durability ceiling under a short-lived read lock, then
+        // release before doing disk I/O.
+        let ceiling: Seq = {
+            let st = writer.state.read().await;
+            st.next_seq.saturating_sub(1)
+        };
+
         let wires = writer
             .catalog
             .scan_from(from, limit)
@@ -775,6 +811,7 @@ impl Store for LogTaleaStore {
 
         Ok(wires
             .into_iter()
+            .take_while(|w| w.seq <= ceiling)
             .map(|w| Sequenced {
                 seq: w.seq,
                 at: w.at,
@@ -1219,5 +1256,85 @@ mod tests {
         let unknown = Book("ghost".into());
         let evs_ghost = store.read_events(&unknown, 1, 10).await.unwrap();
         assert!(evs_ghost.is_empty(), "unknown book must return empty vec");
+    }
+
+    // -----------------------------------------------------------------------
+    // Hazard B: durability-watermark tests
+    // -----------------------------------------------------------------------
+
+    /// Verify that `read_events` never surfaces frames beyond the durability
+    /// ceiling (`state.next_seq - 1`).
+    ///
+    /// After 3 commits the ceiling equals the highest committed seq.
+    /// `read_events(from=1, limit=100)` must return exactly seqs 1..=ceiling
+    /// (the two AccountOpened events + 3 TransactionPosted = 5 frames) with no
+    /// extras.  This pins the ceiling-filter plumbing: if the filter were
+    /// absent, a page-cache frame beyond the ceiling could appear.
+    #[tokio::test]
+    async fn read_events_excludes_frames_beyond_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _txids, _times) = history_fixture(dir.path()).await;
+
+        let book = Book("b".into());
+
+        // 3 commits + 2 account opens = 5 events total; next_seq = 6.
+        // ceiling = 5.
+        let evs = store.read_events(&book, 1, 100).await.unwrap();
+        let seqs: Vec<Seq> = evs.iter().map(|e| e.seq).collect();
+
+        // Must have exactly seqs 1..=5 and no more.
+        assert_eq!(seqs, vec![1, 2, 3, 4, 5], "read_events must return exactly seqs 1..=ceiling");
+
+        // Also verify from= skipping still applies within the ceiling.
+        let evs_from4 = store.read_events(&book, 4, 100).await.unwrap();
+        let seqs_from4: Vec<Seq> = evs_from4.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs_from4, vec![4, 5], "from=4 must return seqs 4 and 5 only");
+    }
+
+    /// Verify that `trial_balance(Some(t))` clamps to the durability ceiling.
+    ///
+    /// Commits two transactions in a single batch (so they very likely share
+    /// the same `committed_at`).  Asserts that `trial_balance(as_of = that
+    /// timestamp)` includes both transactions' effects.  This tests the
+    /// ceiling + `as_of` interaction: the ceiling filter must not accidentally
+    /// drop frames whose `at` equals the cutoff.
+    #[tokio::test]
+    async fn as_of_boundary_includes_all_commits_sharing_the_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seeded(dir.path()).await;
+
+        // Submit two transactions in one batch so they share a committed_at.
+        let batch = vec![mk_tx("tb1", 50), mk_tx("tb2", 75)];
+        let results = store.commit_batch(&batch).await;
+        let c1 = results[0].as_ref().expect("tx1 must succeed");
+        let c2 = results[1].as_ref().expect("tx2 must succeed");
+
+        // If they share the same at, a trial_balance as_of that at must include both.
+        if c1.at == c2.at {
+            let book = Book("b".into());
+            let tb = store.trial_balance(&book, Some(c1.at)).await.unwrap();
+            assert!(!tb.is_empty(), "trial balance must not be empty after two commits");
+            let usd_row = tb.iter().find(|r| r.asset == AssetId::new("USD"))
+                .expect("USD row must exist");
+            // Both txs debit cash and credit rev by 50 and 75 → total debits 125.
+            assert_eq!(
+                usd_row.debits, 125,
+                "trial_balance(as_of) must include both batch-committed transactions; \
+                 expected debits=125, got {}",
+                usd_row.debits
+            );
+            assert_eq!(usd_row.credits, 125, "credits must also be 125");
+        } else {
+            // Clock ticked between the two commits; still verify the later as_of
+            // includes both.
+            let book = Book("b".into());
+            let tb = store.trial_balance(&book, Some(c2.at)).await.unwrap();
+            let usd_row = tb.iter().find(|r| r.asset == AssetId::new("USD"))
+                .expect("USD row must exist");
+            assert_eq!(
+                usd_row.debits, 125,
+                "trial_balance(as_of=c2.at) must include both transactions even if timestamps differ"
+            );
+        }
     }
 }
