@@ -3,6 +3,7 @@
 
 pub mod frame;
 pub mod segment;
+pub mod snapshot;
 pub mod state;
 pub mod writer;
 pub use frame::WireEvent;
@@ -147,14 +148,52 @@ impl LogTaleaStore {
             // Open the segments for replay (validation + repair happens inside open).
             let seg = SegmentSet::open(&book_dir).await.map_err(io_err)?;
 
-            // Scan all events with their positions.
-            let pairs = seg.scan_with_pos(1, usize::MAX).await.map_err(io_err)?;
+            // --- Snapshot-assisted replay ---
+            //
+            // Try to load the newest valid snapshot from this book's directory.
+            // If one is found, we start replaying the event log from `snap_seq + 1`
+            // instead of from genesis, bounding startup time to the tail only.
+            //
+            // The snapshot was taken post-apply (by the writer, after fsync+apply),
+            // so `state.next_seq == snap_seq + 1` in the loaded state.  We trust the
+            // state's own counters; the filename's seq is only used to select the
+            // segment start point.
+            //
+            // The deserialized BookState's `writer_attached` flag is always `false`
+            // (it has `#[serde(skip, default = "default_writer_attached")]`), so a
+            // writer can safely attach to it post-load.
+            let (mut st, replay_from) =
+                match snapshot::load_latest(&book_dir).await.map_err(io_err)? {
+                    Some((snap_st, snap_seq)) => {
+                        // Sanity: state's own next_seq must be snap_seq+1.
+                        debug_assert_eq!(
+                            snap_st.next_seq,
+                            snap_seq + 1,
+                            "snapshot {name} seq={snap_seq}: state.next_seq={} expected {}",
+                            snap_st.next_seq,
+                            snap_seq + 1
+                        );
+                        tracing::debug!(
+                            book = %name,
+                            snap_seq,
+                            "loaded snapshot; replaying tail from seq {}",
+                            snap_seq + 1
+                        );
+                        (snap_st, snap_seq + 1)
+                    }
+                    None => {
+                        tracing::debug!(book = %name, "no snapshot; full replay from seq 1");
+                        (BookState::default(), 1)
+                    }
+                };
 
-            // Fold into a fresh BookState.
+            // Replay the tail starting at `replay_from` (full replay when no snapshot).
+            let pairs = seg.scan_with_pos(replay_from, usize::MAX).await.map_err(io_err)?;
+
+            // Fold into the (possibly snapshot-seeded) BookState.
             // Use try_apply_transaction (not apply_transaction) so a corrupt or
             // hand-edited log that contains arithmetic-impossible postings
             // returns StoreError::Io instead of panicking.
-            let mut st = BookState::default();
             for (wire, pos) in pairs {
                 match wire.event {
                     LedgerEvent::TransactionPosted(ref tx) => {
@@ -261,6 +300,27 @@ impl LogTaleaStore {
             .map_err(io_err)?;
         guard.insert(book.to_string(), writer.clone());
         Ok(writer)
+    }
+
+    /// Trigger an immediate snapshot for `book` and wait for it to complete.
+    ///
+    /// This is an ops/test hook.  The snapshot is written by the book's writer
+    /// task (the only mutator), so it is consistent with the current state.
+    ///
+    /// Returns `Ok(())` on success.  Returns `StoreError::Io` if the book is
+    /// unknown, the store is shut down, or the snapshot write fails.
+    pub async fn snapshot_now(&self, book: &str) -> Result<(), StoreError> {
+        let writer = self
+            .existing_book(book)
+            .await?
+            .ok_or_else(|| io_str(format!("book {book:?} not found for snapshot_now")))?;
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        writer
+            .submit(Job::Snapshot(reply_tx))
+            .await?;
+        reply_rx
+            .await
+            .map_err(|_| io_str("book writer gone during snapshot_now"))?
     }
 
     /// Drain all writers and await their completion.
@@ -1418,6 +1478,97 @@ mod tests {
         let evs_from4 = store.read_events(&book, 4, 100).await.unwrap();
         let seqs_from4: Vec<Seq> = evs_from4.iter().map(|e| e.seq).collect();
         assert_eq!(seqs_from4, vec![4, 5], "from=4 must return seqs 4 and 5 only");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 12: Snapshot-assisted open path
+    // -----------------------------------------------------------------------
+
+    /// Verify that `open` uses a snapshot for replay when one exists.
+    ///
+    /// # What this test proves
+    ///
+    /// 1. After shutdown + reopen, balances reflect all commits (basic sanity).
+    /// 2. The snapshot file exists on disk after `snapshot_now`.
+    /// 3. `load_latest` after the final shutdown returns a snapshot with seq
+    ///    >= the 5th commit's seq, proving the snapshot was taken at or after
+    ///    that point and that the open path would have used it.
+    ///
+    /// What we do NOT try to prove here: that the replay *skipped* pre-snapshot
+    /// frames (that would require corrupting early frames, which is invasive
+    /// and risks making the test fragile).  The correctness of the load path
+    /// itself is proven by `snapshot_round_trips_book_state` and the fact that
+    /// balances are correct after reopen.
+    #[tokio::test]
+    async fn open_uses_snapshot_plus_tail() {
+        use crate::snapshot;
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // Seqs: 1 = _system (USD), 2 = cash open, 3 = rev open (all in separate
+        // books: _system and "b").  Within book "b", seqs are 1..=N per-book.
+        // We commit 5 transactions to book "b", then snapshot, then 2 more.
+
+        let (first_5_seqs, snap_seq_at_least): (Vec<Seq>, Seq);
+        {
+            let store = seeded(dir.path()).await;
+
+            let mut seqs = Vec::new();
+            for i in 0..5 {
+                let c = store.commit(&mk_tx(&format!("k{i}"), 1)).await.unwrap();
+                seqs.push(c.seq);
+            }
+
+            // Snapshot after 5 commits.  The snapshot seq == last applied seq
+            // in book "b" (3 events for asset+accounts are in _system, so in
+            // "b" the seqs are [1..5] for the 5 txs; actual seq depends on
+            // account opens going to "b" before commits).
+            // The point is: after snapshot_now, a .snap file must exist.
+            store.snapshot_now("b").await.unwrap();
+
+            // 2 more commits after the snapshot.
+            for i in 5..7 {
+                store.commit(&mk_tx(&format!("k{i}"), 2)).await.unwrap();
+            }
+
+            first_5_seqs = seqs;
+            // snap_seq_at_least: the snapshot must be >= the 5th commit's seq.
+            snap_seq_at_least = *first_5_seqs.last().unwrap();
+
+            store.shutdown().await;
+        }
+
+        // --- Verify snapshot file exists for book "b" ---
+        let book_dir = dir.path().join("books").join("b");
+        let snap = snapshot::load_latest(&book_dir).await.unwrap();
+        assert!(snap.is_some(), "snapshot must exist for book b after snapshot_now + shutdown");
+        let (_, snap_seq) = snap.unwrap();
+        assert!(
+            snap_seq >= snap_seq_at_least,
+            "snapshot seq {snap_seq} must be >= 5th-commit seq {snap_seq_at_least}"
+        );
+
+        // --- Reopen and verify all 7 commits are reflected ---
+        let store2 = LogTaleaStore::open(dir.path()).await.unwrap();
+
+        // cash should have: 5 × 1 + 2 × 2 = 9 total debited.
+        let bal = store2.balance(&cash_def().id, None).await.unwrap();
+        assert_eq!(
+            bal.amount.minor(),
+            9,
+            "all 7 commits must be visible after reopen; got {}",
+            bal.amount.minor()
+        );
+
+        // Idempotency: replay of any of the first 5 keys returns the original seq.
+        for (i, &orig_seq) in first_5_seqs.iter().enumerate() {
+            let dup = store2.commit(&mk_tx(&format!("k{i}"), 1)).await.unwrap();
+            assert_eq!(
+                dup.seq, orig_seq,
+                "idem key k{i} must resolve to original seq {orig_seq} after reopen, got {}",
+                dup.seq
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

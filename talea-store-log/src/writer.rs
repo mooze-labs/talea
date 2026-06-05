@@ -54,6 +54,7 @@ use talea_core::types::{AccountDef, AssetDef, Seq, Transaction};
 
 use crate::frame::{WireEvent, encode_frame};
 use crate::segment::{SegmentCatalog, SegmentSet};
+use crate::snapshot;
 use crate::state::{BookState, CommittedRec, FramePos, Scratch};
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,10 @@ pub enum Job {
     Commit(Transaction, oneshot::Sender<Result<Committed, StoreError>>),
     OpenAccount(AccountDef, AccountCfg, oneshot::Sender<Result<(), StoreError>>),
     RegisterAsset(AssetDef, oneshot::Sender<Result<(), StoreError>>),
+    /// Trigger an immediate snapshot and reply when it completes.
+    ///
+    /// Used by `LogTaleaStore::snapshot_now` (ops/test hook).
+    Snapshot(oneshot::Sender<Result<(), StoreError>>),
 }
 
 // ---------------------------------------------------------------------------
@@ -86,9 +91,14 @@ pub struct BookWriter {
 }
 
 impl BookWriter {
+    /// Default number of applied events between automatic snapshots.
+    pub const DEFAULT_SNAPSHOT_EVERY: u64 = 100_000;
+
     /// Spawn the background writer task.
     ///
     /// `batch_max` caps how many jobs are drained per batch.
+    ///
+    /// Uses `DEFAULT_SNAPSHOT_EVERY` for the snapshot cadence.
     ///
     /// # Contract
     ///
@@ -105,6 +115,24 @@ impl BookWriter {
         dir: PathBuf,
         state: Arc<RwLock<BookState>>,
         batch_max: usize,
+    ) -> std::io::Result<Self> {
+        Self::spawn_with(dir, state, batch_max, Self::DEFAULT_SNAPSHOT_EVERY).await
+    }
+
+    /// Like [`spawn`] but with an explicit `snapshot_every` cadence.
+    ///
+    /// After every `snapshot_every` applied events, the writer clones the
+    /// current `BookState` and writes a snapshot asynchronously.  Snapshot
+    /// failures are logged at `tracing::error` and do NOT kill the writer —
+    /// the log is truth; snapshots are an optimisation.
+    ///
+    /// `snapshot_every = 0` disables automatic snapshots (useful for tests
+    /// that trigger `Job::Snapshot` explicitly).
+    pub async fn spawn_with(
+        dir: PathBuf,
+        state: Arc<RwLock<BookState>>,
+        batch_max: usize,
+        snapshot_every: u64,
     ) -> std::io::Result<Self> {
         // Single-writer guard: fail fast if another writer is already live.
         {
@@ -132,7 +160,7 @@ impl BookWriter {
         let state2 = Arc::clone(&state);
         let ev_tx2 = ev_tx.clone();
 
-        let handle = tokio::spawn(run_loop(rx, segments, state2, ev_tx2, batch_max));
+        let handle = tokio::spawn(run_loop(rx, segments, state2, ev_tx2, batch_max, dir, snapshot_every));
 
         Ok(Self {
             tx,
@@ -234,7 +262,12 @@ async fn run_loop(
     state: Arc<RwLock<BookState>>,
     events: broadcast::Sender<Sequenced<LedgerEvent>>,
     batch_max: usize,
+    dir: PathBuf,
+    snapshot_every: u64,
 ) {
+    // Number of events applied since the last snapshot (periodic trigger).
+    let mut events_since_snap: u64 = 0;
+
     loop {
         // ----------------------------------------------------------------
         // 1. Drain up to batch_max jobs.
@@ -256,10 +289,13 @@ async fn run_loop(
 
         // ----------------------------------------------------------------
         // 2. Classify each job under a read lock.
+        //    Snapshot jobs are noted by index for processing post-apply.
         // ----------------------------------------------------------------
         let mut replies: Vec<Reply> = Vec::with_capacity(jobs.len());
         let mut staged: Vec<Staged> = Vec::new();
         let mut scratch = Scratch::default();
+        // Indices of Job::Snapshot entries in `jobs`.
+        let mut snap_job_idxs: Vec<usize> = Vec::new();
 
         {
             let st = state.read().await;
@@ -381,6 +417,14 @@ async fn run_loop(
                         seq += 1;
                         replies.push(Reply::Staged { staged_slot });
                     }
+
+                    // --------------------------------------------------
+                    // Snapshot — not staged or written to the log.
+                    // Record the job index; process post-apply below.
+                    // --------------------------------------------------
+                    Job::Snapshot(_) => {
+                        snap_job_idxs.push(idx);
+                    }
                 }
             }
         } // drop read lock
@@ -419,6 +463,7 @@ async fn run_loop(
         // ----------------------------------------------------------------
         // 5. Apply in acceptance order (post-fsync, write lock).
         // ----------------------------------------------------------------
+        let applied_count = staged.len() as u64;
         if !staged.is_empty() {
             let mut st = state.write().await;
             for s in &staged {
@@ -465,6 +510,9 @@ async fn run_loop(
                         Job::RegisterAsset(_, reply_tx) => {
                             let _ = reply_tx.send(Ok(()));
                         }
+                        Job::Snapshot(_) => {
+                            unreachable!("Snapshot never in staged");
+                        }
                     }
                 }
 
@@ -508,8 +556,72 @@ async fn run_loop(
                         Some(Job::RegisterAsset(_, reply_tx)) => {
                             let _ = reply_tx.send(Err(e));
                         }
+                        Some(Job::Snapshot(reply_tx)) => {
+                            // Shouldn't happen (Snapshot bypasses validate),
+                            // but handle defensively.
+                            let _ = reply_tx.send(Err(e));
+                        }
                         None => {}
                     }
+                }
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // 6.5 Handle Snapshot jobs + periodic auto-snapshot.
+        //
+        // Snapshot writes happen AFTER all other replies so callers
+        // are not delayed by snapshot I/O.  State is consistent post-apply.
+        //
+        // Two triggers:
+        //  a) Explicit Job::Snapshot in this batch.
+        //  b) Periodic: applied_count pushed events_since_snap >= snapshot_every.
+        // ----------------------------------------------------------------
+        let has_explicit_snap = !snap_job_idxs.is_empty();
+        let hit_periodic = snapshot_every > 0 && applied_count > 0 && {
+            events_since_snap += applied_count;
+            events_since_snap >= snapshot_every
+        };
+
+        if has_explicit_snap || hit_periodic {
+            // Clone state under a short read lock.
+            // next_seq - 1 is the seq of the last applied event.
+            let (snap_state, snap_seq) = {
+                let st = state.read().await;
+                let last = st.next_seq.saturating_sub(1);
+                (st.clone(), last)
+            };
+
+            let snap_result = if snap_seq > 0 {
+                let r = snapshot::write_snapshot(&dir, &snap_state, snap_seq).await;
+                match &r {
+                    Ok(()) => {
+                        tracing::debug!(seq = snap_seq, "snapshot written");
+                        events_since_snap = 0;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            seq = snap_seq,
+                            "snapshot write failed (non-fatal; log is truth)"
+                        );
+                        // Don't reset events_since_snap — retry next batch.
+                    }
+                }
+                r
+            } else {
+                // Nothing applied yet; snapshot is a no-op.
+                Ok(())
+            };
+
+            // Reply to all explicit Snapshot jobs with the write result.
+            for idx in snap_job_idxs {
+                if let Some(Job::Snapshot(reply_tx)) = jobs[idx].take() {
+                    let send_val = snap_result
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|e| StoreError::Io(e.to_string().into()));
+                    let _ = reply_tx.send(send_val);
                 }
             }
         }
