@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780672312156,
+  "lastUpdate": 1780672860214,
   "repoUrl": "https://github.com/mooze-labs/talea",
   "entries": {
     "bench-push-bigger": [
@@ -229,6 +229,60 @@ window.BENCHMARK_DATA = {
           {
             "name": "reads/log/peak-throughput",
             "value": 26903.4,
+            "unit": "ops/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "h4vismat@mooze.app",
+            "name": "havis",
+            "username": "h4vismat"
+          },
+          "committer": {
+            "email": "h4vismat@mooze.app",
+            "name": "havis",
+            "username": "h4vismat"
+          },
+          "distinct": true,
+          "id": "c15dd14d74a358e464f9b835acde34f995fb7c2e",
+          "message": "style: cargo fmt over the log-store feature\n\nCI's Format gate caught what the local loops never ran — tests and\nclippy gated every task, fmt gated none of them.\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+          "timestamp": "2026-06-05T11:10:10-03:00",
+          "tree_id": "d0e4238ca951c85670e3fd906ba225ad0233ca51",
+          "url": "https://github.com/mooze-labs/talea/commit/c15dd14d74a358e464f9b835acde34f995fb7c2e"
+        },
+        "date": 1780672859711,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "post-one-book/sqlite/peak-throughput",
+            "value": 1608.8,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/sqlite/peak-throughput",
+            "value": 10153.7,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/postgres/peak-throughput",
+            "value": 488,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/postgres/peak-throughput",
+            "value": 2767.2,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/log/peak-throughput",
+            "value": 5277,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/log/peak-throughput",
+            "value": 26959.4,
             "unit": "ops/s"
           }
         ]
