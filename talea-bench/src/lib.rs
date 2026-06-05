@@ -32,9 +32,16 @@ pub struct Ctx {
 /// `x-talea-backend` header on `/health`. Servers older than the header
 /// (or unreachable ones) yield "unknown" with a stderr warning; the run
 /// proceeds, it is just unlabeled.
+/// Sampled once at startup; assumes a stable single backend for the run.
 pub async fn detect_backend(url: &str) -> String {
     let probe = async {
-        reqwest::get(format!("{url}/health"))
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok()?;
+        client
+            .get(format!("{}/health", url.trim_end_matches('/')))
+            .send()
             .await
             .ok()?
             .headers()
