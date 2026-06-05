@@ -29,6 +29,31 @@ In another shell:
 export TALEA_TOKEN=$(grep TALEA_API_TOKEN .env | cut -d= -f2)
 ```
 
+## Setup (SQLite)
+
+No Docker, no pool sizing — SQLite subscriptions are in-process, so the
+SSE connection-pinning note above does not apply:
+
+```bash
+TALEA_DB_URL=sqlite://bench.db cargo run -p talead -- serve
+```
+
+**Reading SQLite results — the single-writer model changes the expectations:**
+
+- `post-one-book` is the headline number: per-book group commit +
+  `synchronous=NORMAL` is exactly what lifts this ceiling.
+- `post-many-books` plateaus early BY DESIGN — SQLite has one WAL writer,
+  so cross-book writes still serialize. An early knee here is
+  confirmation, not a regression.
+- `mixed`: the Postgres pool-sizing guidance does not apply; subscribers
+  cost no DB connections.
+- `overload` semantics are unchanged (429/503 shedding is store-agnostic).
+
+**Never compare absolute numbers across backends.** Compare each backend
+against its own baseline (same machine, same scenario, same git SHA). The
+result JSON records which backend a run measured (`"backend"` field, taken
+from the server's `x-talea-backend` header).
+
 ## Run the scenarios in order
 
 ```bash
