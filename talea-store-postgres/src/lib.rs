@@ -10,9 +10,10 @@ use talea_core::{events::*, store::*, types::*};
 mod helpers;
 pub use helpers::book_channel_name;
 
-/// Which implementation strategy a commit_batch call used. Exposed for
-/// tests; the `talea_commit_batch_path` counter carries the same signal
-/// to operators.
+/// Which implementation strategy a commit_batch call used. Exposed so
+/// callers and tests can observe path selection without a metrics
+/// recorder; the `talea_commit_batch_path_total` counter carries the
+/// same signal to operators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchPath {
     /// Set-based single-transaction fast path.
@@ -52,6 +53,8 @@ impl PgTaleaStore {
     /// commit_batch with the chosen path exposed. The Store trait method
     /// delegates here; tests assert path selection without a metrics
     /// recorder.
+    /// NOTE: unlike `Store::commit_batch`, calling this directly records
+    /// no `talea_commit_batch_path_total` counter increment.
     pub async fn commit_batch_traced(
         &self,
         txs: &[Transaction],
@@ -802,7 +805,7 @@ impl Store for PgTaleaStore {
             BatchPath::Fast => "fast",
             BatchPath::Fallback => "fallback",
         };
-        metrics::counter!("talea_commit_batch_path", "path" => label).increment(1);
+        metrics::counter!("talea_commit_batch_path_total", "path" => label).increment(1);
         results
     }
 
