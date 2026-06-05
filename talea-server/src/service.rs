@@ -154,6 +154,21 @@ fn map_store_err(e: StoreError) -> ApiError {
         StoreError::AlreadyExists { what } => ApiError::AlreadyExists { what },
         StoreError::InvalidBook(b) => invalid("book", format!("book {:?} is reserved", b.0)),
         StoreError::Io(e) => {
+            // A pool-acquire timeout is saturation, not malfunction: answer
+            // with the same backpressure contract as a full write queue
+            // (429 + Retry-After; idempotency keys make retries safe)
+            // instead of a 500. Walk the source chain — stores may wrap the
+            // sqlx error in context.
+            let mut src: Option<&(dyn std::error::Error + 'static)> = Some(e.as_ref());
+            while let Some(cur) = src {
+                if matches!(
+                    cur.downcast_ref::<sqlx::Error>(),
+                    Some(sqlx::Error::PoolTimedOut)
+                ) {
+                    return ApiError::Overloaded;
+                }
+                src = cur.source();
+            }
             tracing::error!(error = %e, "store backend error");
             ApiError::Internal {
                 message: "storage backend error".into(),
@@ -446,5 +461,38 @@ impl LedgerApi for LedgerService {
             futures::future::ready(Some(item))
         });
         Ok(Box::pin(fused))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pool_timeout_io_maps_to_backpressure_not_internal() {
+        // Bare sqlx error in the box.
+        let bare = StoreError::Io(Box::new(sqlx::Error::PoolTimedOut));
+        assert!(matches!(map_store_err(bare), ApiError::Overloaded));
+
+        // PoolTimedOut wrapped one level down the source chain — stores may
+        // add context around the sqlx error.
+        #[derive(Debug)]
+        struct Wrapped(sqlx::Error);
+        impl std::fmt::Display for Wrapped {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "context: {}", self.0)
+            }
+        }
+        impl std::error::Error for Wrapped {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let wrapped = StoreError::Io(Box::new(Wrapped(sqlx::Error::PoolTimedOut)));
+        assert!(matches!(map_store_err(wrapped), ApiError::Overloaded));
+
+        // Other Io errors still answer 500.
+        let other = StoreError::Io("disk on fire".into());
+        assert!(matches!(map_store_err(other), ApiError::Internal { .. }));
     }
 }
