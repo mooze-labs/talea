@@ -151,7 +151,9 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
         };
         let label = format!("c{c}");
         let counters = Arc::new(LiveCounters::default());
-        let bar = ctx.progress.step(&label, ctx.warmup, ctx.duration, counters.clone());
+        let bar = ctx
+            .progress
+            .step(&label, ctx.warmup, ctx.duration, counters.clone());
         let r = run_step(
             StepConfig {
                 workers: c,

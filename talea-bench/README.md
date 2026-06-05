@@ -46,6 +46,11 @@ the `talea` CLI. `--warmup-secs` (default 5) and `--duration-secs`
 `bench-results/` (gitignored) embedding config + git SHA for later
 comparison.
 
+On a TTY, each step shows a live progress bar (warmup → measure phase, live
+ops/s, shed and dedup counts) and depth seeding shows a position bar — all on
+stderr. When stderr is piped or in CI the bars are disabled automatically and
+the output is identical to previous versions.
+
 ## Reading the curves
 
 - **post-one-book**: throughput should plateau almost immediately

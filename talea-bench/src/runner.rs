@@ -323,7 +323,11 @@ mod tests {
                 async move {
                     c.fetch_add(1, Ordering::Relaxed);
                     tokio::time::sleep(Duration::from_millis(5)).await;
-                    OpOutcome::Success { kind: "op", deduplicated: false, committed: true }
+                    OpOutcome::Success {
+                        kind: "op",
+                        deduplicated: false,
+                        committed: true,
+                    }
                 }
             },
         )

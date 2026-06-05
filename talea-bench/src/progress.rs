@@ -27,7 +27,9 @@ impl LiveCounters {
             OpOutcome::Saturated => {
                 self.saturated.fetch_add(1, Ordering::Relaxed);
             }
-            OpOutcome::Success { deduplicated: true, .. } => {
+            OpOutcome::Success {
+                deduplicated: true, ..
+            } => {
                 self.deduplicated.fetch_add(1, Ordering::Relaxed);
             }
             _ => {}
@@ -45,7 +47,9 @@ impl Progress {
     /// Enabled iff stderr is a TTY. Call once in main.
     pub fn auto() -> Self {
         if std::io::stderr().is_terminal() {
-            Self { multi: Some(MultiProgress::new()) } // draws to stderr
+            Self {
+                multi: Some(MultiProgress::new()),
+            } // draws to stderr
         } else {
             Self::hidden()
         }
@@ -88,7 +92,10 @@ impl Progress {
         counters: Arc<LiveCounters>,
     ) -> StepBar {
         let Some(multi) = &self.multi else {
-            return StepBar { bar: None, ticker: None };
+            return StepBar {
+                bar: None,
+                ticker: None,
+            };
         };
         let total_ms = (warmup + duration).as_millis() as u64;
         let bar = multi.add(ProgressBar::new(total_ms.max(1)));
@@ -106,7 +113,11 @@ impl Progress {
                 loop {
                     let elapsed = start.elapsed().as_millis() as u64;
                     bar.set_position(elapsed.min(total_ms));
-                    let phase = if elapsed < warmup_ms { "warmup" } else { "measuring" };
+                    let phase = if elapsed < warmup_ms {
+                        "warmup"
+                    } else {
+                        "measuring"
+                    };
                     let ops = counters.ops.load(Ordering::Relaxed);
                     let rate = ops as f64 / start.elapsed().as_secs_f64().max(0.001);
                     bar.set_message(format!(
@@ -118,12 +129,17 @@ impl Progress {
                 }
             }
         });
-        StepBar { bar: Some(bar), ticker: Some(ticker) }
+        StepBar {
+            bar: Some(bar),
+            ticker: Some(ticker),
+        }
     }
 
     /// Count-driven bar for depth seeding.
     pub fn seed(&self, total: u64) -> SeedBar {
-        let Some(multi) = &self.multi else { return SeedBar { bar: None } };
+        let Some(multi) = &self.multi else {
+            return SeedBar { bar: None };
+        };
         let bar = multi.add(ProgressBar::new(total.max(1)));
         bar.set_style(
             ProgressStyle::with_template("{prefix:>10} [{bar:30}] {pos}/{len}")
@@ -197,11 +213,25 @@ mod tests {
     #[test]
     fn live_counters_map_outcomes() {
         let c = LiveCounters::default();
-        c.record(&OpOutcome::Success { kind: "post", deduplicated: false, committed: true });
-        c.record(&OpOutcome::Success { kind: "post", deduplicated: true, committed: true });
+        c.record(&OpOutcome::Success {
+            kind: "post",
+            deduplicated: false,
+            committed: true,
+        });
+        c.record(&OpOutcome::Success {
+            kind: "post",
+            deduplicated: true,
+            committed: true,
+        });
         c.record(&OpOutcome::Saturated);
-        c.record(&OpOutcome::Failed { kind: "transport".into() });
-        assert_eq!(c.ops.load(Ordering::Relaxed), 4, "every completed op counts");
+        c.record(&OpOutcome::Failed {
+            kind: "transport".into(),
+        });
+        assert_eq!(
+            c.ops.load(Ordering::Relaxed),
+            4,
+            "every completed op counts"
+        );
         assert_eq!(c.saturated.load(Ordering::Relaxed), 1);
         assert_eq!(c.deduplicated.load(Ordering::Relaxed), 1);
     }
@@ -212,7 +242,12 @@ mod tests {
         assert!(!p.is_enabled());
         p.println("a line"); // must not panic, must not draw
         let counters = std::sync::Arc::new(LiveCounters::default());
-        let bar = p.step("c4", Duration::from_secs(5), Duration::from_secs(30), counters);
+        let bar = p.step(
+            "c4",
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            counters,
+        );
         bar.finish(); // no-op
         let seed = p.seed(100);
         seed.inc(50);
@@ -225,7 +260,12 @@ mod tests {
         // this exercises the ticker task lifecycle, not pixels.
         let p = Progress::forced_for_tests();
         let counters = std::sync::Arc::new(LiveCounters::default());
-        let bar = p.step("c1", Duration::ZERO, Duration::from_millis(80), counters.clone());
+        let bar = p.step(
+            "c1",
+            Duration::ZERO,
+            Duration::from_millis(80),
+            counters.clone(),
+        );
         counters.record(&OpOutcome::Saturated);
         tokio::time::sleep(Duration::from_millis(120)).await;
         bar.finish(); // must stop the ticker and clear without panic

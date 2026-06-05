@@ -78,7 +78,9 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
     };
     let label_a = "raw-503";
     let counters_a = Arc::new(LiveCounters::default());
-    let bar_a = ctx.progress.step(label_a, ctx.warmup, ctx.duration, counters_a.clone());
+    let bar_a = ctx
+        .progress
+        .step(label_a, ctx.warmup, ctx.duration, counters_a.clone());
     let r_a = run_step(
         StepConfig {
             workers: opts.concurrency,
@@ -146,7 +148,9 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
     };
     let label_b = "retry-to-success";
     let counters_b = Arc::new(LiveCounters::default());
-    let bar_b = ctx.progress.step(label_b, ctx.warmup, ctx.duration, counters_b.clone());
+    let bar_b = ctx
+        .progress
+        .step(label_b, ctx.warmup, ctx.duration, counters_b.clone());
     let r_b = run_step(
         StepConfig {
             workers: opts.concurrency,
