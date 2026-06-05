@@ -2,11 +2,16 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, Row, Transaction as DbTx};
+use sqlx::{PgPool, Postgres, Row};
 use uuid::Uuid;
 
 use talea_core::{events::*, store::*, types::*};
 
+/// Shorthand for an open database transaction. `pub(crate)` so the sibling
+/// `batch` module can name it in its helper signatures.
+pub(crate) type DbTx<'a, DB> = sqlx::Transaction<'a, DB>;
+
+mod batch;
 mod helpers;
 pub use helpers::book_channel_name;
 
@@ -59,6 +64,12 @@ impl PgTaleaStore {
         &self,
         txs: &[Transaction],
     ) -> (BatchPath, Vec<Result<Committed, StoreError>>) {
+        if txs.is_empty() {
+            return (BatchPath::Fast, Vec::new());
+        }
+        if let Some(results) = batch::try_commit_batch_fast(&self.pool, txs).await {
+            return (BatchPath::Fast, results);
+        }
         (BatchPath::Fallback, self.commit_batch_per_draft(txs).await)
     }
 
