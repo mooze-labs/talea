@@ -38,6 +38,8 @@ talea man            --out-dir ./man                           # talea.1 + one p
 
 `--url` / `TALEA_URL` (default `http://127.0.0.1:8080`) and `--token` / `TALEA_TOKEN` apply to every command. Posting syntax is `<account>:<asset>:<minor>`, parsed from the right, so account paths containing `:` (like `treasury:btc`) work. `--idem` is required and never auto-generated: a generated key would defeat retry safety.
 
+Deeper guides: [How to use the Rust SDK](../docs/howto-use-the-sdk.md) · [Tutorial: your first ledger](../docs/tutorial-first-ledger.md).
+
 ## Testing
 
 Client tests run against the real `talea-server` router on an ephemeral port backed by SQLite — not mocks. One test proves the trait symmetry: the same code passes against `LedgerService` and `TaleaClient`.

@@ -39,6 +39,18 @@ cargo run -p talead -- serve
 
 `talead init` also applies a declarative seed when `talea.seed.toml` exists (see `talea.seed.example.toml`): assets and accounts in TOML, applied idempotently on every run.
 
+## Documentation
+
+| | |
+|---|---|
+| [Tutorial: your first ledger](docs/tutorial-first-ledger.md) | Zero to a funded, streaming ledger in seven steps (SQLite, no Docker) |
+| [How to run on Postgres](docs/howto-run-on-postgres.md) | Production deployment: auth, LB readiness, multi-instance, metrics |
+| [How to use the Rust SDK](docs/howto-use-the-sdk.md) | `TaleaClient` integration: retries, idempotency, streaming |
+| [HTTP API reference](docs/reference-http-api.md) | The full wire contract: routes, shapes, errors, configuration |
+| [Architecture & design](docs/explanation-architecture.md) | Why: gapless sequences, group commit, the failure story |
+
+Or browse [`docs/`](docs/README.md). A running instance serves its own interactive API reference at `/docs`.
+
 ## Workspace layout
 
 | Crate | What it is |
