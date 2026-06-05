@@ -1,7 +1,9 @@
 //! Thin handlers: parse -> LedgerApi -> JSON. No logic beyond extraction.
 
-use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
+
+// Envelope-rejection wrappers, not stock axum (415 kept, 422/413 -> 400).
+use crate::http::extract::{Json, Query};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
