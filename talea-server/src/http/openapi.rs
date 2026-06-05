@@ -11,7 +11,7 @@ use talea_core::api::*;
 #[openapi(
     info(
         title = "talea ledger API",
-        description = "Multi-currency double-entry ledger. All writes are idempotent: registry on id, transactions on the caller-supplied idempotency key."
+        description = "Multi-currency double-entry ledger. All writes are idempotent: registry on id, transactions on the caller-supplied idempotency key.\n\nEvery error response carries the `ApiError` JSON envelope (`{\"error\": \"<tag>\", ...}`). Malformed request bodies and query strings return 400 `invalid_draft` (415 when the content-type is not application/json). Any non-streaming route may answer 408 `timeout` (processing deadline exceeded; SSE streams have no deadline), and any route 429 `overloaded` (per-book write queue full), or 503 `overloaded` (admission shed; carries Retry-After) — all safe to retry with the same idempotency key."
     ),
     paths(
         crate::http::handlers::register_asset,

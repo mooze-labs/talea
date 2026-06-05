@@ -28,6 +28,7 @@ pub struct HistoryQuery {
         (status = 204, description = "registered (idempotent on id)"),
         (status = 400, body = ApiError), (status = 401, body = ApiError),
         (status = 409, description = "same id, different definition", body = ApiError),
+        (status = 415, description = "missing or wrong content-type", body = ApiError),
     ), security(("bearer" = [])), tag = "registry")]
 pub async fn register_asset(
     State(state): State<AppState>,
@@ -47,6 +48,7 @@ pub async fn register_asset(
         (status = 400, body = ApiError), (status = 401, body = ApiError),
         (status = 404, description = "unknown asset", body = ApiError),
         (status = 409, body = ApiError),
+        (status = 415, description = "missing or wrong content-type", body = ApiError),
     ), security(("bearer" = [])), tag = "registry")]
 pub async fn open_account(
     State(state): State<AppState>,
@@ -67,6 +69,7 @@ pub async fn open_account(
         (status = 401, body = ApiError),
         (status = 404, description = "unknown account", body = ApiError),
         (status = 409, description = "min_balance violation", body = ApiError),
+        (status = 415, description = "missing or wrong content-type", body = ApiError),
         (status = 429, description = "per-book write queue full; retry with the same idempotency key", body = ApiError),
     ), security(("bearer" = [])), tag = "ledger")]
 pub async fn post_transaction(
