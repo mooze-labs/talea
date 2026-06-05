@@ -182,35 +182,6 @@ pub enum AccountCmd {
     },
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::CommandFactory;
-
-    #[test]
-    fn completions_render_for_zsh() {
-        let mut buf = Vec::new();
-        let mut cmd = Cli::command();
-        clap_complete::generate(clap_complete::Shell::Zsh, &mut cmd, "talea", &mut buf);
-        let script = String::from_utf8(buf).unwrap();
-        assert!(script.contains("talea"));
-        assert!(script.contains("trial-balance"));
-    }
-
-    #[test]
-    fn man_pages_cover_every_subcommand() {
-        let pages = man_pages(&Cli::command());
-        let names: Vec<&str> = pages.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(names.contains(&"talea.1"), "got {names:?}");
-        assert!(names.contains(&"talea-post.1"), "got {names:?}");
-        assert!(names.contains(&"talea-asset-register.1"), "got {names:?}");
-        assert!(!names.iter().any(|n| n.contains("help")), "got {names:?}");
-        for (name, content) in &pages {
-            assert!(!content.is_empty(), "{name} rendered empty");
-        }
-    }
-}
-
 fn invalid(reason: String) -> ApiError {
     ApiError::InvalidDraft {
         field: "args".into(),
@@ -437,4 +408,33 @@ pub async fn run(cli: Cli) -> ApiResult<()> {
         println!("{}", serde_json::to_string_pretty(&value).expect("json"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn completions_render_for_zsh() {
+        let mut buf = Vec::new();
+        let mut cmd = Cli::command();
+        clap_complete::generate(clap_complete::Shell::Zsh, &mut cmd, "talea", &mut buf);
+        let script = String::from_utf8(buf).unwrap();
+        assert!(script.contains("talea"));
+        assert!(script.contains("trial-balance"));
+    }
+
+    #[test]
+    fn man_pages_cover_every_subcommand() {
+        let pages = man_pages(&Cli::command());
+        let names: Vec<&str> = pages.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"talea.1"), "got {names:?}");
+        assert!(names.contains(&"talea-post.1"), "got {names:?}");
+        assert!(names.contains(&"talea-asset-register.1"), "got {names:?}");
+        assert!(!names.iter().any(|n| n.contains("help")), "got {names:?}");
+        for (name, content) in &pages {
+            assert!(!content.is_empty(), "{name} rendered empty");
+        }
+    }
 }

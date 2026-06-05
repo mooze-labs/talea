@@ -61,33 +61,6 @@ pub enum AccountKind {
     Clearing,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn id(book: &str, path: &str) -> AccountId {
-        AccountId {
-            book: Book(book.into()),
-            path: path.into(),
-        }
-    }
-
-    /// The historical bug: ("a:b", "c") and ("a", "b:c") both produced "a:b:c".
-    #[test]
-    fn to_key_is_injective_across_the_book_path_split() {
-        assert_ne!(id("a:b", "c").to_key(), id("a", "b:c").to_key());
-        assert_ne!(id("a\\", "c").to_key(), id("a", "\\:c").to_key());
-    }
-
-    /// Books without ':' or '\\' keep their exact pre-escaping keys —
-    /// persisted account_key values must not shift.
-    #[test]
-    fn to_key_is_unchanged_for_plain_books() {
-        assert_eq!(id("onramp", "treasury:btc").to_key(), "onramp:treasury:btc");
-        assert_eq!(id("_system", "events").to_key(), "_system:events");
-    }
-}
-
 impl AccountKind {
     pub fn normal_side(&self) -> Option<Direction> {
         match self {
@@ -122,5 +95,32 @@ impl AccountKind {
             "clearing" => Some(AccountKind::Clearing),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(book: &str, path: &str) -> AccountId {
+        AccountId {
+            book: Book(book.into()),
+            path: path.into(),
+        }
+    }
+
+    /// The historical bug: ("a:b", "c") and ("a", "b:c") both produced "a:b:c".
+    #[test]
+    fn to_key_is_injective_across_the_book_path_split() {
+        assert_ne!(id("a:b", "c").to_key(), id("a", "b:c").to_key());
+        assert_ne!(id("a\\", "c").to_key(), id("a", "\\:c").to_key());
+    }
+
+    /// Books without ':' or '\\' keep their exact pre-escaping keys —
+    /// persisted account_key values must not shift.
+    #[test]
+    fn to_key_is_unchanged_for_plain_books() {
+        assert_eq!(id("onramp", "treasury:btc").to_key(), "onramp:treasury:btc");
+        assert_eq!(id("_system", "events").to_key(), "_system:events");
     }
 }
