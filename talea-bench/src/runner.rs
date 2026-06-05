@@ -60,6 +60,11 @@ pub fn classify(e: ApiError) -> OpOutcome {
     match e {
         ApiError::Transport { ref message } if message.starts_with("503") => OpOutcome::Saturated,
         ApiError::Overloaded => OpOutcome::Saturated,
+        // 408: the server's processing deadline fired — backpressure class,
+        // same client action as Overloaded (retries are idempotent-safe).
+        // Not ambiguous: each store write is one DB transaction, so a
+        // mid-flight cancellation rolls back — no partial commit can land.
+        ApiError::Timeout => OpOutcome::Saturated,
         other => OpOutcome::Failed {
             kind: error_kind(&other).into(),
         },
@@ -82,6 +87,7 @@ pub fn error_kind(e: &ApiError) -> &'static str {
         ApiError::Transport { .. } => "transport",
         ApiError::Unauthorized => "unauthorized",
         ApiError::Overloaded => "overloaded",
+        ApiError::Timeout => "timeout",
         ApiError::Internal { .. } => "internal",
     }
 }
@@ -222,6 +228,11 @@ mod tests {
             classify(ApiError::Unauthorized),
             OpOutcome::Failed { ref kind } if kind == "unauthorized"
         ));
+        assert!(matches!(
+            classify(ApiError::Overloaded),
+            OpOutcome::Saturated
+        ));
+        assert!(matches!(classify(ApiError::Timeout), OpOutcome::Saturated));
     }
 
     #[tokio::test]

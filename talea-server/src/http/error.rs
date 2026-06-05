@@ -25,6 +25,7 @@ impl IntoResponse for ApiFailure {
             | ApiError::AssetMismatch { .. } => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Overloaded => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::Timeout => StatusCode::REQUEST_TIMEOUT,
             ApiError::UnknownAsset { .. }
             | ApiError::UnknownAccount { .. }
             | ApiError::NotFound { .. } => StatusCode::NOT_FOUND,
@@ -90,6 +91,7 @@ mod tests {
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
             (ApiError::Overloaded, StatusCode::TOO_MANY_REQUESTS),
+            (ApiError::Timeout, StatusCode::REQUEST_TIMEOUT),
         ];
         for (err, expected) in cases {
             assert_eq!(ApiFailure(err).into_response().status(), expected);
