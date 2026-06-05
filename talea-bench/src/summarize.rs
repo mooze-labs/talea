@@ -30,15 +30,14 @@ pub struct Summary {
 /// Extract metrics from parsed runs. `rep_workers` picks the step used for
 /// latency percentiles (the workflow keeps sweeps and this value in sync).
 pub fn summarize_runs(runs: &[RunJson], rep_workers: usize) -> Result<Summary, String> {
-    let _ = rep_workers;
     let mut summary = Summary::default();
     for run in runs {
-        summarize_run(run, &mut summary)?;
+        summarize_run(run, rep_workers, &mut summary)?;
     }
     Ok(summary)
 }
 
-fn summarize_run(run: &RunJson, out: &mut Summary) -> Result<(), String> {
+fn summarize_run(run: &RunJson, rep_workers: usize, out: &mut Summary) -> Result<(), String> {
     let tag = format!("{}/{}", run.scenario, run.backend);
     for s in run.steps.iter().filter(|s| s.invalid) {
         eprintln!(
@@ -60,6 +59,21 @@ fn summarize_run(run: &RunJson, out: &mut Summary) -> Result<(), String> {
         unit: "ops/s".into(),
         value: peak,
     });
+
+    let rep = valid
+        .iter()
+        .find(|s| s.workers == rep_workers)
+        .ok_or_else(|| format!("{tag}: no valid step with workers == {rep_workers}"))?;
+    let mut kinds: Vec<_> = rep.latency.keys().collect();
+    kinds.sort();
+    for kind in kinds {
+        out.smaller.push(Metric {
+            name: format!("{tag}/p99-{kind}@c{rep_workers}"),
+            unit: "us".into(),
+            value: rep.latency[kind].p99_us as f64,
+        });
+    }
+
     Ok(())
 }
 
@@ -152,5 +166,30 @@ mod tests {
         bad.invalid = true;
         let err = summarize_runs(&[run("post-one-book", "sqlite", vec![bad])], 8).unwrap_err();
         assert!(err.contains("no valid steps"), "got: {err}");
+    }
+
+    #[test]
+    fn p99_metrics_come_from_the_rep_workers_step() {
+        let runs = vec![run(
+            "post-one-book",
+            "sqlite",
+            vec![step("c1", 1, 300.0, 3000), step("c8", 8, 500.0, 9000)],
+        )];
+        let s = summarize_runs(&runs, 8).unwrap();
+        assert_eq!(
+            s.smaller[0],
+            Metric {
+                name: "post-one-book/sqlite/p99-post@c8".into(),
+                unit: "us".into(),
+                value: 9000.0,
+            }
+        );
+    }
+
+    #[test]
+    fn missing_rep_step_is_an_error() {
+        let runs = vec![run("reads", "sqlite", vec![step("c1", 1, 300.0, 3000)])];
+        let err = summarize_runs(&runs, 8).unwrap_err();
+        assert!(err.contains("workers == 8"), "got: {err}");
     }
 }
