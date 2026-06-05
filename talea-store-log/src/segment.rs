@@ -35,10 +35,21 @@ fn parse_base(name: &str) -> Option<Seq> {
     s.parse().ok()
 }
 
+/// fsync the directory itself so that any newly-created dirent is durable.
+///
+/// A file whose directory entry is lost by a crash is silently absent on
+/// recovery even though the file data may be intact — the OS had no way to
+/// link it.  Calling this after creating a segment file prevents that gap.
+fn fsync_dir(dir: &Path) -> std::io::Result<()> {
+    // blocking std::fs is deliberate at open() time — one-shot startup path, not the hot path
+    std::fs::File::open(dir)?.sync_all()
+}
+
 /// Validate a segment file. Returns `Validation::Clean`, `Truncate(n)`, or
 /// `Corrupt(offset)`.  When `is_final` is true, both Torn and Corrupt errors
 /// at the tail truncate; when false both are hard failures.
 fn validate(path: &Path, is_final: bool) -> std::io::Result<Validation> {
+    // blocking std::fs is deliberate at open() time — one-shot startup path, not the hot path
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -122,12 +133,18 @@ impl SegmentSet {
                 Validation::Clean => {}
                 Validation::Truncate(good_len) => {
                     // Torn tail on the final segment — safe to repair.
+                    //
+                    // Crash between set_len and sync_all is safe: validate() is
+                    // deterministic, so a re-open re-derives the same good_len and
+                    // repeats the truncation (idempotent). The shrink lives in the
+                    // inode, covered by the file's sync_all — no dir fsync needed.
                     let discarded = std::fs::metadata(&path)?.len().saturating_sub(good_len);
                     tracing::warn!(
                         ?path,
                         discarded_bytes = discarded,
                         "torn tail in final segment; truncating to last good frame"
                     );
+                    // blocking std::fs is deliberate at open() time — one-shot startup path, not the hot path
                     let f = std::fs::OpenOptions::new().write(true).open(&path)?;
                     f.set_len(good_len)?;
                     // fsync so the repair itself is durable
@@ -149,6 +166,11 @@ impl SegmentSet {
             .open(&active_path)
             .await?;
         let active_len = active.metadata().await?.len();
+
+        // Make the dirent durable — data in a file whose directory entry is lost
+        // is silently dropped by recovery.
+        // blocking std::fs is deliberate at open() time — one-shot startup path, not the hot path
+        fsync_dir(dir)?;
 
         Ok(Self {
             dir: dir.to_path_buf(),
@@ -182,6 +204,10 @@ impl SegmentSet {
                 .append(true)
                 .open(&new_path)
                 .await?;
+            // Make the dirent durable — data in a file whose directory entry is lost
+            // is silently dropped by recovery.
+            // blocking std::fs is deliberate at rotation — rare event, not the hot path
+            fsync_dir(&self.dir)?;
             self.segments.insert(next_seq, new_path);
             self.active = new_file;
             self.active_len = 0;
@@ -243,25 +269,63 @@ impl SegmentSet {
     }
 
     /// Open the segment with `segment_base`, seek to `offset`, decode one frame.
-    pub async fn read_at(&self, segment_base: Seq, offset: u64) -> std::io::Result<WireEvent> {
+    ///
+    /// # Trust contract
+    ///
+    /// `offset` MUST come from the in-process index built at append/replay time.
+    /// It must NEVER be taken from external input.  This function verifies that
+    /// the decoded frame carries `expected_seq` as an additional guard against
+    /// stale positions or accidental wrong-segment reads, but the primary
+    /// correctness guarantee is that callers supply only index-derived offsets.
+    pub async fn read_at(
+        &self,
+        segment_base: Seq,
+        offset: u64,
+        expected_seq: Seq,
+    ) -> std::io::Result<WireEvent> {
         let path = self.segments.get(&segment_base).ok_or_else(|| {
             std::io::Error::other(format!("unknown segment base {segment_base}"))
         })?;
         let mut file = File::open(path).await?;
+
+        // Bound the allocation: refuse to allocate based on an unvalidated header.
+        let file_len = file.metadata().await?.len();
+
         file.seek(SeekFrom::Start(offset)).await?;
         // Read the 8-byte header first.
         let mut header = [0u8; HEADER_LEN];
         file.read_exact(&mut header).await?;
         let payload_len = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
+
+        // Validate that the claimed frame fits within the file before allocating.
+        let frame_end = offset
+            .checked_add((HEADER_LEN + payload_len) as u64)
+            .ok_or_else(|| std::io::Error::other("frame length arithmetic overflow"))?;
+        if frame_end > file_len {
+            return Err(std::io::Error::other(format!(
+                "frame header at {offset} claims {payload_len} bytes past end of segment"
+            )));
+        }
+
         // Read the full frame (header + payload).
         let mut frame = vec![0u8; HEADER_LEN + payload_len];
         frame[..HEADER_LEN].copy_from_slice(&header);
         file.read_exact(&mut frame[HEADER_LEN..]).await?;
-        match decode_frame(&frame) {
-            Ok(Some((ev, _))) => Ok(ev),
-            Ok(None) => Err(std::io::Error::other("empty frame at read_at")),
-            Err(e) => Err(std::io::Error::other(format!("decode error at offset {offset}: {e}"))),
+        let ev = match decode_frame(&frame) {
+            Ok(Some((ev, _))) => ev,
+            Ok(None) => return Err(std::io::Error::other("empty frame at read_at")),
+            Err(e) => return Err(std::io::Error::other(format!("decode error at offset {offset}: {e}"))),
+        };
+
+        // Verify the decoded sequence number matches what the caller expected.
+        if ev.seq != expected_seq {
+            return Err(std::io::Error::other(format!(
+                "frame at {segment_base}/{offset} has seq {got}, expected {expected_seq} — stale or wrong position",
+                got = ev.seq,
+            )));
         }
+
+        Ok(ev)
     }
 }
 
@@ -362,5 +426,99 @@ mod tests {
         bytes[mid] ^= 0xff;
         std::fs::write(&paths[0], bytes).unwrap();
         assert!(SegmentSet::open(dir.path()).await.is_err());
+    }
+
+    /// Write 3 frames + sync; append a valid 8-byte header (with correct
+    /// length + CRC fields for a hypothetical 4th frame payload) followed by
+    /// only HALF that payload; reopen; assert scan returns exactly 3 frames and
+    /// the file was truncated back to the 3-frame boundary.
+    #[tokio::test]
+    async fn torn_header_with_partial_payload_truncates() {
+        let dir = tempfile::tempdir().unwrap();
+        let good_len: u64;
+        {
+            let mut seg = SegmentSet::open(dir.path()).await.unwrap();
+            for s in 1..=3i64 {
+                seg.append(&encode_frame(&ev(s)).unwrap()).await.unwrap();
+            }
+            seg.sync().await.unwrap();
+            good_len = seg.next_pos().1;
+        }
+
+        // Build a valid 8-byte header for a hypothetical 4th frame with
+        // a 20-byte payload, but only write 10 bytes of payload (half).
+        let payload_len: u32 = 20;
+        let dummy_payload = vec![0xABu8; payload_len as usize];
+        let crc = crc32fast::hash(&dummy_payload);
+        let mut torn_fragment = Vec::with_capacity(HEADER_LEN + 10);
+        torn_fragment.extend_from_slice(&payload_len.to_le_bytes());
+        torn_fragment.extend_from_slice(&crc.to_le_bytes());
+        torn_fragment.extend_from_slice(&dummy_payload[..10]); // only half
+
+        // Find the single segment file and append the torn fragment.
+        let path = std::fs::read_dir(dir.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(&torn_fragment).unwrap();
+        }
+
+        // Reopen: validate must detect the torn payload and truncate.
+        let seg = SegmentSet::open(dir.path()).await.unwrap();
+        let got = seg.scan_from(1, 100).await.unwrap();
+        assert_eq!(got.len(), 3, "torn 4th frame must be truncated; got {} frames", got.len());
+
+        let actual_len = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(
+            actual_len, good_len,
+            "file must be truncated back to {good_len}, found {actual_len}"
+        );
+    }
+
+    /// Force a rotation so a fresh empty active segment exists; reopen without
+    /// any writes to it; assert all pre-rotation frames are still readable,
+    /// `next_pos()` reports the rotated base with offset 0, and a subsequent
+    /// append succeeds.
+    #[tokio::test]
+    async fn empty_final_segment_after_rotation_is_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let pre_rotation_base: Seq;
+        let rotated_base: Seq = 4; // first seq after writing 3 frames that exceed tiny limit
+
+        {
+            // Use a very small segment_max so we rotate after the first frame.
+            let mut seg = SegmentSet::open_with_max(dir.path(), 1).await.unwrap();
+            for s in 1..=3i64 {
+                seg.maybe_rotate(s).await.unwrap();
+                seg.append(&encode_frame(&ev(s)).unwrap()).await.unwrap();
+            }
+            // Trigger one more rotation to leave the active segment empty.
+            seg.maybe_rotate(rotated_base).await.unwrap();
+            seg.sync().await.unwrap();
+            pre_rotation_base = seg.next_pos().0;
+        }
+
+        // Reopen.
+        let mut seg = SegmentSet::open(dir.path()).await.unwrap();
+
+        // All pre-rotation frames must be visible.
+        let got = seg.scan_from(1, 100).await.unwrap();
+        assert_eq!(got.len(), 3, "expected 3 pre-rotation frames, got {}", got.len());
+
+        // next_pos must point to the (empty) rotated segment.
+        let (base, off) = seg.next_pos();
+        assert_eq!(base, pre_rotation_base, "expected rotated base {pre_rotation_base}, got {base}");
+        assert_eq!(off, 0, "new segment must start at offset 0");
+
+        // Appending to the empty segment must work.
+        seg.append(&encode_frame(&ev(rotated_base)).unwrap()).await.unwrap();
+        seg.sync().await.unwrap();
+        let all = seg.scan_from(1, 100).await.unwrap();
+        assert_eq!(all.len(), 4, "expected 4 frames after append, got {}", all.len());
     }
 }
