@@ -61,10 +61,10 @@ fn posting_delta(p: &Posting) -> i64 {
     }
 }
 
-struct AccountRow {
-    asset: AssetId,
-    normal_side: Option<Direction>,
-    min_balance: Option<i64>,
+pub(crate) struct AccountRow {
+    pub(crate) asset: AssetId,
+    pub(crate) normal_side: Option<Direction>,
+    pub(crate) min_balance: Option<i64>,
 }
 
 async fn load_account<'e, E>(executor: E, key: &str) -> Result<Option<AccountRow>, StoreError>
@@ -87,12 +87,13 @@ where
 }
 
 /// One account's folded contribution to a transaction.
-struct Pending {
-    account: AccountId,
-    asset: AssetId,
-    normal_side: Option<Direction>,
-    min_balance: Option<i64>,
-    delta: i64,
+#[derive(Clone)]
+pub(crate) struct Pending {
+    pub(crate) account: AccountId,
+    pub(crate) asset: AssetId,
+    pub(crate) normal_side: Option<Direction>,
+    pub(crate) min_balance: Option<i64>,
+    pub(crate) delta: i64,
 }
 
 /// True when a StoreError::Io wraps a sqlx unique-constraint violation.
@@ -107,31 +108,20 @@ fn is_unique_violation(e: &StoreError) -> bool {
         .unwrap_or(false)
 }
 
-/// Load + validate the accounts a transaction touches and fold its postings
-/// into one signed delta per account, sorted by account key. Read-only: runs
-/// BEFORE the book-counter lock is claimed, keeping validation round trips
-/// outside the per-book critical section. One ANY($1) query loads all
-/// accounts.
-async fn load_pending(
+/// One ANY($1) query loading account rows for a set of keys (deduped,
+/// sorted by the caller or not — the map output is order-independent).
+pub(crate) async fn load_accounts(
     db: &mut DbTx<'_, Postgres>,
-    transaction: &Transaction,
-) -> Result<Vec<Pending>, StoreError> {
-    let mut keys: Vec<String> = transaction
-        .postings
-        .iter()
-        .map(|p| p.account.to_key())
-        .collect();
-    keys.sort();
-    keys.dedup();
-
+    keys: &[String],
+) -> Result<HashMap<String, AccountRow>, StoreError> {
     let rows = sqlx::query(
         "SELECT key, asset, normal_side, min_balance FROM accounts WHERE key = ANY($1)",
     )
-    .bind(&keys)
+    .bind(keys)
     .fetch_all(&mut **db)
     .await
     .map_err(io_err)?;
-    let mut loaded: HashMap<String, AccountRow> = rows
+    Ok(rows
         .into_iter()
         .map(|r| {
             let key: String = r.get("key");
@@ -145,21 +135,29 @@ async fn load_pending(
             };
             (key, row)
         })
-        .collect();
+        .collect())
+}
 
+/// Pure: fold one draft's postings into per-account deltas against
+/// already-loaded account rows. Validation (unknown account, asset
+/// mismatch, delta overflow) is identical to the previous inline version.
+pub(crate) fn fold_postings(
+    transaction: &Transaction,
+    accounts: &HashMap<String, AccountRow>,
+) -> Result<Vec<Pending>, StoreError> {
     let mut pending: HashMap<String, Pending> = HashMap::new();
     for posting in &transaction.postings {
         let key = posting.account.to_key();
         if !pending.contains_key(&key) {
-            let row = loaded
-                .remove(&key)
+            let row = accounts
+                .get(&key)
                 .ok_or_else(|| StoreError::UnknownAccount(posting.account.clone()))?;
             pending.insert(
                 key.clone(),
                 Pending {
                     account: posting.account.clone(),
-                    asset: row.asset,
-                    normal_side: row.normal_side,
+                    asset: row.asset.clone(),
+                    normal_side: row.normal_side.clone(),
                     min_balance: row.min_balance,
                     delta: 0,
                 },
@@ -189,6 +187,26 @@ async fn load_pending(
     let mut out: Vec<Pending> = pending.into_values().collect();
     out.sort_by_key(|p| p.account.to_key());
     Ok(out)
+}
+
+/// Load + validate the accounts a transaction touches and fold its postings
+/// into one signed delta per account, sorted by account key. Read-only: runs
+/// BEFORE the book-counter lock is claimed, keeping validation round trips
+/// outside the per-book critical section. One ANY($1) query loads all
+/// accounts.
+async fn load_pending(
+    db: &mut DbTx<'_, Postgres>,
+    transaction: &Transaction,
+) -> Result<Vec<Pending>, StoreError> {
+    let mut keys: Vec<String> = transaction
+        .postings
+        .iter()
+        .map(|p| p.account.to_key())
+        .collect();
+    keys.sort();
+    keys.dedup();
+    let accounts = load_accounts(db, &keys).await?;
+    fold_postings(transaction, &accounts)
 }
 
 /// Write phase: claim the per-book seq + commit timestamp from the DB clock,
