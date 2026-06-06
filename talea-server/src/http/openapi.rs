@@ -32,6 +32,9 @@ use talea_core::api::*;
         Posted, BalanceView, PostingView, TransactionView, TrialBalanceLine,
         TrialBalance, EventEnvelope, ApiError,
         talea_core::types::Direction, talea_core::types::ExternalRef,
+        // BatchItem is the per-slot union type for POST /v1/transactions/batch;
+        // registered so generators see the Posted | ApiError discriminant.
+        crate::http::handlers::BatchItem,
         // Paged<PostingView> is NOT registered: the history path inlines it
         // (utoipa 5 removed #[aliases]); a registered copy would be dead weight
     )),

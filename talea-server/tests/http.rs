@@ -356,6 +356,7 @@ async fn openapi_spec_is_complete_and_open() {
     let schemas = spec["components"]["schemas"].as_object().expect("schemas");
     for schema in [
         "ApiError",
+        "BatchItem",
         "EventEnvelope",
         "Posted",
         "TransactionDraft",

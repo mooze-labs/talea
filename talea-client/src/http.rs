@@ -6,10 +6,23 @@
 use std::time::Duration;
 
 use reqwest::StatusCode;
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use talea_core::api::{ApiError, ApiResult};
+use talea_core::api::{ApiError, ApiResult, Posted};
 
 use crate::retry::RetryPolicy;
+
+/// Mirror of the server's `BatchItem` for deserialization only. The server
+/// serializes each slot with `#[serde(untagged)]`: a `Posted` object on
+/// success, or the `ApiError` tagged envelope on failure. Because `Posted`
+/// has a required `tx_id` field (absent from all `ApiError` variants),
+/// `serde(untagged)` resolves the union unambiguously in this direction.
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(crate) enum BatchResponseItem {
+    Ok(Posted),
+    Err(ApiError),
+}
 
 pub(crate) struct Http {
     pub client: reqwest::Client,
@@ -56,6 +69,58 @@ impl Http {
             });
         }
         Err(decode_error(status, &bytes))
+    }
+
+    /// POST a batch of drafts to `/v1/transactions/batch`; returns one
+    /// `ApiResult<Posted>` per input item, in input order.
+    ///
+    /// A whole-request failure (401/415/400/transport) is replicated into
+    /// every slot — callers can detect this via all-slots-identical.
+    /// Retrying the whole batch is always safe because idempotency keys dedup
+    /// per draft: a slot that already committed just returns `deduplicated: true`.
+    ///
+    /// The request itself goes through the standard retry wrapper
+    /// (503/408/transport), which is safe for the same reason.
+    pub(crate) async fn execute_batch(
+        &self,
+        build: impl Fn() -> reqwest::RequestBuilder,
+        n: usize,
+    ) -> Vec<ApiResult<Posted>> {
+        // Whole-request failure: replicate the single error into every slot.
+        macro_rules! whole_err {
+            ($e:expr) => {{
+                let e: ApiError = $e;
+                return std::iter::repeat_with(|| Err(e.clone())).take(n).collect();
+            }};
+        }
+        let response = match self.send_with_retry(build).await {
+            Ok(r) => r,
+            Err(e) => whole_err!(e),
+        };
+        let status = response.status();
+        let bytes = match response.bytes().await {
+            Ok(b) => b,
+            Err(e) => whole_err!(ApiError::Transport {
+                message: format!("reading batch response body: {e}"),
+            }),
+        };
+        if !status.is_success() {
+            whole_err!(decode_error(status, &bytes));
+        }
+        // Parse the positional array; each item is Posted or ApiError.
+        let items: Vec<BatchResponseItem> = match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(e) => whole_err!(ApiError::Transport {
+                message: format!("decoding batch response: {e}"),
+            }),
+        };
+        items
+            .into_iter()
+            .map(|item| match item {
+                BatchResponseItem::Ok(posted) => Ok(posted),
+                BatchResponseItem::Err(e) => Err(e),
+            })
+            .collect()
     }
 
     /// Send with bounded retry; success is any 2xx with no body expected.

@@ -19,7 +19,13 @@ use crate::http::routes::AppState;
 /// standard error envelope. `#[serde(untagged)]` serializes each variant
 /// directly — `Ok` produces the `Posted` object, `Err` produces the
 /// `{"error": ...}` object — byte-identical to single-route bodies.
-#[derive(Serialize)]
+///
+/// **Schema note**: utoipa renders `#[serde(untagged)]` enums as `oneOf` in
+/// the generated OpenAPI document, so generators see the correct
+/// `Posted | ApiError` discriminant.  The two are unambiguously
+/// distinguishable: `Posted` always carries `tx_id`; `ApiError` always
+/// carries `error`.
+#[derive(Serialize, utoipa::ToSchema)]
 #[serde(untagged)]
 pub enum BatchItem {
     Ok(Posted),
@@ -139,12 +145,18 @@ pub async fn post_transaction(
 ///
 /// Whole-request errors (401, 415, 400) follow the same contract as the
 /// single-transaction route.
+///
+/// **DoS bounds**: axum's default 2 MiB body limit is the memory ceiling
+/// for the request (the cap is enforced post-deserialize).  Worst-case
+/// in-flight allocation is `TALEA_HTTP_BATCH_MAX × max_inflight` drafts
+/// concurrently resident in the write-router queue — size the cap
+/// (`TALEA_HTTP_BATCH_MAX`, default 500) and max-inflight together.
 #[utoipa::path(post, path = "/v1/transactions/batch",
     request_body(content = Vec<TransactionDraft>,
         description = "Array of transaction drafts; order is preserved in the response"),
     responses(
         (status = 200, description = "positional outcomes — each item is Posted on success or the ApiError envelope on per-draft failure",
-            body = Vec<Posted>,
+            body = Vec<BatchItem>,
             example = json!([
                 {"tx_id":"...","seq":3,"deduplicated":false},
                 {"error":"unbalanced","asset":"USD","debit":100,"credit":90}
