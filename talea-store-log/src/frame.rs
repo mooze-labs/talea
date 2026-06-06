@@ -62,19 +62,16 @@ pub fn decode_frame(buf: &[u8]) -> Result<Option<(WireEvent, usize)>, FrameError
     if buf.is_empty() {
         return Ok(None);
     }
-    if buf.len() < HEADER_LEN {
+    // Take the two u32 header fields as fixed-size chunks; fewer than
+    // HEADER_LEN bytes means a torn header.
+    let Some((len_bytes, rest)) = buf.split_first_chunk::<4>() else {
         return Err(FrameError::Torn);
-    }
-    let len = u32::from_le_bytes(
-        buf[0..4]
-            .try_into()
-            .expect("guarded by HEADER_LEN length check above"),
-    ) as usize;
-    let crc = u32::from_le_bytes(
-        buf[4..8]
-            .try_into()
-            .expect("guarded by HEADER_LEN length check above"),
-    );
+    };
+    let Some((crc_bytes, _)) = rest.split_first_chunk::<4>() else {
+        return Err(FrameError::Torn);
+    };
+    let len = u32::from_le_bytes(*len_bytes) as usize;
+    let crc = u32::from_le_bytes(*crc_bytes);
     let Some(payload) = buf.get(HEADER_LEN..HEADER_LEN + len) else {
         return Err(FrameError::Torn);
     };

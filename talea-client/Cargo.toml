@@ -37,3 +37,6 @@ sqlx = { version = "0.9.0", features = ["sqlite", "postgres", "runtime-tokio"] }
 talea-server = { path = "../talea-server/" }
 talea-store-sqlite = { path = "../talea-store-sqlite/" }
 talea-store-postgres = { path = "../talea-store-postgres/" }
+
+[lints]
+workspace = true

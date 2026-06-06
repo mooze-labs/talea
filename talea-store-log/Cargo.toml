@@ -26,3 +26,6 @@ proptest = "1"
 talea-store-conformance = { path = "../talea-store-conformance/" }
 tempfile = "3"
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

@@ -1,3 +1,7 @@
+// Test code: a panicking unwrap/expect IS the test failing (clippy.toml
+// exempts #[test] fns; this extends that to integration-test helpers).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use sqlx::sqlite::SqlitePoolOptions;
 use talea_store_conformance as conformance;
 use talea_store_sqlite::SqliteTaleaStore;

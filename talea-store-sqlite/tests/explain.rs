@@ -1,3 +1,7 @@
+// Test code: a panicking unwrap/expect IS the test failing (clippy.toml
+// exempts #[test] fns; this extends that to integration-test helpers).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Planner check: trial_balance must hit the postings_book_time index,
 //! not scan the postings table.
 

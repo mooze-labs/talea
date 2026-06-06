@@ -154,11 +154,12 @@ fn encode_run(pairs: &[(String, CommittedRec)]) -> std::io::Result<Vec<u8>> {
 }
 
 fn decode_run(bytes: &[u8]) -> Result<Vec<(String, CommittedRec)>, String> {
-    if bytes.len() < RUN_CRC_LEN {
+    // RUN_CRC_LEN is 4: take the CRC as a fixed-size chunk; a shorter file is
+    // malformed.
+    let Some((crc_bytes, payload)) = bytes.split_first_chunk::<RUN_CRC_LEN>() else {
         return Err(format!("run too short: {} bytes", bytes.len()));
-    }
-    let stored = u32::from_le_bytes(bytes[..RUN_CRC_LEN].try_into().unwrap());
-    let payload = &bytes[RUN_CRC_LEN..];
+    };
+    let stored = u32::from_le_bytes(*crc_bytes);
     let actual = crc32fast::hash(payload);
     if stored != actual {
         return Err(format!(

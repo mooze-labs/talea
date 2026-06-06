@@ -1,3 +1,7 @@
+// Test code: a panicking unwrap/expect IS the test failing (clippy.toml
+// exempts #[test] fns; this extends that to integration-test helpers).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Planner check for the live database. On a near-empty table Postgres
 //! prefers a seq scan, so the test disables seqscan for its session: the
 //! assertion is "the index exists and is usable", not "always chosen".

@@ -1,3 +1,7 @@
+// Test code: a panicking unwrap/expect IS the test failing (clippy.toml
+// exempts #[test] fns; this extends that to integration-test helpers).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Retry behavior against a hand-rolled router that fails N times then
 //! succeeds. Fault injection the real server can't provide on demand.
 

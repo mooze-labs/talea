@@ -19,3 +19,6 @@ uuid = { version = "1.23.2", features = ["serde"] }
 
 [features]
 openapi = ["dep:utoipa"]
+
+[lints]
+workspace = true
