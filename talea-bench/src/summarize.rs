@@ -49,7 +49,22 @@ pub fn summarize_runs(runs: &[RunJson], rep_workers: usize) -> Result<Summary, S
 }
 
 fn summarize_run(run: &RunJson, rep_workers: usize, out: &mut Summary) -> Result<(), String> {
-    let tag = format!("{}/{}", run.scenario, run.backend);
+    // A run's steps all share one batch size (the scenario sets it once).
+    // Batch runs get it in the metric names so a batch-mode and a single-mode
+    // run of the same scenario+backend coexist; batch_size == 1 keeps the
+    // legacy names — trend history is keyed on metric name.
+    let batch_size = run.steps.first().map_or(1, |s| s.batch_size);
+    if run.steps.iter().any(|s| s.batch_size != batch_size) {
+        return Err(format!(
+            "{}/{}: steps disagree on batch_size; refusing to name the series",
+            run.scenario, run.backend
+        ));
+    }
+    let tag = if batch_size > 1 {
+        format!("{}/{}/batch-{batch_size}", run.scenario, run.backend)
+    } else {
+        format!("{}/{}", run.scenario, run.backend)
+    };
     if run.backend == "unknown" {
         return Err(format!(
             "{}: backend is \"unknown\" (health probe failed); refusing to mislabel trend data",
@@ -181,6 +196,19 @@ mod tests {
             invalid: false,
             latency: HashMap::from([("post".to_string(), lat(p99_us))]),
             batch_size: 1,
+        }
+    }
+
+    fn batch_step(
+        label: &str,
+        workers: usize,
+        ops: f64,
+        p99_us: u64,
+        batch_size: usize,
+    ) -> StepJson {
+        StepJson {
+            batch_size,
+            ..step(label, workers, ops, p99_us)
         }
     }
 
@@ -384,6 +412,79 @@ mod tests {
         assert_eq!(s.smaller[0].value, 800.0);
         assert_eq!(s.smaller[1].name, "reads/sqlite/p99-history@c8");
         assert_eq!(s.smaller[1].value, 4000.0);
+    }
+
+    #[test]
+    fn batch_runs_mint_batch_tagged_names() {
+        let runs = vec![run(
+            "post-one-book",
+            "log",
+            vec![batch_step("c8", 8, 12_000.0, 9000, 25)],
+        )];
+        let s = summarize_runs(&runs, 8).unwrap();
+        assert_eq!(
+            s.bigger[0].name,
+            "post-one-book/log/batch-25/peak-throughput"
+        );
+        assert_eq!(s.smaller[0].name, "post-one-book/log/batch-25/p99-post@c8");
+    }
+
+    #[test]
+    fn single_and_batch_runs_for_one_backend_coexist() {
+        // The CI legs run post-one-book twice per backend (singles + batch);
+        // the batch tag must keep the names distinct, and the single-mode
+        // names must stay exactly as they were (trend history is keyed on
+        // metric name).
+        let runs = vec![
+            run("post-one-book", "log", vec![step("c8", 8, 1100.0, 9000)]),
+            run(
+                "post-one-book",
+                "log",
+                vec![batch_step("c8", 8, 12_000.0, 9000, 25)],
+            ),
+        ];
+        let s = summarize_runs(&runs, 8).unwrap();
+        assert_eq!(s.bigger[0].name, "post-one-book/log/peak-throughput");
+        assert_eq!(
+            s.bigger[1].name,
+            "post-one-book/log/batch-25/peak-throughput"
+        );
+        assert_eq!(s.smaller[0].name, "post-one-book/log/p99-post@c8");
+        assert_eq!(s.smaller[1].name, "post-one-book/log/batch-25/p99-post@c8");
+    }
+
+    #[test]
+    fn duplicate_batch_runs_are_still_an_error() {
+        let runs = vec![
+            run(
+                "post-one-book",
+                "log",
+                vec![batch_step("c8", 8, 12_000.0, 9000, 25)],
+            ),
+            run(
+                "post-one-book",
+                "log",
+                vec![batch_step("c8", 8, 12_100.0, 9100, 25)],
+            ),
+        ];
+        let err = summarize_runs(&runs, 8).unwrap_err();
+        assert!(err.contains("duplicate metric"), "got: {err}");
+    }
+
+    #[test]
+    fn mixed_batch_sizes_within_one_run_are_an_error() {
+        // A scenario sets one batch size for the whole run; steps disagreeing
+        // means the report is corrupt or the invariant changed under us.
+        let runs = vec![run(
+            "post-one-book",
+            "log",
+            vec![
+                batch_step("c4", 4, 8000.0, 7000, 25),
+                step("c8", 8, 1100.0, 9000),
+            ],
+        )];
+        let err = summarize_runs(&runs, 8).unwrap_err();
+        assert!(err.contains("batch"), "got: {err}");
     }
 
     #[test]
