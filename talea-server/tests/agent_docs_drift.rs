@@ -88,3 +88,46 @@ fn agent_doc_endpoint_table_matches_openapi() {
          missing from doc: {missing:?}\nextra in doc: {extra:?}"
     );
 }
+
+/// Markdown link targets ending in `.md`, with any docs-site prefix and
+/// in-page anchor stripped — i.e. the docs/-relative file each link names.
+fn md_link_targets(text: &str) -> Vec<String> {
+    const SITE: &str = "https://mooze-labs.github.io/talea/";
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("](") {
+        rest = &rest[i + 2..];
+        let Some(end) = rest.find(')') else { break };
+        let target = rest[..end].trim_end_matches('>').trim_start_matches('<');
+        rest = &rest[end..];
+        let target = target.split_whitespace().next().unwrap_or("");
+        let target = target.strip_prefix(SITE).unwrap_or(target);
+        if target.starts_with("http://") || target.starts_with("https://") {
+            continue; // external link, not ours to check
+        }
+        let file = target.split('#').next().unwrap_or_default();
+        if file.ends_with(".md") {
+            out.push(file.to_string());
+        }
+    }
+    out
+}
+
+#[test]
+fn agent_doc_and_llms_txt_links_resolve() {
+    for name in ["AGENTS-INTEGRATION.md", "llms.txt"] {
+        let text = std::fs::read_to_string(docs_dir().join(name))
+            .unwrap_or_else(|e| panic!("docs/{name} must exist: {e}"));
+        let links = md_link_targets(&text);
+        assert!(
+            !links.is_empty(),
+            "docs/{name}: no .md links found — parser broken?"
+        );
+        for link in links {
+            assert!(
+                docs_dir().join(&link).exists(),
+                "docs/{name}: broken link `{link}`"
+            );
+        }
+    }
+}
