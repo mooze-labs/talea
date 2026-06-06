@@ -1,0 +1,20 @@
+# talea
+
+> Multi-currency, double-entry ledger for crypto and fiat operations: event-sourced, append-only, gapless per-book sequences, idempotent writes. REST + SSE server (`talead`) plus a typed Rust SDK and CLI (`talea-client`).
+
+Any running instance serves its own machine-readable contract: OpenAPI 3 at `/openapi.json`, Swagger UI at `/docs`.
+
+## Docs
+
+- [Integration guide for AI agents](AGENTS-INTEGRATION.md): start here to integrate talea into a codebase — surface decision tree, invariant rules, endpoint table, SDK and HTTP quickstarts, local verification recipe
+- [HTTP API reference](reference-http-api.md): the exact wire contract — routes, shapes, error envelope, server configuration
+- [Use the Rust SDK](howto-use-the-sdk.md): the typed client — retries, idempotency, batches, streaming
+- [Your first ledger](tutorial-first-ledger.md): zero to a funded, streaming ledger in seven steps, no Docker
+- [Run on Postgres](howto-run-on-postgres.md): production deployment — auth, load-balancer readiness, multi-instance, metrics
+- [Run on the append-log store](howto-run-on-the-log-store.md): single-node embedded storage — no database, backups, snapshots
+- [Architecture & design](explanation-architecture.md): why — gapless sequences, group commit, the failure story
+- [The append-log store](explanation-log-store.md): embedded backend mechanics — group commit at the fsync, recovery
+
+## Optional
+
+- [Project repository](https://github.com/mooze-labs/talea): source, per-crate READMEs, configuration table
