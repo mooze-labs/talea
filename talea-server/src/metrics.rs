@@ -12,7 +12,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use axum::routing::get;
 use metrics::{counter, gauge, histogram};
-use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
 
 /// Histogram buckets for *_duration_seconds: 1ms .. 10s.
 const DURATION_BUCKETS: &[f64] = &[
@@ -20,17 +20,15 @@ const DURATION_BUCKETS: &[f64] = &[
 ];
 
 /// Install the global Prometheus recorder. Call once, before anything
-/// records. Panics on double-installation (main calls it exactly once;
+/// records. Errors on double-installation (main calls it exactly once;
 /// tests wrap it in a OnceLock).
-pub fn install() -> PrometheusHandle {
+pub fn install() -> Result<PrometheusHandle, BuildError> {
     PrometheusBuilder::new()
         .set_buckets_for_metric(
             Matcher::Suffix("_duration_seconds".into()),
             DURATION_BUCKETS,
-        )
-        .expect("static bucket list is non-empty")
+        )?
         .install_recorder()
-        .expect("metrics recorder already installed")
 }
 
 /// Tiny router serving GET /metrics from the recorder handle.

@@ -147,16 +147,12 @@ async fn try_load_snapshot(path: &Path) -> Result<BookState, String> {
         .await
         .map_err(|e| format!("read: {e}"))?;
 
-    if bytes.len() < CRC_LEN {
+    // CRC_LEN is 4: take the CRC as a fixed-size chunk; a shorter file is
+    // malformed.
+    let Some((crc_bytes, payload)) = bytes.split_first_chunk::<CRC_LEN>() else {
         return Err(format!("file too short: {} bytes", bytes.len()));
-    }
-
-    let stored_crc = u32::from_le_bytes(
-        bytes[..CRC_LEN]
-            .try_into()
-            .expect("CRC_LEN is 4, slice guaranteed by length check"),
-    );
-    let payload = &bytes[CRC_LEN..];
+    };
+    let stored_crc = u32::from_le_bytes(*crc_bytes);
     let actual_crc = crc32fast::hash(payload);
 
     if stored_crc != actual_crc {

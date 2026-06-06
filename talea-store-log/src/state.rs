@@ -313,28 +313,31 @@ impl Scratch {
     /// `scratch.raw` for every account the transaction touches; `stage` then
     /// advances those projections so later batchmates see the updated balances.
     ///
-    /// Panics if called for a transaction whose accounts were not seeded by
-    /// `validate` (a caller-contract violation).
-    pub fn stage(&mut self, tx: &Transaction) {
+    /// Returns `Err` if called for a transaction whose accounts were not
+    /// seeded by `validate`, or if a projection overflows — both are
+    /// caller-contract violations (unreachable for a validated transaction).
+    /// On `Err` the scratch may be partially advanced and MUST NOT be reused.
+    pub fn stage(&mut self, tx: &Transaction) -> Result<(), String> {
         for p in &tx.postings {
             let key = p.account.to_key();
             let raw = self
                 .raw
                 .get_mut(&key)
-                .expect("stage called for a tx that validate did not seed");
+                .ok_or_else(|| format!("stage: account {key} was not seeded by validate"))?;
             match p.direction {
                 Direction::Debit => {
                     *raw = raw
                         .checked_add(p.amount.minor())
-                        .expect("overflow rejected by validate");
+                        .ok_or_else(|| format!("stage: projection overflow on account {key}"))?;
                 }
                 Direction::Credit => {
                     *raw = raw
                         .checked_sub(p.amount.minor())
-                        .expect("overflow rejected by validate");
+                        .ok_or_else(|| format!("stage: projection overflow on account {key}"))?;
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -434,15 +437,12 @@ impl BookState {
     /// Apply a committed transaction to the in-memory state, returning `Err`
     /// if a balance arithmetic operation overflows.
     ///
-    /// This is the **safe** variant used during log replay, where corrupt or
-    /// hand-edited frames can produce arithmetic that `validate` would have
-    /// rejected. It mirrors the body of [`apply_transaction`] but replaces the
-    /// `expect` calls with checked ops that return a descriptive error string.
-    ///
-    /// The hot (write) path calls [`apply_transaction`], which is a thin
-    /// wrapper that delegates here and panics on `Err`: `validate` guarantees
-    /// that accepted transactions cannot overflow, so a panic there is a
-    /// programming error, not a data error.
+    /// Used both during log replay (where corrupt or hand-edited frames can
+    /// produce arithmetic that `validate` would have rejected) and on the hot
+    /// write path. On the write path an `Err` is unreachable — `validate`
+    /// guarantees accepted transactions cannot overflow — so the writer
+    /// treats it as a fatal internal error and fail-stops rather than
+    /// applying a projection that no longer matches the durable log.
     pub fn try_apply_transaction(
         &mut self,
         tx: &Transaction,
@@ -523,31 +523,6 @@ impl BookState {
         self.next_seq = seq + 1;
         self.last_at = Some(at);
         Ok(())
-    }
-
-    /// Apply a committed transaction to the in-memory state.
-    ///
-    /// Updates raw balances, posts a [`PostingEntry`] per posting (with
-    /// running `raw_after`), advances lifetime debit/credit sums, indexes
-    /// the idempotency key and TxId, and bumps `next_seq`/`last_at`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a balance arithmetic operation overflows. This cannot happen
-    /// on the live write path because [`BookState::validate`] rejects
-    /// transactions that would overflow before they are accepted; a panic here
-    /// is therefore a programming error, not a data error. For replay (where
-    /// the log may be corrupt or hand-edited), use [`try_apply_transaction`]
-    /// instead — it returns `Err` rather than panicking.
-    pub fn apply_transaction(
-        &mut self,
-        tx: &Transaction,
-        seq: Seq,
-        at: DateTime<Utc>,
-        pos: FramePos,
-    ) {
-        self.try_apply_transaction(tx, seq, at, pos)
-            .expect("overflow rejected by validate")
     }
 
     /// Apply an account-opened event to the in-memory state.
@@ -679,7 +654,7 @@ mod tests {
             ],
         );
         st.validate(&fund, &mut scratch).unwrap();
-        scratch.stage(&fund); // accepted: later batchmates see the projection
+        scratch.stage(&fund).unwrap(); // accepted: later batchmates see the projection
         let spend = tx(
             "k2",
             vec![
@@ -688,7 +663,7 @@ mod tests {
             ],
         );
         st.validate(&spend, &mut scratch).unwrap(); // 100 - 80 = 20 >= 0: fine
-        scratch.stage(&spend);
+        scratch.stage(&spend).unwrap();
         let over = tx(
             "k3",
             vec![
@@ -742,7 +717,7 @@ mod tests {
             ],
         );
         let at = talea_core::store::ledger_now();
-        st.apply_transaction(&t, 1, at, (1, 0));
+        st.try_apply_transaction(&t, 1, at, (1, 0)).unwrap();
         let cash = &st.accounts[&acct("cash").to_key()];
         assert_eq!(cash.raw_balance, 100);
         assert_eq!(cash.updated_seq, 1);
@@ -850,7 +825,7 @@ mod tests {
             ],
         );
         let at = talea_core::store::ledger_now();
-        st.apply_transaction(&t, 1, at, (1, 0));
+        st.try_apply_transaction(&t, 1, at, (1, 0)).unwrap();
 
         let json = serde_json::to_string(&st).expect("serialize");
         let rt: BookState = serde_json::from_str(&json).expect("deserialize");

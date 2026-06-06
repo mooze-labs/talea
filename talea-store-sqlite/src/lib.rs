@@ -270,22 +270,21 @@ async fn load_pending(
     let mut pending: HashMap<String, Pending> = HashMap::new();
     for posting in &transaction.postings {
         let key = posting.account.to_key();
-        if !pending.contains_key(&key) {
-            let row = loaded
-                .remove(&key)
-                .ok_or_else(|| StoreError::UnknownAccount(posting.account.clone()))?;
-            pending.insert(
-                key.clone(),
-                Pending {
+        let entry = match pending.entry(key.clone()) {
+            std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
+            std::collections::hash_map::Entry::Vacant(v) => {
+                let row = loaded
+                    .remove(v.key())
+                    .ok_or_else(|| StoreError::UnknownAccount(posting.account.clone()))?;
+                v.insert(Pending {
                     account: posting.account.clone(),
                     asset: row.asset,
                     normal_side: row.normal_side,
                     min_balance: row.min_balance,
                     delta: 0,
-                },
-            );
-        }
-        let entry = pending.get_mut(&key).unwrap();
+                })
+            }
+        };
         if entry.asset != *posting.amount.asset() {
             return Err(StoreError::AssetMismatch {
                 account: posting.account.clone(),

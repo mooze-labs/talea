@@ -151,19 +151,18 @@ impl Http {
             if let Some(token) = &self.token {
                 req = req.bearer_auth(token);
             }
-            let outcome = req.send().await;
-            let retryable = match &outcome {
-                Ok(resp) => {
-                    let s = resp.status();
-                    s == StatusCode::SERVICE_UNAVAILABLE
-                        || s == StatusCode::REQUEST_TIMEOUT
-                        || s == StatusCode::TOO_MANY_REQUESTS
+            // A non-retryable outcome is always a response — return it
+            // directly; everything else falls through to the backoff path.
+            let outcome = match req.send().await {
+                Ok(resp)
+                    if resp.status() != StatusCode::SERVICE_UNAVAILABLE
+                        && resp.status() != StatusCode::REQUEST_TIMEOUT
+                        && resp.status() != StatusCode::TOO_MANY_REQUESTS =>
+                {
+                    return Ok(resp);
                 }
-                Err(_) => true,
+                retryable => retryable,
             };
-            if !retryable {
-                return Ok(outcome.expect("non-retryable outcomes are responses"));
-            }
             attempt += 1;
             if attempt >= self.retry.max_attempts {
                 return match outcome {

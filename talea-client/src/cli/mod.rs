@@ -120,23 +120,29 @@ pub enum Command {
 
 /// (file name, roff content) for the command and every visible subcommand,
 /// depth-first: talea.1, talea-asset.1, talea-asset-register.1, ...
-fn man_pages(cmd: &clap::Command) -> Vec<(String, Vec<u8>)> {
-    fn walk(cmd: &clap::Command, name: String, out: &mut Vec<(String, Vec<u8>)>) {
+///
+/// Rendering to an in-memory `Vec` cannot fail in practice; an `Err` is
+/// surfaced rather than panicking.
+fn man_pages(cmd: &clap::Command) -> std::io::Result<Vec<(String, Vec<u8>)>> {
+    fn walk(
+        cmd: &clap::Command,
+        name: String,
+        out: &mut Vec<(String, Vec<u8>)>,
+    ) -> std::io::Result<()> {
         let mut buf = Vec::new();
-        clap_mangen::Man::new(cmd.clone().name(name.clone()))
-            .render(&mut buf)
-            .expect("man page renders to memory");
+        clap_mangen::Man::new(cmd.clone().name(name.clone())).render(&mut buf)?;
         out.push((format!("{name}.1"), buf));
         for sub in cmd.get_subcommands() {
             if sub.is_hide_set() || sub.get_name() == "help" {
                 continue;
             }
-            walk(sub, format!("{name}-{}", sub.get_name()), out);
+            walk(sub, format!("{name}-{}", sub.get_name()), out)?;
         }
+        Ok(())
     }
     let mut out = Vec::new();
-    walk(cmd, cmd.get_name().to_string(), &mut out);
-    out
+    walk(cmd, cmd.get_name().to_string(), &mut out)?;
+    Ok(out)
 }
 
 #[derive(Subcommand)]
@@ -187,6 +193,13 @@ fn invalid(reason: String) -> ApiError {
         field: "args".into(),
         reason,
     }
+}
+
+/// Serialize a response view for printing. These are plain-data types whose
+/// serialization cannot fail in practice; if it ever did, surface a typed
+/// error rather than panic.
+fn to_json<T: serde::Serialize>(value: &T) -> ApiResult<serde_json::Value> {
+    serde_json::to_value(value).map_err(|e| invalid(format!("serializing response: {e}")))
 }
 
 fn build_client(cli: &Cli) -> ApiResult<TaleaClient> {
@@ -314,9 +327,7 @@ pub async fn execute(cli: Cli) -> ApiResult<Option<serde_json::Value>> {
                 parse::build_draft(base, book, idem, debits, credits, occurred_at, metadata)
                     .map_err(invalid)?;
             let posted = client.post(draft).await?;
-            Ok(Some(
-                serde_json::to_value(posted).expect("Posted serializes"),
-            ))
+            Ok(Some(to_json(&posted)?))
         }
         Command::Balance { book, path, as_of } => {
             let as_of = as_of
@@ -325,9 +336,7 @@ pub async fn execute(cli: Cli) -> ApiResult<Option<serde_json::Value>> {
                 .transpose()
                 .map_err(invalid)?;
             let view = client.balance(&book, &path, as_of).await?;
-            Ok(Some(
-                serde_json::to_value(view).expect("BalanceView serializes"),
-            ))
+            Ok(Some(to_json(&view)?))
         }
         Command::History {
             book,
@@ -338,13 +347,11 @@ pub async fn execute(cli: Cli) -> ApiResult<Option<serde_json::Value>> {
             let page = client
                 .account_history(&book, &path, Page { after_seq, limit })
                 .await?;
-            Ok(Some(serde_json::to_value(page).expect("Paged serializes")))
+            Ok(Some(to_json(&page)?))
         }
         Command::Tx { tx_id } => {
             let view = client.transaction(&tx_id).await?;
-            Ok(Some(
-                serde_json::to_value(view).expect("TransactionView serializes"),
-            ))
+            Ok(Some(to_json(&view)?))
         }
         Command::TrialBalance { book, as_of } => {
             let as_of = as_of
@@ -353,9 +360,7 @@ pub async fn execute(cli: Cli) -> ApiResult<Option<serde_json::Value>> {
                 .transpose()
                 .map_err(invalid)?;
             let tb = client.trial_balance(&book, as_of).await?;
-            Ok(Some(
-                serde_json::to_value(tb).expect("TrialBalance serializes"),
-            ))
+            Ok(Some(to_json(&tb)?))
         }
         // run() handles Tail/Completions/Man before calling execute(); a
         // typed error (not a panic) for library callers that reach these
@@ -378,7 +383,9 @@ pub async fn run(cli: Cli) -> ApiResult<()> {
         Command::Man { out_dir } => {
             std::fs::create_dir_all(out_dir)
                 .map_err(|e| invalid(format!("creating {}: {e}", out_dir.display())))?;
-            for (name, page) in man_pages(&<Cli as clap::CommandFactory>::command()) {
+            let pages = man_pages(&<Cli as clap::CommandFactory>::command())
+                .map_err(|e| invalid(format!("rendering man pages: {e}")))?;
+            for (name, page) in pages {
                 let path = out_dir.join(name);
                 std::fs::write(&path, page)
                     .map_err(|e| invalid(format!("writing {}: {e}", path.display())))?;
@@ -394,18 +401,25 @@ pub async fn run(cli: Cli) -> ApiResult<()> {
         let client = build_client(&cli)?;
         let mut stream = client.subscribe(&book, from).await?;
         while let Some(item) = stream.next().await {
+            // Serialization of these envelopes cannot fail in practice; if it
+            // ever did, report it on stderr and keep the stream alive.
             match item {
-                Ok(env) => println!(
-                    "{}",
-                    serde_json::to_string(&env).expect("envelope serializes")
-                ),
-                Err(e) => eprintln!("{}", serde_json::to_string(&e).expect("error serializes")),
+                Ok(env) => match serde_json::to_string(&env) {
+                    Ok(line) => println!("{line}"),
+                    Err(e) => eprintln!("failed to serialize event envelope: {e}"),
+                },
+                Err(e) => match serde_json::to_string(&e) {
+                    Ok(line) => eprintln!("{line}"),
+                    Err(ser) => eprintln!("failed to serialize stream error: {ser}"),
+                },
             }
         }
         return Ok(());
     }
     if let Some(value) = execute(cli).await? {
-        println!("{}", serde_json::to_string_pretty(&value).expect("json"));
+        let pretty = serde_json::to_string_pretty(&value)
+            .map_err(|e| invalid(format!("serializing output: {e}")))?;
+        println!("{pretty}");
     }
     Ok(())
 }
@@ -427,7 +441,7 @@ mod tests {
 
     #[test]
     fn man_pages_cover_every_subcommand() {
-        let pages = man_pages(&Cli::command());
+        let pages = man_pages(&Cli::command()).unwrap();
         let names: Vec<&str> = pages.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"talea.1"), "got {names:?}");
         assert!(names.contains(&"talea-post.1"), "got {names:?}");

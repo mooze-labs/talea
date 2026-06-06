@@ -34,8 +34,10 @@ pub fn system_book() -> Book {
 /// effectively microsecond-precision, which hides the bug locally.)
 pub fn ledger_now() -> DateTime<Utc> {
     let now = Utc::now();
-    DateTime::from_timestamp_micros(now.timestamp_micros())
-        .expect("current time is within chrono's representable range")
+    // The truncated micros of a real clock reading are always representable;
+    // if the conversion ever failed we'd fall back to the untruncated reading
+    // rather than panic.
+    DateTime::from_timestamp_micros(now.timestamp_micros()).unwrap_or(now)
 }
 
 #[cfg(test)]

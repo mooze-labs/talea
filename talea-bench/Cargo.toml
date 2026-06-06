@@ -30,3 +30,12 @@ sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
 talea-server = { path = "../talea-server/" }
 talea-store-sqlite = { path = "../talea-store-sqlite/" }
 tempfile = "3"
+
+# Dev tooling (bench harness / conformance suite): unwrap/expect are the
+# correct failure mode here, as in tests. unsafe stays forbidden.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "allow"
+expect_used = "allow"

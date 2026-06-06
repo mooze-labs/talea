@@ -11,7 +11,7 @@ use crate::service::LedgerService;
 
 /// Connect to the store, bind, and serve until ctrl-c.
 pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    let _metrics_handle = crate::metrics::install();
+    let _metrics_handle = crate::metrics::install()?;
 
     let (store, pool_sampler, backend) = connect_store(&config).await?;
 

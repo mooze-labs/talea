@@ -1,3 +1,7 @@
+// Test code: a panicking unwrap/expect IS the test failing (clippy.toml
+// exempts #[test] fns; this extends that to integration-test helpers).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! One generic exercise over the LedgerApi trait, run against BOTH the
 //! in-process LedgerService and the remote TaleaClient — proving consumers
 //! can swap them freely.

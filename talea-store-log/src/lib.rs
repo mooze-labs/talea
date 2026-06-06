@@ -12,7 +12,7 @@ pub use frame::WireEvent;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use chrono::DateTime;
@@ -476,8 +476,14 @@ impl LogTaleaStore {
             w.shutdown().await;
         }
 
-        // Release the advisory lock so a subsequent `open` on the same dir works.
-        let _ = self._lock.lock().unwrap().take();
+        // Release the advisory lock so a subsequent `open` on the same dir
+        // works. Poison recovery: taking the file handle out of the Option
+        // cannot be torn by a panicking thread, so the inner value is safe.
+        let _ = self
+            ._lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
     }
 }
 
@@ -598,7 +604,7 @@ impl Store for LogTaleaStore {
         let mut writers_cache: HashMap<String, Result<BookWriter, StoreError>> = HashMap::new();
 
         struct PendingSubmit {
-            book: String,
+            writer: BookWriter,
             tx_idx: usize,
         }
         let mut pending: Vec<PendingSubmit> = Vec::with_capacity(txs.len());
@@ -619,7 +625,12 @@ impl Store for LogTaleaStore {
                 writers_cache.insert(book.clone(), w);
             }
             match &writers_cache[&book] {
-                Ok(_) => pending.push(PendingSubmit { book, tx_idx: i }),
+                // Carrying the writer clone here (instead of re-looking it up
+                // by book later) keeps the submit loop infallible.
+                Ok(w) => pending.push(PendingSubmit {
+                    writer: w.clone(),
+                    tx_idx: i,
+                }),
                 Err(_) => {
                     // Placeholder rx slot will be skipped; record error.
                     // We need to keep indices aligned, so push a dummy rx and
@@ -639,13 +650,11 @@ impl Store for LogTaleaStore {
 
         for ps in &pending {
             let i = ps.tx_idx;
-            // pending only contains entries whose book resolved Ok; unwrap is safe.
-            let writer = writers_cache[&ps.book]
-                .as_ref()
-                .expect("pending entry must have Ok writer")
-                .clone();
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            let submit_result = writer.submit(Job::Commit(txs[i].clone(), reply_tx)).await;
+            let submit_result = ps
+                .writer
+                .submit(Job::Commit(txs[i].clone(), reply_tx))
+                .await;
             match submit_result {
                 Ok(()) => {
                     let rx_idx = rxs.len();
@@ -677,8 +686,13 @@ impl Store for LogTaleaStore {
         for i in 0..txs.len() {
             if let Some(e) = errs.remove(&i) {
                 out[i] = Err(e);
-            } else if let Some(rx_idx) = tx_to_rx_idx[i] {
-                out[i] = replies[rx_idx].take().expect("rx result must be set");
+            } else if let Some(result) = tx_to_rx_idx[i]
+                .and_then(|rx_idx| replies.get_mut(rx_idx))
+                .and_then(Option::take)
+            {
+                // Every rx slot was set in the await loop above; a missing one
+                // leaves the pre-seeded "unset slot" error in place.
+                out[i] = result;
             }
         }
 
@@ -726,24 +740,22 @@ impl Store for LogTaleaStore {
                 })
             }
             Some(t) => {
-                // Binary search: committed_at is non-decreasing vs seq within a book.
+                // Binary search: committed_at is non-decreasing vs seq within
+                // a book. idx == 0 (no postings at or before the cutoff) and
+                // the entry lookup collapse into one infallible Option chain.
                 let idx = acct.postings.partition_point_at(t);
-                if idx == 0 {
-                    // No postings at or before the cutoff.
-                    Ok(BalanceSnapshot {
+                match idx.checked_sub(1).and_then(|i| acct.postings.get(i)) {
+                    None => Ok(BalanceSnapshot {
                         amount: Amount::new(0, acct.def.asset.clone()),
                         updated_seq: 0,
-                    })
-                } else {
-                    let entry = acct
-                        .postings
-                        .get(idx - 1)
-                        .expect("partition_point_at guaranteed in-range");
-                    let eff = effective(entry.raw_after, &acct.cfg.normal_side);
-                    Ok(BalanceSnapshot {
-                        amount: Amount::new(eff, acct.def.asset.clone()),
-                        updated_seq: entry.seq,
-                    })
+                    }),
+                    Some(entry) => {
+                        let eff = effective(entry.raw_after, &acct.cfg.normal_side);
+                        Ok(BalanceSnapshot {
+                            amount: Amount::new(eff, acct.def.asset.clone()),
+                            updated_seq: entry.seq,
+                        })
+                    }
                 }
             }
         }

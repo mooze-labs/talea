@@ -219,8 +219,20 @@ pub async fn post_batch_transactions(
         }
     }
 
-    // All slots must be filled by now.
-    let response: Vec<BatchItem> = slots.into_iter().map(|s| s.unwrap()).collect();
+    // All slots are filled by now: every draft is either out-of-scope
+    // (Forbidden above) or answered positionally by post_batch. A store that
+    // returned a short result vec would leave a None — surface it as an
+    // error item rather than panic.
+    let response: Vec<BatchItem> = slots
+        .into_iter()
+        .map(|s| {
+            s.unwrap_or_else(|| {
+                BatchItem::Err(ApiError::Transport {
+                    message: "internal: batch slot left unresolved by the store".into(),
+                })
+            })
+        })
+        .collect();
     Ok(Json(response))
 }
 

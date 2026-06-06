@@ -1,0 +1,4 @@
+# In tests a failed setup SHOULD panic — that is the test failing. The
+# unwrap_used/expect_used denies (workspace Cargo.toml) target production code.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

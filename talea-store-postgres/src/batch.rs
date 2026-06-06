@@ -150,12 +150,10 @@ pub(crate) async fn try_commit_batch_fast(
     for (i, key) in &dedup_slots {
         results[*i] = Some(Ok(by_key[key].clone()));
     }
-    Some(
-        results
-            .into_iter()
-            .map(|r| r.expect("every input slot resolved"))
-            .collect(),
-    )
+    // Every input slot is resolved by now (write set or dedup). If one were
+    // ever left None, collect yields None and the caller falls back to the
+    // slow path — strictly safer than panicking the fast path.
+    results.into_iter().collect()
 }
 
 /// Apply the whole non-dedup write set inside the open transaction. Returns

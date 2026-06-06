@@ -411,7 +411,9 @@ async fn run_loop(
             let st = state.read().await;
             let mut bp = Vec::new();
             for slot in jobs.iter() {
-                let job = slot.as_ref().expect("job slots are Some until taken");
+                // Slots are all Some until phase 6 takes them; a None here is
+                // unreachable and safely skippable.
+                let Some(job) = slot.as_ref() else { continue };
                 if let Job::Commit(tx, _) = job {
                     let key = tx.idempotency_key.0.as_str();
                     // Hot miss + bloom positive → needs disk lookup.
@@ -450,6 +452,9 @@ async fn run_loop(
         }
 
         // ---- Phase 2c: second read lock pass — full classification ----
+        // Set when a batch-projection invariant is violated (unreachable by
+        // contract); kills the whole batch after the lock scope.
+        let mut fatal: Option<String> = None;
         {
             let st = state.read().await;
 
@@ -461,7 +466,9 @@ async fn run_loop(
             let mut seq: Seq = st.next_seq;
 
             for (idx, slot) in jobs.iter().enumerate() {
-                let job = slot.as_ref().expect("job slots are Some until taken");
+                // Slots are all Some until phase 6 takes them; a None here is
+                // unreachable and safely skippable.
+                let Some(job) = slot.as_ref() else { continue };
                 match job {
                     // --------------------------------------------------
                     // Commit
@@ -495,6 +502,16 @@ async fn run_loop(
                             continue;
                         }
 
+                        // Fold the accepted tx into the batch projection. An
+                        // Err is a validate/stage contract violation —
+                        // unreachable for a validated tx. If it ever fires,
+                        // the projection can no longer be trusted, so fail
+                        // the whole batch (handled after the lock scope).
+                        if let Err(e) = scratch.stage(tx) {
+                            fatal = Some(e);
+                            break;
+                        }
+
                         // Accepted: advance `at` monotonically.
                         batch_at = batch_at.max(ledger_now());
 
@@ -509,7 +526,6 @@ async fn run_loop(
                             pos: (0, 0),
                         });
 
-                        scratch.stage(tx);
                         scratch.idem.insert(idem_key, staged_slot);
 
                         seq += 1;
@@ -590,14 +606,25 @@ async fn run_loop(
             }
         } // drop read lock
 
+        if let Some(e) = fatal {
+            io_kill_batch(jobs, std::io::Error::other(e));
+            return;
+        }
+
         // ----------------------------------------------------------------
         // 3. Write phase: rotate + append (no lock held).
         // ----------------------------------------------------------------
         if !staged.is_empty() {
             for s in &mut staged {
-                // TooLarge (>4 GiB payload) is unreachable for real transactions.
-                let frame_bytes =
-                    encode_frame(&s.wire).expect("ledger events serialize and fit a frame");
+                // TooLarge (>4 GiB payload) and serialization failure are
+                // unreachable for real transactions — fail-stop, don't panic.
+                let frame_bytes = match encode_frame(&s.wire) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        io_kill_batch(jobs, std::io::Error::other(e));
+                        return;
+                    }
+                };
 
                 if let Err(e) = segments.maybe_rotate(s.wire.seq).await {
                     io_kill_batch(jobs, e);
@@ -630,7 +657,16 @@ async fn run_loop(
             for s in &staged {
                 match &s.wire.event {
                     LedgerEvent::TransactionPosted(tx) => {
-                        st.apply_transaction(tx, s.wire.seq, s.wire.at, s.pos);
+                        // Err is unreachable on the live path (validate
+                        // rejects overflow before staging). If it ever fires
+                        // the projection no longer matches the durable log —
+                        // fail-stop this writer; the next open() replays
+                        // state from the log.
+                        if let Err(e) = st.try_apply_transaction(tx, s.wire.seq, s.wire.at, s.pos) {
+                            drop(st);
+                            io_kill_batch(jobs, std::io::Error::other(e));
+                            return;
+                        }
                     }
                     LedgerEvent::AccountOpened { def, cfg } => {
                         st.apply_account_opened(def, cfg, s.wire.seq, s.wire.at);
@@ -686,7 +722,12 @@ async fn run_loop(
                         event: s.wire.event.clone(),
                     });
 
-                    match jobs[s.job_idx].take().expect("job not yet taken") {
+                    // Staged replies are answered exactly once; a None slot is
+                    // unreachable and safely skippable.
+                    let Some(job) = jobs[s.job_idx].take() else {
+                        continue;
+                    };
+                    match job {
                         Job::Commit(tx, reply_tx) => {
                             let _ = reply_tx.send(Ok(Committed {
                                 txid: tx.id,

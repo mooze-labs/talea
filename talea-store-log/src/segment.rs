@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use talea_core::types::Seq;
 use tokio::fs::File;
@@ -37,6 +37,24 @@ pub const DEFAULT_SEGMENT_MAX: u64 = 128 * 1024 * 1024;
 #[derive(Clone)]
 pub struct SegmentCatalog(pub(crate) Arc<RwLock<BTreeMap<Seq, PathBuf>>>);
 
+/// Lock the catalog map, recovering from poisoning.
+///
+/// The guarded operations are single map reads/inserts that cannot be left
+/// logically torn by a panicking thread, so continuing with the inner value
+/// is always safe — no reason to cascade a panic out of an unrelated thread.
+fn read_catalog(
+    lock: &RwLock<BTreeMap<Seq, PathBuf>>,
+) -> std::sync::RwLockReadGuard<'_, BTreeMap<Seq, PathBuf>> {
+    lock.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Write-lock counterpart of [`read_catalog`] — same poison-recovery rationale.
+fn write_catalog(
+    lock: &RwLock<BTreeMap<Seq, PathBuf>>,
+) -> std::sync::RwLockWriteGuard<'_, BTreeMap<Seq, PathBuf>> {
+    lock.write().unwrap_or_else(PoisonError::into_inner)
+}
+
 impl SegmentCatalog {
     /// Scan events ascending with `seq >= from`, returning at most `limit`.
     ///
@@ -61,21 +79,19 @@ impl SegmentCatalog {
         if limit == 0 {
             return Ok(vec![]);
         }
-        let snapshot = {
-            let guard = self.0.read().unwrap();
-            guard.clone()
-        };
+        let snapshot = read_catalog(&self.0).clone();
 
-        let last_base = match snapshot.keys().next_back() {
-            Some(&b) => b,
-            None => return Ok(vec![]),
+        let (Some((&first_base, _)), Some((&last_base, _))) =
+            (snapshot.first_key_value(), snapshot.last_key_value())
+        else {
+            return Ok(vec![]);
         };
 
         let start_base = snapshot
             .range(..=from)
             .next_back()
             .map(|(k, _)| *k)
-            .unwrap_or_else(|| *snapshot.keys().next().unwrap());
+            .unwrap_or(first_base);
 
         let mut results = Vec::new();
         'segments: for (&seg_base, path) in snapshot.range(start_base..) {
@@ -131,21 +147,19 @@ impl SegmentCatalog {
         if limit == 0 {
             return Ok(vec![]);
         }
-        let snapshot = {
-            let guard = self.0.read().unwrap();
-            guard.clone()
-        };
+        let snapshot = read_catalog(&self.0).clone();
 
-        let last_base = match snapshot.keys().next_back() {
-            Some(&b) => b,
-            None => return Ok(vec![]),
+        let (Some((&first_base, _)), Some((&last_base, _))) =
+            (snapshot.first_key_value(), snapshot.last_key_value())
+        else {
+            return Ok(vec![]);
         };
 
         let start_base = snapshot
             .range(..=from)
             .next_back()
             .map(|(k, _)| *k)
-            .unwrap_or_else(|| *snapshot.keys().next().unwrap());
+            .unwrap_or(first_base);
 
         let mut results = Vec::new();
         'segments: for (&seg_base, path) in snapshot.range(start_base..) {
@@ -192,7 +206,7 @@ impl SegmentCatalog {
         expected_seq: Seq,
     ) -> std::io::Result<WireEvent> {
         let path = {
-            let guard = self.0.read().unwrap();
+            let guard = read_catalog(&self.0);
             guard.get(&segment_base).cloned().ok_or_else(|| {
                 std::io::Error::other(format!("unknown segment base {segment_base}"))
             })?
@@ -202,9 +216,11 @@ impl SegmentCatalog {
         let file_len = file.metadata().await?.len();
 
         file.seek(SeekFrom::Start(offset)).await?;
-        let mut header = [0u8; HEADER_LEN];
-        file.read_exact(&mut header).await?;
-        let payload_len = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
+        let mut len_bytes = [0u8; 4];
+        let mut crc_bytes = [0u8; HEADER_LEN - 4];
+        file.read_exact(&mut len_bytes).await?;
+        file.read_exact(&mut crc_bytes).await?;
+        let payload_len = u32::from_le_bytes(len_bytes) as usize;
 
         let frame_end = offset
             .checked_add((HEADER_LEN + payload_len) as u64)
@@ -216,7 +232,8 @@ impl SegmentCatalog {
         }
 
         let mut frame = vec![0u8; HEADER_LEN + payload_len];
-        frame[..HEADER_LEN].copy_from_slice(&header);
+        frame[..4].copy_from_slice(&len_bytes);
+        frame[4..HEADER_LEN].copy_from_slice(&crc_bytes);
         file.read_exact(&mut frame[HEADER_LEN..]).await?;
         let ev = match decode_frame(&frame) {
             Ok(Some((ev, _))) => ev,
@@ -350,9 +367,12 @@ impl SegmentSet {
             segments.insert(1, path);
         }
 
-        // Validate all segments in ascending base order.
+        // Validate all segments in ascending base order. The map is never
+        // empty here (seeded with base 1 above), but avoid relying on that.
         let bases: Vec<Seq> = segments.keys().copied().collect();
-        let final_base = *bases.last().unwrap(); // always exists
+        let final_base = *bases
+            .last()
+            .ok_or_else(|| std::io::Error::other("segment map empty after seeding"))?;
         for base in &bases {
             let path = segments[base].clone();
             let is_final = *base == final_base;
@@ -466,7 +486,7 @@ impl SegmentSet {
             // blocking std::fs is deliberate at rotation — rare event, not the hot path
             fsync_dir(&self.dir)?;
             // Insert into the shared catalog — all cloned catalog handles see this immediately.
-            self.catalog.0.write().unwrap().insert(next_seq, new_path);
+            write_catalog(&self.catalog.0).insert(next_seq, new_path);
             self.active = new_file;
             self.active_len = 0;
         }
@@ -494,7 +514,11 @@ impl SegmentSet {
 
     /// Returns `(active_segment_base, active_len)` — position of the NEXT append.
     pub fn next_pos(&self) -> (Seq, u64) {
-        let base = *self.catalog.0.read().unwrap().keys().next_back().unwrap();
+        // The catalog is seeded with base 1 at open and never emptied, so the
+        // fallback is unreachable; 1 matches the open() seed if it ever fired.
+        let base = read_catalog(&self.catalog.0)
+            .last_key_value()
+            .map_or(1, |(&b, _)| b);
         (base, self.active_len)
     }
 

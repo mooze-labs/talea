@@ -15,3 +15,12 @@ serde_json = "1.0.150"
 talea-core = { path = "../talea-core/", version = "0.1.0" }
 tokio = { version = "1.52.3", features = ["time", "macros", "rt"] }
 uuid = { version = "1.23.2", features = ["v4"] }
+
+# Dev tooling (bench harness / conformance suite): unwrap/expect are the
+# correct failure mode here, as in tests. unsafe stays forbidden.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "allow"
+expect_used = "allow"

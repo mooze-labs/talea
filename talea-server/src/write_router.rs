@@ -5,7 +5,7 @@
 //! the server spec, Part 4.5.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use talea_core::store::{Committed, Store, StoreError};
@@ -50,6 +50,15 @@ struct Job {
 
 type BookMap = Arc<Mutex<HashMap<String, mpsc::Sender<Job>>>>;
 
+/// Lock the book map, recovering from poisoning: the guarded operations are
+/// single HashMap reads/inserts/removes that cannot be left logically torn by
+/// a panicking thread, so the inner value is always safe to continue with.
+fn lock_books(
+    books: &Mutex<HashMap<String, mpsc::Sender<Job>>>,
+) -> MutexGuard<'_, HashMap<String, mpsc::Sender<Job>>> {
+    books.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 pub struct WriteRouter {
     store: Arc<dyn Store>,
     cfg: WriteConfig,
@@ -93,10 +102,7 @@ impl WriteRouter {
 
     /// Live committer count (for tests and gauges).
     pub fn active_books(&self) -> usize {
-        self.books
-            .lock()
-            .expect("write-router mutex poisoned")
-            .len()
+        lock_books(&self.books).len()
     }
 
     /// Jobs currently queued across all books (for the sampled gauge).
@@ -104,16 +110,14 @@ impl WriteRouter {
     /// global sum rather than a per-book breakdown.
     /// Approximate: counts buffered jobs, sampled without synchronization.
     pub fn queued_jobs(&self) -> usize {
-        self.books
-            .lock()
-            .expect("write-router mutex poisoned")
+        lock_books(&self.books)
             .values()
             .map(|s| s.max_capacity() - s.capacity())
             .sum()
     }
 
     fn sender_for(&self, book_key: &str) -> mpsc::Sender<Job> {
-        let mut books = self.books.lock().expect("write-router mutex poisoned");
+        let mut books = lock_books(&self.books);
         // is_closed() catches both a cleanly reaped committer and a sender
         // orphaned by a panicked committer — a panic doesn't remove the map
         // entry, so the channel closes but the stale sender stays in the map
@@ -157,10 +161,7 @@ async fn run_committer(
                 // jobs drain — no job is ever dropped. A fresh committer may
                 // briefly overlap with this drain; the DB lock keeps that
                 // correct.
-                books
-                    .lock()
-                    .expect("write-router mutex poisoned")
-                    .remove(&book_key);
+                lock_books(&books).remove(&book_key);
                 rx.close();
                 while let Some(job) = rx.recv().await {
                     let batch = drain_batch(job, &mut rx, batch_max);

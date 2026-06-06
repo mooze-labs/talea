@@ -1,3 +1,7 @@
+// Test code: a panicking unwrap/expect IS the test failing (clippy.toml
+// exempts #[test] fns; this extends that to integration-test helpers).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Two real server instances sharing one Postgres: the cross-instance
 //! correctness contract — gapless seqs, idempotency dedup, LISTEN/NOTIFY
 //! fan-out, cursor resume. Skips when TALEA_TEST_PG_URL is unset (same

@@ -1,3 +1,7 @@
+// Test code: a panicking unwrap/expect IS the test failing (clippy.toml
+// exempts #[test] fns; this extends that to integration-test helpers).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::sync::Arc;
 
 use sqlx::sqlite::SqlitePoolOptions;
@@ -383,7 +387,7 @@ async fn batch_empty_input_returns_empty() {
 fn metrics_handle() -> &'static metrics_exporter_prometheus::PrometheusHandle {
     use std::sync::OnceLock;
     static HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
-    HANDLE.get_or_init(talea_server::metrics::install)
+    HANDLE.get_or_init(|| talea_server::metrics::install().expect("install metrics recorder once"))
 }
 
 #[tokio::test]

@@ -1,3 +1,7 @@
+// Test code: a panicking unwrap/expect IS the test failing (clippy.toml
+// exempts #[test] fns; this extends that to integration-test helpers).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Pins the cursor-resume contract: a router that serves two events then
 //! closes; on reconnect it reads Last-Event-ID and serves the next two.
 

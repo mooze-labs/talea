@@ -1,3 +1,7 @@
+// Test code: a panicking unwrap/expect IS the test failing (clippy.toml
+// exempts #[test] fns; this extends that to integration-test helpers).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 //! Property: commit_batch == sequential commit, observably.
 //! Seeded PRNG, fixed iteration count — deterministic in CI.
 //!
