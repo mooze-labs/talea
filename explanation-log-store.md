@@ -38,6 +38,8 @@ The SQL backends keep sequences gapless with a per-book counter-row lock — the
 
 Throughput = batch size ÷ fsync latency. One lone committer pays a full fsync (~3 ms → ~330 commits/s — the measured c1 floor). Sixty-four concurrent committers share one fsync and the same hardware does ~6,600/s; at c128, ~9,500/s. Nothing about the disk changed — the batches got fuller. This is the same group-commit idea the server's write router applies to SQL transactions, applied at the fsync instead.
 
+What fills the batches in practice is the wire: with one transaction per HTTP request, request overhead caps arrival rate long before the store saturates. The [batch endpoint](reference-http-api.md#post-v1transactionsbatch--post-multiple-transactions) delivers drafts hundreds at a time, and the same fsync schedule then carries ~35–40 k drafts/s on the same hardware (conditions in the [bench README](../talea-bench/README.md); live trends on the [CI bench charts](https://mooze-labs.github.io/talea/dev/bench/)).
+
 **Trade-off:** worst-case latency is best-case batching. A solo commit can't amortize anything and pays the full fsync alone.
 
 ### Recovery trusts CRCs, not luck
