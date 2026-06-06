@@ -123,6 +123,11 @@ Raw report JSONs are kept as workflow artifacts (90 days); extracted trends
 are charted at <https://mooze-labs.github.io/talea/dev/bench/>, with
 per-push and nightly data in separate datasets. Runner noise makes single
 points unreliable — read the curves across commits, not run-to-run deltas.
+Both profiles also run a batch-mode `post-one-book` step (`--concurrency 8
+--batch-size 25`, charted under `.../batch-25/`): 8×25 = 200 worst-case
+in-flight drafts fits the default `TALEA_WRITE_QUEUE_DEPTH=256` with margin,
+so the batch series tracks the batch path without touching server env or
+existing series.
 
 The extraction step is the `summarize` subcommand, usable locally too:
 

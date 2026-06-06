@@ -41,6 +41,9 @@ bench() { "$BIN/talea-bench" --out-dir "$REPORTS" "$@"; }
 echo "=== bench leg: $LEG ($PROFILE) ==="
 if [ "$PROFILE" = "full" ]; then
   bench post-one-book
+  # Batch path: 8×25 = 200 in-flight drafts fits the default
+  # TALEA_WRITE_QUEUE_DEPTH=256 with margin; c8 is the summarize rep step.
+  bench post-one-book --concurrency 8 --batch-size 25
   bench post-many-books
   # Default reads sweep (1,4,16,64) lacks the c8 representative step.
   bench reads --concurrency 1,4,8,16,64
@@ -48,5 +51,7 @@ if [ "$PROFILE" = "full" ]; then
   bench mixed
 else
   bench --warmup-secs 2 --duration-secs 10 post-one-book --concurrency 1,4,8
+  # Batch path (see full profile note): 8×25 fits the default queue depth.
+  bench --warmup-secs 2 --duration-secs 10 post-one-book --concurrency 8 --batch-size 25
   bench --warmup-secs 2 --duration-secs 10 reads --concurrency 1,4,8 --depth 2000
 fi
