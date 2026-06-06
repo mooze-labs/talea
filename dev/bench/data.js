@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780679444346,
+  "lastUpdate": 1780719431171,
   "repoUrl": "https://github.com/mooze-labs/talea",
   "entries": {
     "bench-push-bigger": [
@@ -283,6 +283,60 @@ window.BENCHMARK_DATA = {
           {
             "name": "reads/log/peak-throughput",
             "value": 26959.4,
+            "unit": "ops/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "h4vismat@mooze.app",
+            "name": "havis",
+            "username": "h4vismat"
+          },
+          "committer": {
+            "email": "h4vismat@mooze.app",
+            "name": "havis",
+            "username": "h4vismat"
+          },
+          "distinct": true,
+          "id": "c7769821d2631a2ec1416049a1d4a98a8406f226",
+          "message": "Merge remote-tracking branch 'origin/main' into feature/setbased-batch-commit",
+          "timestamp": "2026-06-06T01:02:51-03:00",
+          "tree_id": "4727ee51c11f19457be651ac428327f9355b671d",
+          "url": "https://github.com/mooze-labs/talea/commit/c7769821d2631a2ec1416049a1d4a98a8406f226"
+        },
+        "date": 1780719430421,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "post-one-book/sqlite/peak-throughput",
+            "value": 1583.2,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/sqlite/peak-throughput",
+            "value": 9904.4,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/postgres/peak-throughput",
+            "value": 1426.4,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/postgres/peak-throughput",
+            "value": 2704.4,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/log/peak-throughput",
+            "value": 5209.6,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/log/peak-throughput",
+            "value": 26953.6,
             "unit": "ops/s"
           }
         ]
