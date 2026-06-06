@@ -299,6 +299,87 @@ async fn account_history_pages() {
     assert!(rest.next.is_none()); // short page => no further cursor
 }
 
+// ---- post_batch tests -------------------------------------------------------
+
+#[tokio::test]
+async fn batch_all_valid_gapless_seqs() {
+    let svc = funded_svc().await;
+    let drafts = vec![
+        tx_draft("onramp", "batch-a1", balanced(100)),
+        tx_draft("onramp", "batch-a2", balanced(200)),
+        tx_draft("onramp", "batch-a3", balanced(300)),
+    ];
+    let results = svc.post_batch(drafts).await;
+    assert_eq!(results.len(), 3);
+
+    let mut seqs: Vec<i64> = results
+        .iter()
+        .map(|r| r.as_ref().expect("slot should be Ok").seq)
+        .collect();
+    seqs.sort_unstable();
+
+    // seqs 1,2 are account_opened events; first transaction batch fills 3,4,5
+    assert_eq!(seqs, vec![3, 4, 5], "seqs should be gapless: {seqs:?}");
+}
+
+#[tokio::test]
+async fn batch_one_invalid_slot_isolated() {
+    let svc = funded_svc().await;
+    let drafts = vec![
+        tx_draft("onramp", "batch-b1", balanced(100)),
+        // unbalanced: debit 999 ≠ credit 100 → Unbalanced error
+        tx_draft(
+            "onramp",
+            "batch-b2",
+            vec![
+                posting("deposits", "USD", 100, Direction::Credit),
+                posting("cash", "USD", 999, Direction::Debit),
+            ],
+        ),
+        tx_draft("onramp", "batch-b3", balanced(300)),
+    ];
+    let results = svc.post_batch(drafts).await;
+    assert_eq!(results.len(), 3);
+
+    assert!(results[0].is_ok(), "slot 0 should succeed");
+    assert!(
+        matches!(&results[1], Err(ApiError::Unbalanced { .. })),
+        "slot 1 should be Unbalanced, got {:?}",
+        results[1]
+    );
+    assert!(results[2].is_ok(), "slot 2 should succeed");
+}
+
+#[tokio::test]
+async fn batch_duplicate_idem_key_deduplicates() {
+    let svc = funded_svc().await;
+    let draft = tx_draft("onramp", "batch-dup", balanced(100));
+    let drafts = vec![draft.clone(), draft];
+
+    let results = svc.post_batch(drafts).await;
+    assert_eq!(results.len(), 2);
+
+    let p0 = results[0].as_ref().expect("slot 0 ok");
+    let p1 = results[1].as_ref().expect("slot 1 ok");
+
+    // Both resolve to the same committed transaction
+    assert_eq!(p0.tx_id, p1.tx_id, "duplicate idem key → same tx_id");
+    assert_eq!(p0.seq, p1.seq, "duplicate idem key → same seq");
+    // Exactly one of the two is the original; the other is a dedup hit
+    let deduped_count = [p0.deduplicated, p1.deduplicated]
+        .iter()
+        .filter(|&&d| d)
+        .count();
+    assert_eq!(deduped_count, 1, "exactly one slot should be deduplicated");
+}
+
+#[tokio::test]
+async fn batch_empty_input_returns_empty() {
+    let svc = funded_svc().await;
+    let results = svc.post_batch(vec![]).await;
+    assert!(results.is_empty());
+}
+
 fn metrics_handle() -> &'static metrics_exporter_prometheus::PrometheusHandle {
     use std::sync::OnceLock;
     static HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();

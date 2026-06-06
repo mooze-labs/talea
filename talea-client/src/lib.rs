@@ -217,6 +217,17 @@ impl LedgerApi for TaleaClient {
             .await
     }
 
+    /// Sequential implementation: calls `self.post` for each draft in order.
+    /// Wire batch endpoint lands in the next commit; this is correct until
+    /// then because each call is independently idempotent.
+    async fn post_batch(&self, drafts: Vec<TransactionDraft>) -> Vec<ApiResult<Posted>> {
+        let mut results = Vec::with_capacity(drafts.len());
+        for draft in drafts {
+            results.push(self.post(draft).await);
+        }
+        results
+    }
+
     async fn subscribe(&self, book: &str, from: Seq) -> ApiResult<EventStream> {
         sse::subscribe(&self.http, book, from)
     }

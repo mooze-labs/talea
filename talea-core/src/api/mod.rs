@@ -53,6 +53,24 @@ pub trait LedgerApi: Send + Sync {
     /// retrying on failure unconditionally safe.
     async fn post(&self, draft: TransactionDraft) -> ApiResult<Posted>;
 
+    /// Post multiple drafts and return one result per input, preserving
+    /// input order (`out[i]` corresponds to `drafts[i]`).
+    ///
+    /// **Positional contract** — every draft is attempted independently.
+    /// A failure (validation error, unknown account, unbalanced, …) in one
+    /// slot sets that slot's `Err`; it has no effect on any other slot.
+    ///
+    /// **Idempotency deduplication** — two drafts with the same idempotency
+    /// key, whether within this batch or against historical commits, both
+    /// resolve to the original `Posted` (with `deduplicated: true`) exactly
+    /// as concurrent single `post` calls would. This is a property of the
+    /// per-book write router, not special batch logic.
+    ///
+    /// **Empty input** returns an empty `Vec` immediately.
+    ///
+    /// Implementations must preserve input order in the returned `Vec`.
+    async fn post_batch(&self, drafts: Vec<TransactionDraft>) -> Vec<ApiResult<Posted>>;
+
     /// Effective (normal-side-adjusted) balance, rendered as a decimal
     /// string using the asset's precision. `as_of` replays by commit time;
     /// `None` reads the live projection.
