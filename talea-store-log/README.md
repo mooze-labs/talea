@@ -73,6 +73,8 @@ Measured on the dev laptop (Apple Silicon, NVMe), `post-one-book` scenario, 30-s
 
 For comparison: the Postgres baseline on the same machine is ~810 tx/s. The single-commit floor (one request, no batching peers) is one `F_FULLFSYNC` ≈ 3 ms.
 
+The numbers above post one transaction per HTTP request, so the wire is the limiter before the store is. Through [`POST /v1/transactions/batch`](../docs/reference-http-api.md#post-v1transactionsbatch--post-multiple-transactions) the same store reaches **~35–40 k drafts/s** (batch-50 at c32; needs raised `TALEA_WRITE_QUEUE_DEPTH`/`TALEA_WRITE_BATCH_MAX` — see the [bench README](../talea-bench/README.md) for conditions). All figures are dev-laptop indicative; the living numbers are the [CI bench trend charts](https://mooze-labs.github.io/talea/dev/bench/).
+
 ## Known limits
 
 - **Single-process only.** The `LOCK` file is an advisory exclusive lock (fs4). A second `open` on the same directory — from the same or a different process — returns an error. Use Postgres for multi-instance deployments.
