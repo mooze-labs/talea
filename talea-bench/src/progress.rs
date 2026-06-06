@@ -32,6 +32,12 @@ impl LiveCounters {
             } => {
                 self.deduplicated.fetch_add(1, Ordering::Relaxed);
             }
+            OpOutcome::Batch {
+                n_shed, n_dedup, ..
+            } => {
+                self.saturated.fetch_add(*n_shed, Ordering::Relaxed);
+                self.deduplicated.fetch_add(*n_dedup, Ordering::Relaxed);
+            }
             _ => {}
         }
     }

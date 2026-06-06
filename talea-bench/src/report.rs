@@ -82,9 +82,27 @@ pub struct StepJson {
     /// Error rate over 1% — numbers from this step are not trustworthy.
     pub invalid: bool,
     pub latency: HashMap<String, LatencyJson>,
+    /// Number of drafts per HTTP call. 1 = single-post (default/legacy).
+    /// \>1 = batch endpoint. Latency is recorded once per draft (each draft
+    /// waited the full batch wall time), so percentiles stay comparable
+    /// across batch sizes.
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+}
+
+fn default_batch_size() -> usize {
+    1
 }
 
 pub fn summarize(label: impl Into<String>, r: &StepReport) -> StepJson {
+    summarize_with_batch(label, r, 1)
+}
+
+pub fn summarize_with_batch(
+    label: impl Into<String>,
+    r: &StepReport,
+    batch_size: usize,
+) -> StepJson {
     let errs: u64 = r.errors.values().sum();
     let denom = r.successes + errs;
     let invalid = denom > 0 && errs as f64 / denom as f64 > 0.01;
@@ -107,6 +125,7 @@ pub fn summarize(label: impl Into<String>, r: &StepReport) -> StepJson {
             .iter()
             .map(|(k, h)| ((*k).to_string(), latency_json(h)))
             .collect(),
+        batch_size,
     }
 }
 
@@ -329,5 +348,32 @@ mod tests {
             parsed.steps[0].latency["post"].p99_us,
             run.steps[0].latency["post"].p99_us
         );
+    }
+
+    #[test]
+    fn summarize_with_batch_records_batch_size_in_step_json() {
+        let s = summarize_with_batch("c4", &sample_report(0), 8);
+        assert_eq!(s.batch_size, 8);
+        // Serialized JSON must contain the field.
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["batch_size"], 8);
+    }
+
+    #[test]
+    fn summarize_default_batch_size_is_one() {
+        let s = summarize("c4", &sample_report(0));
+        assert_eq!(s.batch_size, 1);
+    }
+
+    #[test]
+    fn step_json_missing_batch_size_defaults_to_one_on_deserialize() {
+        // Old run files lack the batch_size field; serde(default) must fill it.
+        let json = r#"{
+            "label":"c8","workers":8,"measured_secs":10.0,"throughput_ops_s":500.0,
+            "successes":5000,"saturated":0,"deduplicated":0,"errors":{},"invalid":false,
+            "latency":{}
+        }"#;
+        let s: StepJson = serde_json::from_str(json).unwrap();
+        assert_eq!(s.batch_size, 1, "old reports default batch_size to 1");
     }
 }

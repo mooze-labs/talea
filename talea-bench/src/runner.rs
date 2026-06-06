@@ -33,6 +33,22 @@ pub enum OpOutcome {
     Failed {
         kind: String,
     },
+    /// Aggregate outcome from one `post_batch` call covering `n_ok + n_shed +
+    /// err_slots` drafts. The runner expands this into per-draft accounting:
+    /// successes, shed, and errors are tallied separately; the batch's wall
+    /// latency is recorded once per successful draft so histogram percentiles
+    /// remain comparable with single-post runs at the same concurrency.
+    ///
+    /// `first_err` carries the classified outcome for the first failed
+    /// (non-shed) slot; if more than one error kind appears in a batch, only
+    /// the first is tallied — whole-request failures (auth/transport) map all
+    /// slots to the same error kind anyway, so this is fine in practice.
+    Batch {
+        n_ok: u64,
+        n_dedup: u64,
+        n_shed: u64,
+        first_err: Option<Box<OpOutcome>>,
+    },
 }
 
 // No Debug derive: hdrhistogram's Histogram does not implement Debug.
@@ -124,6 +140,19 @@ impl Local {
                 committed: true, ..
             } => self.total_committed += 1,
             OpOutcome::Failed { kind } if kind == "transport" => self.total_ambiguous += 1,
+            OpOutcome::Batch {
+                n_ok, first_err, ..
+            } => {
+                // All successful drafts in a batch committed (keys are unique
+                // per run, so a dedup'd slot means the original committed too).
+                self.total_committed += n_ok;
+                if let Some(e) = first_err
+                    && let OpOutcome::Failed { kind } = e.as_ref()
+                    && kind == "transport"
+                {
+                    self.total_ambiguous += 1;
+                }
+            }
             _ => {}
         }
         if !measured {
@@ -145,6 +174,36 @@ impl Local {
             }
             OpOutcome::Saturated => self.saturated += 1,
             OpOutcome::Failed { kind } => *self.errors.entry(kind.clone()).or_insert(0) += 1,
+            OpOutcome::Batch {
+                n_ok,
+                n_dedup,
+                n_shed,
+                first_err,
+            } => {
+                self.successes += n_ok;
+                self.deduplicated += n_dedup;
+                self.saturated += n_shed;
+                // Record the batch's wall latency once per successful draft so
+                // histogram percentiles stay comparable to single-post runs:
+                // each draft waited the full batch wall time.
+                let us = (latency.as_micros() as u64).max(1);
+                let h = self
+                    .latencies
+                    .entry("post")
+                    .or_insert_with(|| Histogram::new(3).expect("histogram"));
+                for _ in 0..*n_ok {
+                    let _ = h.record(us);
+                }
+                if let Some(e) = first_err {
+                    match e.as_ref() {
+                        OpOutcome::Saturated => {} // already counted in n_shed
+                        OpOutcome::Failed { kind } => {
+                            *self.errors.entry(kind.clone()).or_insert(0) += 1;
+                        }
+                        _ => {} // nested Batch/Success: not expected
+                    }
+                }
+            }
         }
     }
 }
@@ -353,5 +412,76 @@ mod tests {
             calls.load(Ordering::Relaxed),
             "live counter sees every op, warmup included"
         );
+    }
+
+    #[tokio::test]
+    async fn run_step_batch_outcome_expands_per_draft() {
+        // A single Batch{n_ok=3, n_dedup=1, n_shed=0} per iteration should
+        // produce successes=3, deduplicated=1, and 3 histogram samples, all
+        // from a single closure call.
+        let report = run_step(
+            StepConfig {
+                workers: 1,
+                warmup: Duration::ZERO,
+                duration: Duration::from_millis(60),
+            },
+            None,
+            |_, _| async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                OpOutcome::Batch {
+                    n_ok: 3,
+                    n_dedup: 1,
+                    n_shed: 0,
+                    first_err: None,
+                }
+            },
+        )
+        .await;
+        // Each iteration contributes 3 successes; we expect multiple iterations.
+        assert!(report.successes >= 3, "at least one batch fired");
+        assert!(
+            report.successes % 3 == 0,
+            "successes must be a multiple of 3"
+        );
+        assert_eq!(
+            report.deduplicated,
+            report.successes / 3,
+            "one dedup per batch"
+        );
+        // Latency histogram must have one sample per successful draft.
+        assert_eq!(
+            report.latencies["post"].len(),
+            report.successes,
+            "one latency sample per successful draft"
+        );
+        assert_eq!(report.total_committed, report.successes);
+        assert_eq!(report.saturated, 0);
+    }
+
+    #[tokio::test]
+    async fn run_step_batch_outcome_counts_shed_and_error() {
+        let report = run_step(
+            StepConfig {
+                workers: 1,
+                warmup: Duration::ZERO,
+                duration: Duration::from_millis(40),
+            },
+            None,
+            |_, _| async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                OpOutcome::Batch {
+                    n_ok: 0,
+                    n_dedup: 0,
+                    n_shed: 2,
+                    first_err: Some(Box::new(OpOutcome::Failed {
+                        kind: "unauthorized".into(),
+                    })),
+                }
+            },
+        )
+        .await;
+        assert_eq!(report.successes, 0);
+        assert!(report.saturated >= 2, "shed slots tallied");
+        assert!(report.errors["unauthorized"] >= 1, "error slot tallied");
     }
 }

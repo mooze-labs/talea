@@ -180,6 +180,7 @@ mod tests {
             errors: HashMap::new(),
             invalid: false,
             latency: HashMap::from([("post".to_string(), lat(p99_us))]),
+            batch_size: 1,
         }
     }
 
