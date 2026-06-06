@@ -120,6 +120,52 @@ Response `200` (`Posted`):
 
 Other responses: `400 unbalanced | invalid_amount | invalid_draft` · `401` · `403 forbidden` (token scope does not cover the draft's book) · `404 unknown_account` · `409 constraint_violation` · `415` · `429 overloaded` (+ `Retry-After: 1` — the per-book write queue is full; retry with the **same** idempotency key).
 
+### `POST /v1/transactions/batch` — post multiple transactions
+
+Submit an array of `TransactionDraft` objects in one request and receive one positional result per draft. Drafts may span different books. An empty array is accepted and returns `200 []` immediately.
+
+Request body: JSON array of `TransactionDraft` (the same shape as the single-transaction route):
+
+```json
+[
+  {
+    "book": "onramp",
+    "idempotency_key": "deposit-7f3a",
+    "postings": [
+      {"account": "cash",     "amount": {"minor": 100000, "asset": "USD"}, "direction": "debit"},
+      {"account": "deposits", "amount": {"minor": 100000, "asset": "USD"}, "direction": "credit"}
+    ]
+  },
+  {
+    "book": "fees",
+    "idempotency_key": "fee-7f3a",
+    "postings": [
+      {"account": "revenue", "amount": {"minor": 200, "asset": "USD"}, "direction": "credit"},
+      {"account": "clearing", "amount": {"minor": 200, "asset": "USD"}, "direction": "debit"}
+    ]
+  }
+]
+```
+
+Response `200`: a JSON array of the same length, each item either the `Posted` object (on success) or the standard `ApiError` envelope (on per-draft failure). The shapes are byte-identical to the single-transaction route's `200` and error responses. Per-draft failures do not affect other slots.
+
+```json
+[
+  {"tx_id": "0190c8a4-...", "seq": 3, "at": "2026-06-04T12:00:00.123456Z", "deduplicated": false},
+  {"error": "unbalanced", "asset": "USD", "debit": 200, "credit": 0}
+]
+```
+
+**Positional contract** — `out[i]` corresponds to `drafts[i]`. A failure in one slot (unbalanced, unknown account, constraint violation, …) sets that slot's error envelope; it has no effect on any other slot.
+
+**Scoped-token 403s in-slot** — when a scoped token does not cover the book named in a draft, that slot receives `{"error":"forbidden","book":"..."}` in the response array (not a whole-request 403). Slots whose books are in scope proceed normally. All other slot-level errors (`400`, `404`, `409`) work the same way.
+
+**Whole-request errors** (not per-slot) follow the same contract as `POST /v1/transactions`: `401` for a bad or missing token, `415` for wrong content type, and `400 invalid_draft` when the body is malformed or the array length exceeds `TALEA_HTTP_BATCH_MAX` (default 500, minimum 1). The cap is a safety valve against request amplification; axum's 2 MiB body limit is the memory ceiling.
+
+**Idempotency** — each draft's idempotency key deduplicates independently, whether against prior commits or other drafts in the same batch. Two drafts with the same key both resolve to the original `Posted` (with `deduplicated: true`). Retrying the whole batch after a whole-request failure is always safe.
+
+Other whole-request responses: `408 timeout` · `503 overloaded` (admission shed; carries `Retry-After: 1`).
+
 ### `GET /v1/books/{book}/accounts/{path}/balance?as_of=`
 
 Current balance, or point-in-time when `as_of` (RFC 3339) is given — replayed by commit time.
@@ -247,6 +293,7 @@ All shedding and timeouts assume clients retry with the same idempotency key —
 | `TALEA_MAX_INFLIGHT` | `256` | Admission limit; excess sheds `503` |
 | `TALEA_WRITE_QUEUE_DEPTH` | `256` | Per-book write queue; full → `429` |
 | `TALEA_WRITE_BATCH_MAX` | `64` | Max drafts per group commit |
+| `TALEA_HTTP_BATCH_MAX` | `500` | Maximum drafts accepted by `POST /v1/transactions/batch`; requests exceeding this cap are rejected with `400` (must be ≥ 1) |
 | `TALEA_METRICS_BIND` | unset | Optional Prometheus listener |
 
 `talead serve` loads these from `.env` in the working directory; real environment variables win. See the [README Configuration table](../README.md#configuration) for the same list in context.

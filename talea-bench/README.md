@@ -58,6 +58,7 @@ from the server's `x-talea-backend` header).
 
 ```bash
 cargo run --release -p talea-bench -- post-one-book
+cargo run --release -p talea-bench -- post-one-book --batch-size 50  # batch endpoint; per-draft accounting
 cargo run --release -p talea-bench -- post-many-books
 cargo run --release -p talea-bench -- reads          # seeds 20k txs once; re-runs are free
 cargo run --release -p talea-bench -- mixed
@@ -81,6 +82,17 @@ the output is identical to previous versions.
 - **post-one-book**: throughput should plateau almost immediately
   (the per-book counter-row lock serializes commits); p99 grows with
   queue depth. The plateau is your per-book ceiling, ~1/commit-latency.
+  `--batch-size N` (default 1) switches to `POST /v1/transactions/batch`
+  with N drafts per worker iteration; accounting stays per-draft so
+  throughput numbers are directly comparable across batch sizes. For
+  batch experiments, consider raising `TALEA_WRITE_QUEUE_DEPTH` and
+  `TALEA_WRITE_BATCH_MAX` to match the expected inflight volume —
+  defaults sized for single-draft traffic will shed 429s under a large
+  batch fan-out. Indicative numbers (dev Mac, log backend,
+  `TALEA_WRITE_QUEUE_DEPTH=8192 TALEA_WRITE_BATCH_MAX=1024`):
+  batch-50 at c32 ≈ 38 k drafts/s vs 3.5 k singles at c32; batch-200
+  at c32 overloads (amplification = batch size × concurrency exceeds
+  the queue). Same-rig comparisons only.
 - **post-many-books**: aggregate throughput should scale with book
   count until pool/Postgres/fsync saturates. That knee answers "is the
   DB the bottleneck" — and where.

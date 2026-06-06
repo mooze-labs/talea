@@ -85,6 +85,7 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 | `POST /v1/assets` | Register an asset (idempotent on id) |
 | `POST /v1/accounts` | Open an account (idempotent on book+path) |
 | `POST /v1/transactions` | Post a balanced transaction (idempotent on key) |
+| `POST /v1/transactions/batch` | Post an array of drafts; one positional result per draft (mixed books OK; per-draft errors in-slot) |
 | `GET /v1/books/{book}/accounts/{path}/balance?as_of=` | Current or point-in-time balance |
 | `GET /v1/books/{book}/accounts/{path}/history?after_seq=&limit=` | Paginated postings |
 | `GET /v1/transactions/{tx_id}` | Committed transaction by id |
@@ -143,6 +144,7 @@ Server (`talead serve` / `talea-server`, via env or `.env`):
 | `TALEA_MAX_INFLIGHT` | `256` | In-flight request cap; excess sheds as 503 |
 | `TALEA_WRITE_QUEUE_DEPTH` | `256` | Per-book write queue length; a full queue answers 429 + `Retry-After` |
 | `TALEA_WRITE_BATCH_MAX` | `64` | Max drafts group-committed in one DB transaction per book |
+| `TALEA_HTTP_BATCH_MAX` | `500` | Max drafts per `POST /v1/transactions/batch` request; excess is rejected with 400 (must be ≥ 1) |
 | `TALEA_METRICS_BIND` | unset | Optional Prometheus listener (e.g. `127.0.0.1:9100`); unset = no metrics endpoint |
 
 SQLite runs WAL with `synchronous=NORMAL`: durable against process crash; an

@@ -16,6 +16,7 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 | `POST /v1/assets` | Register an asset (idempotent on id) |
 | `POST /v1/accounts` | Open an account (idempotent on book+path) |
 | `POST /v1/transactions` | Post a balanced transaction (idempotent on key) |
+| `POST /v1/transactions/batch` | Post an array of drafts; one positional result per draft (mixed books OK; per-draft errors in-slot) |
 | `GET /v1/books/{book}/accounts/{path}/balance?as_of=` | Current or point-in-time balance |
 | `GET /v1/books/{book}/accounts/{path}/history?after_seq=&limit=` | Paginated postings |
 | `GET /v1/transactions/{tx_id}` | Committed transaction by id |
@@ -37,6 +38,7 @@ The crate ships a `talea-server` binary configured purely from the environment, 
 | `TALEA_MAX_INFLIGHT` | `256` | In-flight request cap; excess sheds as 503 |
 | `TALEA_WRITE_QUEUE_DEPTH` | `256` | Per-book write queue length; a full queue answers 429 + `Retry-After` |
 | `TALEA_WRITE_BATCH_MAX` | `64` | Max drafts group-committed in one DB transaction per book |
+| `TALEA_HTTP_BATCH_MAX` | `500` | Max drafts per `POST /v1/transactions/batch` request; excess is rejected with 400 (must be ≥ 1) |
 | `TALEA_METRICS_BIND` | unset | Optional Prometheus listener; unset = no metrics endpoint |
 | `TALEA_LOG_SNAPSHOT_EVERY` / `TALEA_LOG_IDEM_HOT_CAP` / `TALEA_LOG_SEGMENT_MAX` | unset | Append-log store tuning; only read for `log://` URLs — see [`talea-store-log`](../talea-store-log/README.md) |
 
