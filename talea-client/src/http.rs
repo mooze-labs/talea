@@ -1,6 +1,6 @@
 //! Request execution: URL building, auth, bounded retry, and response
 //! decoding. Domain errors arrive as the ApiError JSON envelope; the
-//! server's admission layer (503/408) and framework rejections are plain
+//! server's admission layer (503/408/429) and framework rejections are plain
 //! text, so undecodable bodies are synthesized from the status.
 
 use std::time::Duration;
@@ -137,10 +137,10 @@ impl Http {
         Err(decode_error(status, &bytes))
     }
 
-    /// Retries transport errors, 503 (honoring Retry-After), and 408.
-    /// On budget exhaustion: the last HTTP response is returned for decoding
-    /// (so a final 503 surfaces as Transport via decode_error); a last
-    /// transport error becomes Transport directly.
+    /// Retries transport errors, 503 and 429 (both honoring Retry-After),
+    /// and 408. On budget exhaustion: the last HTTP response is returned for
+    /// decoding (so a final 503 surfaces as Transport via decode_error); a
+    /// last transport error becomes Transport directly.
     pub(crate) async fn send_with_retry(
         &self,
         build: impl Fn() -> reqwest::RequestBuilder,
@@ -155,7 +155,9 @@ impl Http {
             let retryable = match &outcome {
                 Ok(resp) => {
                     let s = resp.status();
-                    s == StatusCode::SERVICE_UNAVAILABLE || s == StatusCode::REQUEST_TIMEOUT
+                    s == StatusCode::SERVICE_UNAVAILABLE
+                        || s == StatusCode::REQUEST_TIMEOUT
+                        || s == StatusCode::TOO_MANY_REQUESTS
                 }
                 Err(_) => true,
             };

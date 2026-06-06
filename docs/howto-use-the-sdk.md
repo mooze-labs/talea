@@ -33,7 +33,7 @@ futures = "0.3"
        .build()?;                              // validates the URL; no network I/O yet
    ```
 
-   The default retry policy retries `503`, `408`, and transport errors, honoring `Retry-After`. That is safe for *every* operation because posts carry idempotency keys and registry writes are idempotent. `RetryPolicy::none()` disables it.
+   The default retry policy retries `503`, `429`, `408`, and transport errors, honoring `Retry-After`. That is safe for *every* operation because posts carry idempotency keys and registry writes are idempotent. `RetryPolicy::none()` disables it.
 
 2. Register an asset and open accounts (both idempotent — run them at startup unconditionally):
 

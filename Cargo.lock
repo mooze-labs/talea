@@ -2823,6 +2823,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "metrics",
  "serde_json",
  "sqlx",
  "talea-core",

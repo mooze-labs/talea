@@ -44,4 +44,5 @@ log_test!(commit_batch_dedups_within_batch);
 log_test!(commit_batch_dedups_against_prior_commit);
 log_test!(commit_batch_rejects_reserved_book);
 log_test!(commit_batch_empty_returns_empty);
+log_test!(commit_batch_min_balance_checks_run_sequentially);
 log_test!(committed_at_is_monotonic_per_book);

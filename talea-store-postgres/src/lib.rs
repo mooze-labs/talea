@@ -2,13 +2,30 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, Row, Transaction as DbTx};
+use sqlx::{PgPool, Postgres, Row};
 use uuid::Uuid;
 
 use talea_core::{events::*, store::*, types::*};
 
+/// Shorthand for an open database transaction. `pub(crate)` so the sibling
+/// `batch` module can name it in its helper signatures.
+pub(crate) type DbTx<'a, DB> = sqlx::Transaction<'a, DB>;
+
+mod batch;
 mod helpers;
 pub use helpers::book_channel_name;
+
+/// Which implementation strategy a commit_batch call used. Exposed so
+/// callers and tests can observe path selection without a metrics
+/// recorder; the `talea_commit_batch_path_total` counter carries the
+/// same signal to operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchPath {
+    /// Set-based single-transaction fast path.
+    Fast,
+    /// Per-draft savepoint loop (the semantic reference).
+    Fallback,
+}
 
 #[derive(Debug, Clone)]
 pub struct PgTaleaStore {
@@ -37,6 +54,69 @@ impl PgTaleaStore {
             .await
             .map_err(io_err)
     }
+
+    /// commit_batch with the chosen path exposed. The Store trait method
+    /// delegates here; tests assert path selection without a metrics
+    /// recorder.
+    /// NOTE: unlike `Store::commit_batch`, calling this directly records
+    /// no `talea_commit_batch_path_total` counter increment.
+    pub async fn commit_batch_traced(
+        &self,
+        txs: &[Transaction],
+    ) -> (BatchPath, Vec<Result<Committed, StoreError>>) {
+        if txs.is_empty() {
+            return (BatchPath::Fast, Vec::new());
+        }
+        if let Some(results) = batch::try_commit_batch_fast(&self.pool, txs).await {
+            return (BatchPath::Fast, results);
+        }
+        (BatchPath::Fallback, self.commit_batch_per_draft(txs).await)
+    }
+
+    /// Group commit: the whole batch shares one storage transaction (one
+    /// fsync), each draft isolated by a savepoint. Each draft's pg_notify is
+    /// queued within its savepoint, so a rolled-back draft (or an aborted
+    /// outer commit) never emits a wake-up. See commit_in_savepoint.
+    ///
+    /// Operational notes: a draft blocked on a foreign row lock (e.g. the
+    /// book counter held by another instance) head-of-line-blocks its
+    /// batchmates and pins this connection until the lock resolves — no
+    /// lock_timeout or idle_in_transaction_session_timeout is set, on the
+    /// assumption that drafts commit quickly. If sustained cross-instance
+    /// book contention shows up, a lock_timeout on this transaction is the
+    /// hardening knob: it would turn an indefinite stall into a bounded
+    /// per-draft failure that the savepoint already isolates.
+    async fn commit_batch_per_draft(
+        &self,
+        txs: &[Transaction],
+    ) -> Vec<Result<Committed, StoreError>> {
+        if txs.is_empty() {
+            return Vec::new();
+        }
+        let mut db = match self.pool.begin().await {
+            Ok(db) => db,
+            Err(e) => {
+                let msg = format!("failed to begin batch transaction: {e}");
+                return txs
+                    .iter()
+                    .map(|_| Err(StoreError::Io(msg.clone().into())))
+                    .collect();
+            }
+        };
+        let mut results = Vec::with_capacity(txs.len());
+        for (i, tx) in txs.iter().enumerate() {
+            results.push(commit_in_savepoint(&mut db, i, tx).await);
+        }
+        if let Err(e) = db.commit().await {
+            // nothing became durable: every recorded success is void
+            let msg = format!("batch commit failed: {e}");
+            return txs
+                .iter()
+                .map(|_| Err(StoreError::Io(msg.clone().into())))
+                .collect();
+        }
+        results
+    }
 }
 
 // --- shared helpers -----------------------------------------------------
@@ -61,10 +141,10 @@ fn posting_delta(p: &Posting) -> i64 {
     }
 }
 
-struct AccountRow {
-    asset: AssetId,
-    normal_side: Option<Direction>,
-    min_balance: Option<i64>,
+pub(crate) struct AccountRow {
+    pub(crate) asset: AssetId,
+    pub(crate) normal_side: Option<Direction>,
+    pub(crate) min_balance: Option<i64>,
 }
 
 async fn load_account<'e, E>(executor: E, key: &str) -> Result<Option<AccountRow>, StoreError>
@@ -87,12 +167,13 @@ where
 }
 
 /// One account's folded contribution to a transaction.
-struct Pending {
-    account: AccountId,
-    asset: AssetId,
-    normal_side: Option<Direction>,
-    min_balance: Option<i64>,
-    delta: i64,
+#[derive(Clone)]
+pub(crate) struct Pending {
+    pub(crate) account: AccountId,
+    pub(crate) asset: AssetId,
+    pub(crate) normal_side: Option<Direction>,
+    pub(crate) min_balance: Option<i64>,
+    pub(crate) delta: i64,
 }
 
 /// True when a StoreError::Io wraps a sqlx unique-constraint violation.
@@ -107,31 +188,20 @@ fn is_unique_violation(e: &StoreError) -> bool {
         .unwrap_or(false)
 }
 
-/// Load + validate the accounts a transaction touches and fold its postings
-/// into one signed delta per account, sorted by account key. Read-only: runs
-/// BEFORE the book-counter lock is claimed, keeping validation round trips
-/// outside the per-book critical section. One ANY($1) query loads all
-/// accounts.
-async fn load_pending(
+/// One ANY($1) query loading account rows for a set of keys (deduped,
+/// sorted by the caller or not — the map output is order-independent).
+pub(crate) async fn load_accounts(
     db: &mut DbTx<'_, Postgres>,
-    transaction: &Transaction,
-) -> Result<Vec<Pending>, StoreError> {
-    let mut keys: Vec<String> = transaction
-        .postings
-        .iter()
-        .map(|p| p.account.to_key())
-        .collect();
-    keys.sort();
-    keys.dedup();
-
+    keys: &[String],
+) -> Result<HashMap<String, AccountRow>, StoreError> {
     let rows = sqlx::query(
         "SELECT key, asset, normal_side, min_balance FROM accounts WHERE key = ANY($1)",
     )
-    .bind(&keys)
+    .bind(keys)
     .fetch_all(&mut **db)
     .await
     .map_err(io_err)?;
-    let mut loaded: HashMap<String, AccountRow> = rows
+    Ok(rows
         .into_iter()
         .map(|r| {
             let key: String = r.get("key");
@@ -145,21 +215,29 @@ async fn load_pending(
             };
             (key, row)
         })
-        .collect();
+        .collect())
+}
 
+/// Pure: fold one draft's postings into per-account deltas against
+/// already-loaded account rows. Validation (unknown account, asset
+/// mismatch, delta overflow) is identical to the previous inline version.
+pub(crate) fn fold_postings(
+    transaction: &Transaction,
+    accounts: &HashMap<String, AccountRow>,
+) -> Result<Vec<Pending>, StoreError> {
     let mut pending: HashMap<String, Pending> = HashMap::new();
     for posting in &transaction.postings {
         let key = posting.account.to_key();
         if !pending.contains_key(&key) {
-            let row = loaded
-                .remove(&key)
+            let row = accounts
+                .get(&key)
                 .ok_or_else(|| StoreError::UnknownAccount(posting.account.clone()))?;
             pending.insert(
                 key.clone(),
                 Pending {
                     account: posting.account.clone(),
-                    asset: row.asset,
-                    normal_side: row.normal_side,
+                    asset: row.asset.clone(),
+                    normal_side: row.normal_side.clone(),
                     min_balance: row.min_balance,
                     delta: 0,
                 },
@@ -191,6 +269,26 @@ async fn load_pending(
     Ok(out)
 }
 
+/// Load + validate the accounts a transaction touches and fold its postings
+/// into one signed delta per account, sorted by account key. Read-only: runs
+/// BEFORE the book-counter lock is claimed, keeping validation round trips
+/// outside the per-book critical section. One ANY($1) query loads all
+/// accounts.
+async fn load_pending(
+    db: &mut DbTx<'_, Postgres>,
+    transaction: &Transaction,
+) -> Result<Vec<Pending>, StoreError> {
+    let mut keys: Vec<String> = transaction
+        .postings
+        .iter()
+        .map(|p| p.account.to_key())
+        .collect();
+    keys.sort();
+    keys.dedup();
+    let accounts = load_accounts(db, &keys).await?;
+    fold_postings(transaction, &accounts)
+}
+
 /// Write phase: claim the per-book seq + commit timestamp from the DB clock,
 /// apply balances (one UNNEST upsert), then the transaction row, postings
 /// (one UNNEST insert), the event row, and the notify. Every statement here
@@ -212,7 +310,8 @@ async fn write_transaction(
         .map(|p| p.asset.as_str().to_string())
         .collect();
     let b_deltas: Vec<i64> = pending.iter().map(|p| p.delta).collect();
-    // RETURNING rows are matched by key, not position, for robustness
+    // RETURNING rows are matched by key, not position, for robustness.
+    // MIRROR: keep column shape in sync with batch.rs write_set (fast path).
     let rows = sqlx::query(
         "INSERT INTO balances (account_key, asset, balance, updated_seq)
          SELECT t.account_key, t.asset, t.delta, $4
@@ -261,7 +360,8 @@ async fn write_transaction(
     }
 
     // transaction row; a lost idempotency race surfaces here as a unique
-    // violation on (book, idempotency_key) — the caller handles it
+    // violation on (book, idempotency_key) — the caller handles it.
+    // MIRROR: keep column shape in sync with batch.rs write_set (fast path).
     sqlx::query(
         "INSERT INTO transactions
              (tx_id, book, seq, idempotency_key, occurred_at, committed_at, metadata, external_refs)
@@ -279,7 +379,8 @@ async fn write_transaction(
     .await
     .map_err(io_err)?;
 
-    // postings projection: one UNNEST insert
+    // postings projection: one UNNEST insert.
+    // MIRROR: keep column shape in sync with batch.rs write_set (fast path).
     let p_idxs: Vec<i32> = (0..transaction.postings.len() as i32).collect();
     let p_accounts: Vec<String> = transaction
         .postings
@@ -321,6 +422,7 @@ async fn write_transaction(
     .await
     .map_err(io_err)?;
 
+    // MIRROR: keep column shape in sync with batch.rs write_set (fast path).
     insert_event(
         db,
         &transaction.book.0,
@@ -710,45 +812,15 @@ impl Store for PgTaleaStore {
         }
     }
 
-    /// Group commit: the whole batch shares one storage transaction (one
-    /// fsync), each draft isolated by a savepoint. Each draft's pg_notify is
-    /// queued within its savepoint, so a rolled-back draft (or an aborted
-    /// outer commit) never emits a wake-up. See commit_in_savepoint.
-    ///
-    /// Operational notes: a draft blocked on a foreign row lock (e.g. the
-    /// book counter held by another instance) head-of-line-blocks its
-    /// batchmates and pins this connection until the lock resolves — no
-    /// lock_timeout or idle_in_transaction_session_timeout is set, on the
-    /// assumption that drafts commit quickly. If sustained cross-instance
-    /// book contention shows up, a lock_timeout on this transaction is the
-    /// hardening knob: it would turn an indefinite stall into a bounded
-    /// per-draft failure that the savepoint already isolates.
+    /// Delegates to commit_batch_traced; see commit_batch_per_draft for
+    /// operational notes (savepoint semantics, head-of-line-blocking, etc.).
     async fn commit_batch(&self, txs: &[Transaction]) -> Vec<Result<Committed, StoreError>> {
-        if txs.is_empty() {
-            return Vec::new();
-        }
-        let mut db = match self.pool.begin().await {
-            Ok(db) => db,
-            Err(e) => {
-                let msg = format!("failed to begin batch transaction: {e}");
-                return txs
-                    .iter()
-                    .map(|_| Err(StoreError::Io(msg.clone().into())))
-                    .collect();
-            }
+        let (path, results) = self.commit_batch_traced(txs).await;
+        let label = match path {
+            BatchPath::Fast => "fast",
+            BatchPath::Fallback => "fallback",
         };
-        let mut results = Vec::with_capacity(txs.len());
-        for (i, tx) in txs.iter().enumerate() {
-            results.push(commit_in_savepoint(&mut db, i, tx).await);
-        }
-        if let Err(e) = db.commit().await {
-            // nothing became durable: every recorded success is void
-            let msg = format!("batch commit failed: {e}");
-            return txs
-                .iter()
-                .map(|_| Err(StoreError::Io(msg.clone().into())))
-                .collect();
-        }
+        metrics::counter!("talea_commit_batch_path_total", "path" => label).increment(1);
         results
     }
 

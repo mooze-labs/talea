@@ -758,6 +758,48 @@ pub async fn commit_batch_empty_returns_empty(store: &impl Store) {
     assert!(store.commit_batch(&[]).await.is_empty());
 }
 
+/// Sequential semantics for min_balance inside one batch: an overdrawing
+/// draft followed by a covering credit must still reject the overdraft.
+/// (A set-based implementation that only checks final balances would pass
+/// both — this test pins the prefix-wise behavior.)
+pub async fn commit_batch_min_balance_checks_run_sequentially(store: &impl Store) {
+    let book = unique("book");
+    let asset_id = unique("USD");
+    store.register_asset(&asset(&asset_id)).await.unwrap();
+    let (cash_def, mut cash_cfg) = open_spec(&book, "cash", &asset_id, AccountKind::Asset);
+    cash_cfg.min_balance = Some(0);
+    store.open_account(&cash_def, &cash_cfg).await.unwrap();
+    let (exp_def, exp_cfg) = open_spec(&book, "expenses", &asset_id, AccountKind::Expense);
+    store.open_account(&exp_def, &exp_cfg).await.unwrap();
+    let (dep_def, dep_cfg) = open_spec(&book, "deposits", &asset_id, AccountKind::Liability);
+    store.open_account(&dep_def, &dep_cfg).await.unwrap();
+
+    let overdraft = transfer(&book, "seq-od", "cash", "expenses", &asset_id, 100);
+    let cover = transfer(&book, "seq-cover", "deposits", "cash", &asset_id, 500);
+    let results = store.commit_batch(&[overdraft, cover]).await;
+
+    match &results[0] {
+        Err(StoreError::ConstraintViolation { would_be, .. }) => assert_eq!(*would_be, -100),
+        other => panic!("expected ConstraintViolation for the overdraft, got {other:?}"),
+    }
+    let cover_seq = results[1].as_ref().expect("covering credit commits").seq;
+
+    // The overdraft wrote nothing; cash holds only the credit.
+    let bal = store
+        .balance(&account_id(&book, "cash"), None)
+        .await
+        .unwrap();
+    assert_eq!(bal.amount.minor(), 500);
+    let exp = store
+        .balance(&account_id(&book, "expenses"), None)
+        .await
+        .unwrap();
+    assert_eq!(exp.amount.minor(), 0);
+    // Gapless: the freed seq was reused — 3 AccountOpened events occupy
+    // seqs 1-3, the surviving draft takes 4.
+    assert_eq!(cover_seq, 4);
+}
+
 // --- multi-instance timestamp contract ----------------------------------
 
 /// `at` must be non-decreasing in seq order within a book. The timestamp is

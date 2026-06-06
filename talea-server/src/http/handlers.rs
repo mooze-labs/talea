@@ -64,6 +64,7 @@ pub struct HistoryQuery {
         (status = 408, description = "server-side timeout; safe to retry (idempotent on id)", body = ApiError),
         (status = 409, description = "same id, different definition", body = ApiError),
         (status = 415, description = "missing or wrong content-type", body = ApiError),
+        (status = 429, description = "pool saturation or write queue full; retry with the same idempotency key", body = ApiError),
         (status = 503, description = "saturated; honor Retry-After and retry", body = ApiError),
     ), security(("bearer" = [])), tag = "registry")]
 pub async fn register_asset(
@@ -93,6 +94,7 @@ pub async fn register_asset(
         (status = 408, description = "server-side timeout; safe to retry (idempotent on book+path)", body = ApiError),
         (status = 409, description = "same book+path, different definition", body = ApiError),
         (status = 415, description = "missing or wrong content-type", body = ApiError),
+        (status = 429, description = "pool saturation or write queue full; retry with the same idempotency key", body = ApiError),
         (status = 503, description = "saturated; honor Retry-After and retry", body = ApiError),
     ), security(("bearer" = [])), tag = "registry")]
 pub async fn open_account(
@@ -235,6 +237,7 @@ pub async fn post_batch_transactions(
         (status = 403, description = "token scope does not cover this book", body = ApiError),
         (status = 404, description = "unknown book or account", body = ApiError),
         (status = 408, description = "server-side timeout; safe to retry (read)", body = ApiError),
+        (status = 429, description = "pool saturation or write queue full; safe to retry (read)", body = ApiError),
         (status = 503, description = "saturated; honor Retry-After and retry", body = ApiError),
     ), security(("bearer" = [])), tag = "reads")]
 pub async fn get_balance(
@@ -267,6 +270,7 @@ pub async fn get_balance(
         (status = 403, description = "token scope does not cover this book", body = ApiError),
         (status = 404, description = "unknown book or account", body = ApiError),
         (status = 408, description = "server-side timeout; safe to retry (read)", body = ApiError),
+        (status = 429, description = "pool saturation or write queue full; safe to retry (read)", body = ApiError),
         (status = 503, description = "saturated; honor Retry-After and retry", body = ApiError),
     ), security(("bearer" = [])), tag = "reads")]
 pub async fn get_history(
@@ -299,6 +303,7 @@ pub async fn get_history(
         (status = 401, description = "missing or invalid bearer token", body = ApiError),
         (status = 404, description = "unknown transaction id, or one outside the token's book scope (indistinguishable by design: a 403 would confirm the id exists)", body = ApiError),
         (status = 408, description = "server-side timeout; safe to retry (read)", body = ApiError),
+        (status = 429, description = "pool saturation or write queue full; safe to retry (read)", body = ApiError),
         (status = 503, description = "saturated; honor Retry-After and retry", body = ApiError),
     ), security(("bearer" = [])), tag = "ledger")]
 pub async fn get_transaction(
@@ -330,6 +335,7 @@ pub async fn get_transaction(
         (status = 401, description = "missing or invalid bearer token", body = ApiError),
         (status = 403, description = "token scope does not cover this book", body = ApiError),
         (status = 408, description = "server-side timeout; safe to retry (read)", body = ApiError),
+        (status = 429, description = "pool saturation or write queue full; safe to retry (read)", body = ApiError),
         (status = 503, description = "saturated; honor Retry-After and retry", body = ApiError),
     ), security(("bearer" = [])), tag = "reads")]
 pub async fn get_trial_balance(
