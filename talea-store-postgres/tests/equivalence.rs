@@ -197,6 +197,13 @@ async fn commit_batch_equals_sequential_commit() {
             rel(&seqs_b),
             "round {round}: seq order diverged"
         );
+        // Normalize updated_seq the same way as seqs: subtract each book's
+        // minimum committed seq in this round. Both books have identical
+        // setup-event counts and the same draft order, so an account's
+        // last-touching seq, relative to its book's first committed seq this
+        // round, must match across books.
+        let base_a = seqs_a.iter().min().copied().unwrap_or(0);
+        let base_b = seqs_b.iter().min().copied().unwrap_or(0);
         for path in ["cash", "deposits", "expenses"] {
             let a = store
                 .balance(&conformance::account_id(&book_a, path), None)
@@ -211,11 +218,34 @@ async fn commit_batch_equals_sequential_commit() {
                 b.amount.minor(),
                 "round {round}: {path} balance diverged"
             );
+            // updated_seq is 0 for accounts no committed draft touched this
+            // round (and across rounds, since each book is fresh); compare
+            // raw 0s directly, and normalized values when touched.
+            if a.updated_seq == 0 || b.updated_seq == 0 {
+                assert_eq!(
+                    a.updated_seq, b.updated_seq,
+                    "round {round}: {path} updated_seq touched-ness diverged"
+                );
+            } else {
+                assert_eq!(
+                    a.updated_seq - base_a,
+                    b.updated_seq - base_b,
+                    "round {round}: {path} updated_seq diverged"
+                );
+            }
         }
     }
 
     eprintln!(
         "equivalence summary: Fast={fast_count} Fallback={fallback_count} total={}",
         fast_count + fallback_count
+    );
+    assert!(
+        fast_count > 0,
+        "generator drift: no round took the fast path"
+    );
+    assert!(
+        fallback_count > 0,
+        "generator drift: no round took the fallback path"
     );
 }

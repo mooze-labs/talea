@@ -16,12 +16,26 @@ use talea_core::store::{Committed, StoreError};
 use talea_core::types::{Transaction, TxId};
 use uuid::Uuid;
 
-use crate::{AccountRow, Pending, effective, fold_postings, load_accounts, notify};
+use crate::{AccountRow, effective, fold_postings, load_accounts, notify};
 
 struct FastDraft<'a> {
     input_idx: usize,
     tx: &'a Transaction,
-    pendings: Vec<Pending>,
+}
+
+/// One account's accumulated contribution across the write set, built in a
+/// single pass over the drafts. The draft index is the position in `writes`
+/// (0-based); drafts get seqs `first..=last` in that order, so the seq for a
+/// draft index is `first + idx`.
+struct AcctAgg {
+    /// Sum of all per-draft deltas touching this account.
+    total_delta: i64,
+    /// Per-draft (write-index, delta) in draft order — the prefix-check
+    /// replays these to validate sequential min_balance semantics.
+    steps: Vec<(usize, i64)>,
+    /// The highest write-index that touched this account: its seq is the
+    /// account's last-touching seq (updated_seq).
+    last_touch_idx: usize,
 }
 
 /// Try the set-based path. `None` means "not eligible / aborted — run the
@@ -74,11 +88,15 @@ pub(crate) async fn try_commit_batch_fast(
     acct_keys.dedup();
     let accounts: HashMap<String, AccountRow> = load_accounts(&mut db, &acct_keys).await.ok()?;
 
-    // 3. Build the write set. In-batch duplicates resolve to the first
-    //    occurrence; per-draft validation failures abort to the fallback.
+    // 3. Build the write set in a single pass. In-batch duplicates resolve to
+    //    the first occurrence; per-draft validation failures abort to the
+    //    fallback. The same pass accumulates the per-account aggregate
+    //    (delta, ordered steps, last-touching draft index) so later stages
+    //    never re-walk writes×pendings or recompute `to_key()`.
     let mut writes: Vec<FastDraft<'_>> = Vec::with_capacity(txs.len());
     let mut dedup_slots: Vec<(usize, String)> = Vec::new();
     let mut seen_in_batch: HashSet<&str> = HashSet::new();
+    let mut agg: HashMap<String, AcctAgg> = HashMap::new();
     for (i, tx) in txs.iter().enumerate() {
         let key = tx.idempotency_key.0.as_str();
         if by_key.contains_key(key) || seen_in_batch.contains(key) {
@@ -89,24 +107,45 @@ pub(crate) async fn try_commit_batch_fast(
             Ok(p) => p,
             Err(_) => return None, // unknown account / asset mismatch / overflow
         };
+        let draft_idx = writes.len();
+        for p in &pendings {
+            // `to_key()` computed ONCE per pending here, then reused.
+            let entry = agg.entry(p.account.to_key()).or_insert(AcctAgg {
+                total_delta: 0,
+                steps: Vec::new(),
+                last_touch_idx: draft_idx,
+            });
+            entry.total_delta += p.delta;
+            entry.steps.push((draft_idx, p.delta));
+            entry.last_touch_idx = draft_idx; // drafts visited in order
+        }
         seen_in_batch.insert(key);
-        writes.push(FastDraft {
-            input_idx: i,
-            tx,
-            pendings,
-        });
+        writes.push(FastDraft { input_idx: i, tx });
     }
 
     let mut results: Vec<Option<Result<Committed, StoreError>>> =
         (0..txs.len()).map(|_| None).collect();
 
-    if !writes.is_empty() {
-        write_set(&mut db, book, &writes, &accounts, &mut by_key, &mut results).await?;
+    if writes.is_empty() {
+        // All drafts deduped: the pre-check already read everything durable,
+        // so there is nothing to commit. Drop the read-only transaction
+        // (rollback on drop) rather than paying an empty COMMIT round trip.
+        drop(db);
+    } else {
+        write_set(
+            &mut db,
+            book,
+            &writes,
+            &accounts,
+            &agg,
+            &mut by_key,
+            &mut results,
+        )
+        .await?;
+        // A failed COMMIT lands here too: nothing became durable, so the whole
+        // batch re-runs via the fallback — safe, at one wasted round trip group.
+        db.commit().await.ok()?;
     }
-
-    // A failed COMMIT lands here too: nothing became durable, so the whole
-    // batch re-runs via the fallback — safe, at the cost of one wasted round trip group.
-    db.commit().await.ok()?;
 
     for (i, key) in &dedup_slots {
         results[*i] = Some(Ok(by_key[key].clone()));
@@ -127,6 +166,7 @@ async fn write_set(
     book: &talea_core::types::Book,
     writes: &[FastDraft<'_>],
     accounts: &HashMap<String, AccountRow>,
+    agg: &HashMap<String, AcctAgg>,
     by_key: &mut HashMap<String, Committed>,
     results: &mut [Option<Result<Committed, StoreError>>],
 ) -> Option<()> {
@@ -146,26 +186,30 @@ async fn write_set(
     let last: i64 = row.get("next_seq");
     let at: DateTime<Utc> = row.get("at");
     let first = last - n + 1;
+    // A draft at write-index `idx` gets seq `first + idx`.
+    let seq_of = |idx: usize| first + idx as i64;
 
-    // 5. Balances: aggregate per account, one UNNEST upsert.
+    // 5. Balances: one UNNEST upsert from the pre-built aggregate. Each row
+    //    carries its own updated_seq — the seq of the LAST draft that touched
+    //    the account — so a non-final draft's account records its own seq, not
+    //    the batch max (matches write_transaction's per-draft binding).
     // MIRROR: keep column shape in sync with write_transaction's balances upsert (lib.rs).
-    let mut agg: HashMap<String, i64> = HashMap::new();
-    for w in writes {
-        for p in &w.pendings {
-            *agg.entry(p.account.to_key()).or_insert(0) += p.delta;
-        }
-    }
     let mut b_keys: Vec<String> = agg.keys().cloned().collect();
     b_keys.sort(); // deterministic lock order, mirrors write_transaction
     let b_assets: Vec<String> = b_keys
         .iter()
         .map(|k| accounts[k].asset.as_str().to_string())
         .collect();
-    let b_deltas: Vec<i64> = b_keys.iter().map(|k| agg[k]).collect();
+    let b_deltas: Vec<i64> = b_keys.iter().map(|k| agg[k].total_delta).collect();
+    let b_updated: Vec<i64> = b_keys
+        .iter()
+        .map(|k| seq_of(agg[k].last_touch_idx))
+        .collect();
     let rows = sqlx::query(
         "INSERT INTO balances (account_key, asset, balance, updated_seq)
-         SELECT t.account_key, t.asset, t.delta, $4
-         FROM UNNEST($1::text[], $2::text[], $3::int8[]) AS t(account_key, asset, delta)
+         SELECT t.account_key, t.asset, t.delta, t.updated_seq
+         FROM UNNEST($1::text[], $2::text[], $3::int8[], $4::int8[])
+              AS t(account_key, asset, delta, updated_seq)
          ON CONFLICT (account_key) DO UPDATE
              SET balance = balances.balance + EXCLUDED.balance,
                  updated_seq = EXCLUDED.updated_seq
@@ -174,7 +218,7 @@ async fn write_set(
     .bind(&b_keys)
     .bind(&b_assets)
     .bind(&b_deltas)
-    .bind(last)
+    .bind(&b_updated)
     .fetch_all(&mut **db)
     .await
     .ok()?;
@@ -184,21 +228,20 @@ async fn write_set(
         .collect();
 
     // 6. min_balance prefix check: sequential semantics need the RUNNING
-    //    balance after each draft, not just the final value.
+    //    balance after each draft, not just the final value. Replay the
+    //    account's ordered steps (already in draft order) against its
+    //    pre-batch balance.
     for key in &b_keys {
         let acct = &accounts[key];
         let Some(min) = acct.min_balance else {
             continue;
         };
-        let mut running = finals[key] - agg[key]; // pre-batch balance
-        for w in writes {
-            for p in &w.pendings {
-                if p.account.to_key() == *key {
-                    running += p.delta;
-                    if effective(running, &acct.normal_side) < min {
-                        return None; // fallback attributes the violation
-                    }
-                }
+        let entry = &agg[key];
+        let mut running = finals[key] - entry.total_delta; // pre-batch balance
+        for (_idx, delta) in &entry.steps {
+            running += delta;
+            if effective(running, &acct.normal_side) < min {
+                return None; // fallback attributes the violation
             }
         }
     }
@@ -282,13 +325,20 @@ async fn write_set(
     .ok()?;
 
     // events: one row per draft; same kind; payload = full transaction.
+    // Build the events once (the per-payload Transaction clone is
+    // unavoidable — LedgerEvent owns its Transaction) and read `kind()` from
+    // the first by reference, avoiding a second clone just to name the kind.
     // MIRROR: keep column shape in sync with insert_event (lib.rs).
-    let e_payloads: Vec<serde_json::Value> = writes
+    let events: Vec<LedgerEvent> = writes
         .iter()
-        .map(|w| serde_json::to_value(LedgerEvent::TransactionPosted(w.tx.clone())))
+        .map(|w| LedgerEvent::TransactionPosted(w.tx.clone()))
+        .collect();
+    let kind = events[0].kind();
+    let e_payloads: Vec<serde_json::Value> = events
+        .iter()
+        .map(serde_json::to_value)
         .collect::<Result<_, _>>()
         .ok()?;
-    let kind = LedgerEvent::TransactionPosted(writes[0].tx.clone()).kind();
     sqlx::query(
         "INSERT INTO events (book, seq, at, kind, payload)
          SELECT $1, t.seq, $2, $3, t.payload
