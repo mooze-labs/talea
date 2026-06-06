@@ -7,7 +7,6 @@ use talea_core::store::{Store, StoreError};
 
 use crate::config::Config;
 use crate::http::auth::AuthConfig;
-use crate::http::routes::router;
 use crate::service::LedgerService;
 
 /// Connect to the store, bind, and serve until ctrl-c.
@@ -80,11 +79,12 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
             gauge!("talea_write_queue_depth").set(queued as f64);
         }
     });
-    let app = router(
+    let app = crate::http::routes::router_with_batch_max(
         service,
         AuthConfig { entries },
         config.max_inflight,
         backend,
+        config.http_batch_max,
     );
 
     let listener = tokio::net::TcpListener::bind(config.bind).await?;

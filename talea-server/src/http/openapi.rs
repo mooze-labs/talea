@@ -20,6 +20,7 @@ use talea_core::api::*;
         crate::http::handlers::register_asset,
         crate::http::handlers::open_account,
         crate::http::handlers::post_transaction,
+        crate::http::handlers::post_batch_transactions,
         crate::http::handlers::get_transaction,
         crate::http::handlers::get_balance,
         crate::http::handlers::get_history,
