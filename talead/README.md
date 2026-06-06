@@ -30,6 +30,7 @@ Loads `.env` if present (real environment variables win), then runs the server f
 | `TALEA_API_TOKEN` | unset | Bearer token; unset means OPEN dev mode (logged loudly) |
 | `TALEA_DB_POOL` | `10` | Connection pool size |
 | `TALEA_MAX_INFLIGHT` | `256` | In-flight request cap; excess sheds as 503 |
+| `TALEA_HTTP_BATCH_MAX` | `500` | Max drafts per `POST /v1/transactions/batch` request |
 | `TALEA_LOG_*` | unset | Append-log store tuning (snapshot cadence, idem cap, segment size) — see [`talea-store-log`](../talea-store-log/README.md) |
 
 Talk to it with the `talea` CLI or SDK from [`talea-client`](../talea-client/README.md). See the [workspace README](../README.md) for a full quickstart.
