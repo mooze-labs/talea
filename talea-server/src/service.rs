@@ -165,6 +165,7 @@ fn map_store_err(e: StoreError) -> ApiError {
                     cur.downcast_ref::<sqlx::Error>(),
                     Some(sqlx::Error::PoolTimedOut)
                 ) {
+                    tracing::warn!(error = %e, "pool acquire timed out; answering 429");
                     return ApiError::Overloaded;
                 }
                 src = cur.source();
@@ -269,8 +270,14 @@ impl LedgerApi for LedgerService {
                 });
             }
             Err(SubmitError::Store(e)) => {
-                metrics::counter!("talea_commits_total", "result" => "rejected").increment(1);
-                return Err(map_store_err(e));
+                let api_err = map_store_err(e);
+                let label = if matches!(api_err, ApiError::Overloaded) {
+                    "overloaded"
+                } else {
+                    "rejected"
+                };
+                metrics::counter!("talea_commits_total", "result" => label).increment(1);
+                return Err(api_err);
             }
         };
         metrics::histogram!("talea_commit_duration_seconds")
