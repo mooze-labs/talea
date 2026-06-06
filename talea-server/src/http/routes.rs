@@ -27,6 +27,8 @@ use crate::service::LedgerService;
 #[derive(Clone)]
 pub struct AppState {
     pub service: Arc<LedgerService>,
+    /// Cap for POST /v1/transactions/batch; from TALEA_HTTP_BATCH_MAX.
+    pub batch_max: usize,
 }
 
 pub async fn handle_middleware_error(err: tower::BoxError) -> Response {
@@ -62,7 +64,17 @@ pub fn router(
     max_inflight: usize,
     backend: &'static str,
 ) -> Router {
-    let state = AppState { service };
+    router_with_batch_max(service, auth, max_inflight, backend, 500)
+}
+
+pub fn router_with_batch_max(
+    service: Arc<LedgerService>,
+    auth: AuthConfig,
+    max_inflight: usize,
+    backend: &'static str,
+    batch_max: usize,
+) -> Router {
+    let state = AppState { service, batch_max };
 
     // SSE is long-lived: no request timeout. Everything else gets one.
     // NOTE: the auth layer wraps REGISTERED routes only — an unmatched path
@@ -71,6 +83,10 @@ pub fn router(
         .route("/assets", post(handlers::register_asset))
         .route("/accounts", post(handlers::open_account))
         .route("/transactions", post(handlers::post_transaction))
+        .route(
+            "/transactions/batch",
+            post(handlers::post_batch_transactions),
+        )
         .route("/transactions/{tx_id}", get(handlers::get_transaction))
         .route(
             "/books/{book}/accounts/{path}/balance",

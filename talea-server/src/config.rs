@@ -18,6 +18,9 @@ pub struct Config {
     /// Path to a TOML file of scoped bearer tokens (see README "Scoped
     /// tokens"). Additive with TALEA_API_TOKEN.
     pub tokens_file: Option<String>,
+    /// Maximum number of drafts accepted by POST /v1/transactions/batch.
+    /// Requests that exceed this cap are rejected with 400. Default: 500.
+    pub http_batch_max: usize,
 
     // ---- log:// store tuning -----------------------------------------------
     /// Events between automatic snapshots (0 = disabled). Only applies when
@@ -83,6 +86,7 @@ impl Config {
             })?;
         let write_queue_depth = Self::parse_nonzero(&get, "TALEA_WRITE_QUEUE_DEPTH", 256)?;
         let write_batch_max = Self::parse_nonzero(&get, "TALEA_WRITE_BATCH_MAX", 64)?;
+        let http_batch_max = Self::parse_nonzero(&get, "TALEA_HTTP_BATCH_MAX", 500)?;
         let log_snapshot_every = get("TALEA_LOG_SNAPSHOT_EVERY")
             .map(|v| v.parse::<u64>())
             .transpose()
@@ -114,6 +118,7 @@ impl Config {
             write_queue_depth,
             write_batch_max,
             tokens_file: get("TALEA_TOKENS_FILE"),
+            http_batch_max,
             log_snapshot_every,
             log_idem_hot_cap,
             log_segment_max,
@@ -249,6 +254,28 @@ mod tests {
             ]),
             Err(ConfigError::Invalid {
                 var: "TALEA_WRITE_BATCH_MAX",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn http_batch_max_default_and_override() {
+        let c = cfg(&[("TALEA_DB_URL", "sqlite://x.db")]).unwrap();
+        assert_eq!(c.http_batch_max, 500);
+        let c = cfg(&[
+            ("TALEA_DB_URL", "sqlite://x.db"),
+            ("TALEA_HTTP_BATCH_MAX", "100"),
+        ])
+        .unwrap();
+        assert_eq!(c.http_batch_max, 100);
+        assert!(matches!(
+            cfg(&[
+                ("TALEA_DB_URL", "sqlite://x.db"),
+                ("TALEA_HTTP_BATCH_MAX", "0")
+            ]),
+            Err(ConfigError::Invalid {
+                var: "TALEA_HTTP_BATCH_MAX",
                 ..
             })
         ));

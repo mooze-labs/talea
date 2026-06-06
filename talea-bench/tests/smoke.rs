@@ -31,6 +31,7 @@ async fn post_one_book_smoke() {
         post_one_book::Opts {
             concurrencies: vec![2],
             postings_per_tx: 2,
+            batch_size: 1,
         },
     )
     .await

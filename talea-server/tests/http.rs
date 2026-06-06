@@ -340,6 +340,7 @@ async fn openapi_spec_is_complete_and_open() {
         "/v1/assets",
         "/v1/accounts",
         "/v1/transactions",
+        "/v1/transactions/batch",
         "/v1/transactions/{tx_id}",
         "/v1/books/{book}/accounts/{path}/balance",
         "/v1/books/{book}/accounts/{path}/history",
@@ -355,6 +356,7 @@ async fn openapi_spec_is_complete_and_open() {
     let schemas = spec["components"]["schemas"].as_object().expect("schemas");
     for schema in [
         "ApiError",
+        "BatchItem",
         "EventEnvelope",
         "Posted",
         "TransactionDraft",
@@ -833,6 +835,249 @@ mod overload {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"], "overloaded");
     }
+}
+
+// ---- batch helpers / tests --------------------------------------------------
+
+/// App with a custom TALEA_HTTP_BATCH_MAX value (for cap tests).
+async fn batch_capped_app(batch_max: usize) -> axum::Router {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let store = SqliteTaleaStore::new(pool);
+    store.migrate().await.unwrap();
+    let service = Arc::new(LedgerService::new(Arc::new(store)));
+    talea_server::http::routes::router_with_batch_max(
+        service,
+        AuthConfig::open(),
+        256,
+        "sqlite",
+        batch_max,
+    )
+}
+
+fn draft(book: &str, idem: &str, minor: i64) -> serde_json::Value {
+    serde_json::json!({
+        "book": book,
+        "idempotency_key": idem,
+        "postings": [
+            {"account":"deposits","amount":{"minor":minor,"asset":"USD"},"direction":"credit"},
+            {"account":"cash","amount":{"minor":minor,"asset":"USD"},"direction":"debit"}
+        ]
+    })
+}
+
+fn draft_unbalanced(book: &str, idem: &str) -> serde_json::Value {
+    serde_json::json!({
+        "book": book,
+        "idempotency_key": idem,
+        "postings": [
+            {"account":"deposits","amount":{"minor":100,"asset":"USD"},"direction":"credit"},
+            {"account":"cash","amount":{"minor":90,"asset":"USD"},"direction":"debit"}
+        ]
+    })
+}
+
+fn book_account(book: &str, path: &str, kind: &str, side: &str) -> serde_json::Value {
+    serde_json::json!({"book": book, "path": path, "asset": "USD", "kind": kind, "normal_side": side})
+}
+
+/// Register USD + open cash/deposits in each listed book.
+async fn setup_books(app: &axum::Router, books: &[&str]) {
+    let (s, _) = send(app, "POST", "/v1/assets", None, Some(usd())).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "register USD");
+    for &book in books {
+        let (s, _) = send(
+            app,
+            "POST",
+            "/v1/accounts",
+            None,
+            Some(book_account(book, "cash", "asset", "debit")),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NO_CONTENT, "open {book}/cash");
+        let (s, _) = send(
+            app,
+            "POST",
+            "/v1/accounts",
+            None,
+            Some(book_account(book, "deposits", "liability", "credit")),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NO_CONTENT, "open {book}/deposits");
+    }
+}
+
+/// 1. Happy path: 3 drafts across two books → 200, positional Posted bodies.
+#[tokio::test]
+async fn batch_happy_path_mixed_books() {
+    let app = app(None).await;
+    setup_books(&app, &["alpha", "beta"]).await;
+
+    let body = serde_json::json!([
+        draft("alpha", "b1", 1000),
+        draft("beta", "b2", 2000),
+        draft("alpha", "b3", 3000),
+    ]);
+    let (s, arr) = send(&app, "POST", "/v1/transactions/batch", None, Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{arr}");
+
+    let items = arr.as_array().expect("expected array");
+    assert_eq!(items.len(), 3);
+    // all three succeeded
+    for (i, item) in items.iter().enumerate() {
+        assert!(item.get("error").is_none(), "slot {i} has error: {item}");
+        assert!(item["tx_id"].is_string(), "slot {i} missing tx_id: {item}");
+        assert_eq!(item["deduplicated"], false, "slot {i}");
+    }
+    // both alpha drafts committed in the same book: seqs must be distinct
+    // and positive (ordering may vary with concurrent dispatch)
+    let seq0 = items[0]["seq"].as_i64().unwrap();
+    let seq2 = items[2]["seq"].as_i64().unwrap();
+    assert!(seq0 > 0, "alpha slot 0 seq must be positive");
+    assert!(seq2 > 0, "alpha slot 2 seq must be positive");
+    assert_ne!(seq0, seq2, "alpha seqs must be distinct");
+}
+
+/// 2. Partial failure: one unbalanced draft among valid ones.
+#[tokio::test]
+async fn batch_partial_failure_slot_isolation() {
+    let app = app(None).await;
+    setup_books(&app, &["gamma"]).await;
+
+    let body = serde_json::json!([
+        draft("gamma", "pf1", 500),
+        draft_unbalanced("gamma", "pf2"),
+        draft("gamma", "pf3", 700),
+    ]);
+    let (s, arr) = send(&app, "POST", "/v1/transactions/batch", None, Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{arr}");
+
+    let items = arr.as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    // slot 0 and 2 succeed
+    assert!(items[0].get("error").is_none(), "slot 0: {}", items[0]);
+    assert!(items[2].get("error").is_none(), "slot 2: {}", items[2]);
+    // slot 1 carries the error envelope
+    assert_eq!(items[1]["error"], "unbalanced", "slot 1: {}", items[1]);
+}
+
+/// 3. Scoped token: book A only; batch with A and B drafts →
+///    A slots Posted, B slots `{"error":"forbidden","book":"B"}`.
+#[tokio::test]
+async fn batch_scoped_token_per_draft_403() {
+    let app = scoped_app(&[("admin", &["*"], "rw"), ("scoped", &["book-a"], "rw")]).await;
+    // scoped_app has auth enabled — all setup must use admin token.
+    let (s, _) = send(&app, "POST", "/v1/assets", Some("admin"), Some(usd())).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "register USD");
+    for (book, path, kind, side) in [
+        ("book-a", "cash", "asset", "debit"),
+        ("book-a", "deposits", "liability", "credit"),
+        ("book-b", "cash", "asset", "debit"),
+        ("book-b", "deposits", "liability", "credit"),
+    ] {
+        let (s, _) = send(
+            &app,
+            "POST",
+            "/v1/accounts",
+            Some("admin"),
+            Some(book_account(book, path, kind, side)),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NO_CONTENT, "setup {book}/{path}");
+    }
+
+    let body = serde_json::json!([
+        draft("book-a", "sc1", 100),
+        draft("book-b", "sc2", 200),
+        draft("book-a", "sc3", 300),
+    ]);
+    let (s, arr) = send(
+        &app,
+        "POST",
+        "/v1/transactions/batch",
+        Some("scoped"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{arr}");
+
+    let items = arr.as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    // slots 0 and 2: in scope → Posted
+    assert!(items[0].get("error").is_none(), "slot 0: {}", items[0]);
+    assert!(items[2].get("error").is_none(), "slot 2: {}", items[2]);
+    // slot 1: book-b is out of scope → 403 envelope in the slot
+    assert_eq!(items[1]["error"], "forbidden", "slot 1: {}", items[1]);
+    assert_eq!(items[1]["book"], "book-b", "slot 1 book: {}", items[1]);
+}
+
+/// 4. Cap: batch_max=2; 3 drafts → 400 envelope naming cap and length.
+#[tokio::test]
+async fn batch_cap_exceeded_is_400() {
+    let app = batch_capped_app(2).await;
+    setup_books(&app, &["captest"]).await;
+
+    let body = serde_json::json!([
+        draft("captest", "cap1", 100),
+        draft("captest", "cap2", 200),
+        draft("captest", "cap3", 300),
+    ]);
+    let (s, body_val) = send(&app, "POST", "/v1/transactions/batch", None, Some(body)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body_val}");
+    assert_eq!(body_val["error"], "invalid_draft", "{body_val}");
+    let reason = body_val["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("3"),
+        "reason should mention length: {reason}"
+    );
+    assert!(reason.contains("2"), "reason should mention cap: {reason}");
+}
+
+/// 5. Empty array → 200 [].
+#[tokio::test]
+async fn batch_empty_array_ok() {
+    let app = app(None).await;
+    let (s, arr) = send(
+        &app,
+        "POST",
+        "/v1/transactions/batch",
+        None,
+        Some(serde_json::json!([])),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{arr}");
+    assert_eq!(arr.as_array().unwrap().len(), 0);
+}
+
+/// 6a. Malformed body (not an array) → 400.
+/// 6b. Wrong content type → 415.
+#[tokio::test]
+async fn batch_bad_request_shapes() {
+    let app = app(None).await;
+
+    // not a JSON array — object instead
+    let (s, body) = send(
+        &app,
+        "POST",
+        "/v1/transactions/batch",
+        None,
+        Some(serde_json::json!({"book": "x"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "invalid_draft");
+
+    // wrong content-type → 415
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/transactions/batch")
+        .body(Body::from(serde_json::json!([]).to_string()))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
 
 /// Decode a response body as JSON (null if empty/undecodable) — for tests

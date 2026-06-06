@@ -42,6 +42,11 @@ enum Cmd {
         concurrency: Vec<usize>,
         #[arg(long, default_value_t = 2)]
         postings_per_tx: usize,
+        /// Drafts per HTTP call (default 1 = single POST /transactions).
+        /// N>1 calls POST /transactions/batch; accounting stays per-draft
+        /// so throughput numbers are directly comparable across batch sizes.
+        #[arg(long, default_value_t = 1)]
+        batch_size: usize,
     },
     /// Cross-book scaling: fixed per-book concurrency, sweep book count
     PostManyBooks {
@@ -154,10 +159,12 @@ async fn main() {
             Cmd::PostOneBook {
                 concurrency,
                 postings_per_tx,
+                batch_size,
             } => {
                 let opts = post_one_book::Opts {
                     concurrencies: concurrency,
                     postings_per_tx,
+                    batch_size,
                 };
                 let config = run_config(&ctx, &opts);
                 (
@@ -305,5 +312,24 @@ mod tests {
         assert_eq!(bigger_out, PathBuf::from("summary-bigger.json"));
         assert_eq!(smaller_out, PathBuf::from("summary-smaller.json"));
         assert_eq!(reports.len(), 2);
+    }
+
+    #[test]
+    fn post_one_book_default_batch_size_is_one() {
+        let cli = Cli::try_parse_from(["talea-bench", "post-one-book"]).unwrap();
+        let Cmd::PostOneBook { batch_size, .. } = cli.cmd else {
+            panic!("expected post-one-book");
+        };
+        assert_eq!(batch_size, 1);
+    }
+
+    #[test]
+    fn post_one_book_accepts_batch_size() {
+        let cli =
+            Cli::try_parse_from(["talea-bench", "post-one-book", "--batch-size", "16"]).unwrap();
+        let Cmd::PostOneBook { batch_size, .. } = cli.cmd else {
+            panic!("expected post-one-book");
+        };
+        assert_eq!(batch_size, 16);
     }
 }

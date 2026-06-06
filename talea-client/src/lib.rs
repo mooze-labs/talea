@@ -217,6 +217,32 @@ impl LedgerApi for TaleaClient {
             .await
     }
 
+    /// Post a batch via one `POST /v1/transactions/batch` call.
+    ///
+    /// Empty input returns an empty `Vec` immediately without any HTTP call.
+    ///
+    /// **Whole-request failure** (401 / 415 / 400 / transport) yields the
+    /// same error in every slot.  Callers can detect this via all-slots-
+    /// identical.  Retrying the whole batch is always safe because idempotency
+    /// keys dedup per draft: any slot that already committed returns
+    /// `deduplicated: true` instead of double-posting.
+    ///
+    /// **Retry**: the whole request goes through the standard 503/408/transport
+    /// retry wrapper — safe for the same dedup reason.
+    async fn post_batch(&self, drafts: Vec<TransactionDraft>) -> Vec<ApiResult<Posted>> {
+        if drafts.is_empty() {
+            return Vec::new();
+        }
+        let n = drafts.len();
+        let url = match self.http.url(&["transactions", "batch"]) {
+            Ok(u) => u,
+            Err(e) => return std::iter::repeat_with(|| Err(e.clone())).take(n).collect(),
+        };
+        self.http
+            .execute_batch(|| self.http.client.post(url.clone()).json(&drafts), n)
+            .await
+    }
+
     async fn subscribe(&self, book: &str, from: Seq) -> ApiResult<EventStream> {
         sse::subscribe(&self.http, book, from)
     }

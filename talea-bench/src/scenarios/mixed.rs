@@ -195,6 +195,7 @@ pub async fn run(ctx: &Ctx, opts: Opts) -> Result<Vec<StepJson>, String> {
                 errors: HashMap::new(),
                 invalid: false,
                 latency,
+                batch_size: 1,
             })
         } else {
             None

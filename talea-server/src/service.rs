@@ -416,6 +416,17 @@ impl LedgerApi for LedgerService {
         })
     }
 
+    /// Submits all drafts concurrently via `join_all` over individual `post`
+    /// calls.  This is correct because concurrent single posts follow the
+    /// exact same path as concurrent HTTP requests: they land in the
+    /// per-book `WriteRouter` queue together and are group-committed by the
+    /// same committer task.  The router's idempotency deduplication then
+    /// handles any duplicate keys across the batch the same way it would
+    /// handle two simultaneous HTTP singles.
+    async fn post_batch(&self, drafts: Vec<TransactionDraft>) -> Vec<ApiResult<Posted>> {
+        futures::future::join_all(drafts.into_iter().map(|d| self.post(d))).await
+    }
+
     async fn subscribe(&self, book: &str, from: Seq) -> ApiResult<EventStream> {
         let b = parse_book_lax(book)?;
         let stream = self.store.subscribe(&b, from);
