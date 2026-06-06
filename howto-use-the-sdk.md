@@ -82,7 +82,28 @@ futures = "0.3"
 
    Re-running this with the same key returns the original commit with `deduplicated: true` — call it again on any doubt.
 
-4. Read:
+4. Post a batch. Use `post_batch` when you have multiple independent transactions to commit — bulk ingestion, backfills, processing a queue of events — and want to minimize round-trips. Do not use it on interactive paths where each draft depends on the result of the previous one; client-side batching adds client-side latency that the caller has to absorb.
+
+   ```rust
+   let results: Vec<ApiResult<Posted>> = client.post_batch(vec![
+       TransactionDraft { book: "demo".into(), idempotency_key: "batch-a".into(), /* ... */ },
+       TransactionDraft { book: "fees".into(), idempotency_key: "batch-b".into(), /* ... */ },
+   ]).await;
+
+   for (i, result) in results.iter().enumerate() {
+       match result {
+           Ok(posted) => println!("slot {i}: seq {} deduplicated {}", posted.seq, posted.deduplicated),
+           Err(e) => eprintln!("slot {i}: {:?}", e),
+       }
+   }
+   ```
+
+   - `results[i]` always corresponds to `drafts[i]`. A failure in one slot does not affect any other slot.
+   - Drafts may span different books. Each draft's idempotency key deduplicates independently, as it would through `post`.
+   - An empty input returns an empty `Vec` immediately without any network call.
+   - **Whole-request failure** — a `401`, `415`, `400`, or transport error that prevents the server from processing the batch at all is replicated into every slot as the same `Err`. You can detect this because all slots carry an identical error. Retrying the whole batch is safe: any draft that already committed returns `deduplicated: true` rather than double-posting.
+
+5. Read:
 
    ```rust
    let bal = client.balance("demo", "cash", None).await?;       // live
@@ -97,7 +118,7 @@ futures = "0.3"
    }
    ```
 
-5. Stream events. `subscribe` resumes automatically across disconnects (cursor via `Last-Event-ID`), and its retry budget resets on every received event, so long-lived streams survive unlimited transient drops:
+6. Stream events. `subscribe` resumes automatically across disconnects (cursor via `Last-Event-ID`), and its retry budget resets on every received event, so long-lived streams survive unlimited transient drops:
 
    ```rust
    use futures::StreamExt;
@@ -113,7 +134,7 @@ futures = "0.3"
 
    Delivery is at-least-once: dedupe on `env.seq` if you checkpoint.
 
-6. Match errors where it matters. Everything is one enum:
+7. Match errors where it matters. Everything is one enum:
 
    ```rust
    use talea_core::api::ApiError;
