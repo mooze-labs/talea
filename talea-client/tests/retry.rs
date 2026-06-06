@@ -11,6 +11,10 @@ use axum::response::IntoResponse;
 use talea_client::*;
 
 async fn spawn_flaky(fail_n: u32) -> (String, Arc<AtomicU32>) {
+    spawn_flaky_status(StatusCode::SERVICE_UNAVAILABLE, fail_n).await
+}
+
+async fn spawn_flaky_status(fail_status: StatusCode, fail_n: u32) -> (String, Arc<AtomicU32>) {
     let count = Arc::new(AtomicU32::new(0));
     let counter = count.clone();
     let app = axum::Router::new().route(
@@ -19,12 +23,7 @@ async fn spawn_flaky(fail_n: u32) -> (String, Arc<AtomicU32>) {
             let counter = counter.clone();
             async move {
                 if counter.fetch_add(1, Ordering::SeqCst) < fail_n {
-                    (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        [(header::RETRY_AFTER, "0")],
-                        "overloaded",
-                    )
-                        .into_response()
+                    (fail_status, [(header::RETRY_AFTER, "0")], "overloaded").into_response()
                 } else {
                     StatusCode::NO_CONTENT.into_response()
                 }
@@ -67,6 +66,19 @@ async fn retries_503_until_success() {
         .unwrap();
     client.register_asset(usd()).await.unwrap();
     assert_eq!(count.load(Ordering::SeqCst), 3); // 2 failures + 1 success
+}
+
+#[tokio::test]
+async fn retries_429_until_success() {
+    // 429 backpressure (e.g. DB pool saturation) is retried just like 503,
+    // honoring Retry-After. First response fails, second succeeds.
+    let (url, count) = spawn_flaky_status(StatusCode::TOO_MANY_REQUESTS, 1).await;
+    let client = TaleaClient::builder(&url)
+        .retry(fast_retry(3))
+        .build()
+        .unwrap();
+    client.register_asset(usd()).await.unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 2); // 1 failure + 1 success
 }
 
 #[tokio::test]

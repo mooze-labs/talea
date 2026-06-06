@@ -118,7 +118,7 @@ Response `200` (`Posted`):
 }
 ```
 
-Other responses: `400 unbalanced | invalid_amount | invalid_draft` · `401` · `403 forbidden` (token scope does not cover the draft's book) · `404 unknown_account` · `409 constraint_violation` · `415` · `429 overloaded` (+ `Retry-After: 1` — the per-book write queue is full; retry with the **same** idempotency key).
+Other responses: `400 unbalanced | invalid_amount | invalid_draft` · `401` · `403 forbidden` (token scope does not cover the draft's book) · `404 unknown_account` · `409 constraint_violation` · `415` · `429 overloaded` (+ `Retry-After: 1` — the per-book write queue is full, or the DB pool is saturated; retry with the **same** idempotency key).
 
 ### `GET /v1/books/{book}/accounts/{path}/balance?as_of=`
 
@@ -136,7 +136,7 @@ Response `200` (`BalanceView`):
 }
 ```
 
-`balance` is normal-side adjusted (a liability holding 100 reads `"+100"`, not `-100`) and rendered with the asset's precision. Other responses: `401` · `403 forbidden` (book outside the token's scope) · `404 unknown_account`.
+`balance` is normal-side adjusted (a liability holding 100 reads `"+100"`, not `-100`) and rendered with the asset's precision. Other responses: `401` · `403 forbidden` (book outside the token's scope) · `404 unknown_account` · `429 overloaded` (DB pool saturation; carries `Retry-After: 1`).
 
 ### `GET /v1/books/{book}/accounts/{path}/history?after_seq=&limit=`
 
@@ -160,11 +160,11 @@ Response `200` (`Paged<PostingView>`):
 }
 ```
 
-`next` is the cursor for the following page, `null` when exhausted. One transaction's postings never split across pages. Other responses: `400 invalid_draft` (bad `after_seq`/`limit`) · `401` · `403 forbidden` (book outside the token's scope) · `404 unknown_account`.
+`next` is the cursor for the following page, `null` when exhausted. One transaction's postings never split across pages. Other responses: `400 invalid_draft` (bad `after_seq`/`limit`) · `401` · `403 forbidden` (book outside the token's scope) · `404 unknown_account` · `429 overloaded` (DB pool saturation; carries `Retry-After: 1`).
 
 ### `GET /v1/transactions/{tx_id}`
 
-Committed transaction by UUID. Response `200` (`TransactionView`): `tx_id`, `book`, `seq`, `at`, `postings` (as above), `external_refs`, `metadata`. Other responses: `400 invalid_draft` (not a UUID) · `401` · `404 not_found` (unknown id, or a transaction whose book is outside the token's scope — indistinguishable by design, so the endpoint is not an existence oracle for transaction ids).
+Committed transaction by UUID. Response `200` (`TransactionView`): `tx_id`, `book`, `seq`, `at`, `postings` (as above), `external_refs`, `metadata`. Other responses: `400 invalid_draft` (not a UUID) · `401` · `404 not_found` (unknown id, or a transaction whose book is outside the token's scope — indistinguishable by design, so the endpoint is not an existence oracle for transaction ids) · `429 overloaded` (DB pool saturation; carries `Retry-After: 1`).
 
 ### `GET /v1/books/{book}/trial-balance?as_of=`
 
@@ -182,7 +182,7 @@ Response `200` (`TrialBalance`):
 }
 ```
 
-Every line balances when the ledger does. Other responses: `401` · `403 forbidden` (book outside the token's scope).
+Every line balances when the ledger does. Other responses: `401` · `403 forbidden` (book outside the token's scope) · `429 overloaded` (DB pool saturation; carries `Retry-After: 1`).
 
 ### `GET /v1/books/{book}/events?from=` — SSE event stream
 
@@ -229,7 +229,7 @@ Every error — including malformed JSON, bad query parameters, wrong content ty
 | `already_exists` | 409 | `what` | Conflicting re-registration |
 | `constraint_violation` | 409 | `account`, `min_balance`, `would_be` | Commit would breach `min_balance` |
 | `timeout` | 408 | — | Request exceeded the 30 s server deadline; safe to retry with the same idempotency key |
-| `overloaded` | 429 | — | Per-book write queue full; carries `Retry-After: 1` |
+| `overloaded` | 429 | — | Per-book write queue full, or DB pool saturation on any route (including reads); carries `Retry-After: 1`. Migration note: pool exhaustion previously surfaced as `500`, so monitoring keyed on 5xx should be updated. |
 | `overloaded` | 503 | — | Admission shed (`TALEA_MAX_INFLIGHT` exceeded); carries `Retry-After: 1` — same envelope, the status code carries the distinction |
 | `internal` | 500 | `message` | Server bug — never used for user error |
 

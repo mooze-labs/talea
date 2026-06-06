@@ -94,7 +94,7 @@ All `/v1` routes require `Authorization: Bearer <token>` when a token is configu
 | `GET /docs` | Swagger UI (open, like `/health`) |
 | `GET /openapi.json` | OpenAPI 3 document, generated from the code at compile time |
 
-Overload returns `503` + `Retry-After`. Retrying with the same idempotency key is always safe; the server's shedding design assumes clients do exactly that, and the SDK does it automatically.
+Overload returns `503` (admission shedding) or `429` (write queue full, or DB pool saturation on any route), both with `Retry-After`. Retrying with the same idempotency key is always safe; the server's shedding design assumes clients do exactly that, and the SDK does it automatically.
 
 ## The `talea` CLI
 
@@ -123,7 +123,7 @@ let client = TaleaClient::builder("http://127.0.0.1:8080")
     .bearer_token("...")
     .build()?;
 
-let posted = client.post(draft).await?;          // bounded auto-retry on 503/transport errors
+let posted = client.post(draft).await?;          // bounded auto-retry on 503/429/408/transport errors
 let mut events = client.subscribe("onramp", 1).await?;  // auto-reconnects, resumes by cursor
 ```
 
@@ -141,7 +141,7 @@ Server (`talead serve` / `talea-server`, via env or `.env`):
 | `TALEA_TOKENS_FILE` | unset | Path to a TOML file of scoped bearer tokens (see below). Additive with `TALEA_API_TOKEN`, which stays equivalent to an unnamed all-books `rw` entry |
 | `TALEA_DB_POOL` | `10` | Connection pool size. On Postgres each SSE subscriber pins one connection: size for subscribers + workers |
 | `TALEA_MAX_INFLIGHT` | `256` | In-flight request cap; excess sheds as 503 |
-| `TALEA_WRITE_QUEUE_DEPTH` | `256` | Per-book write queue length; a full queue answers 429 + `Retry-After` |
+| `TALEA_WRITE_QUEUE_DEPTH` | `256` | Per-book write queue length; a full queue answers 429 + `Retry-After` (DB pool saturation on any route also answers 429) |
 | `TALEA_WRITE_BATCH_MAX` | `64` | Max drafts group-committed in one DB transaction per book |
 | `TALEA_METRICS_BIND` | unset | Optional Prometheus listener (e.g. `127.0.0.1:9100`); unset = no metrics endpoint |
 

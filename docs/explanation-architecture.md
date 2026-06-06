@@ -43,7 +43,7 @@ Each book has a dense sequence `1..N` with no gaps, ever. On the database backen
 
 Every transaction carries a caller-supplied idempotency key, unique per book. Replaying a key returns the original commit (`"deduplicated": true`) instead of posting again. The key is recorded inside the commit transaction, so there is no window where a retry can double-post.
 
-This is the load-bearing decision for the whole system's failure story: timeouts (`408 timeout`), queue backpressure (`429 overloaded`), and admission shedding (`503 overloaded`) are all safe to answer with "retry the same request" — overload degrades to *retry later*, never *maybe applied twice*. The SDK encodes this: its retry policy retries 503/408/transport errors automatically.
+This is the load-bearing decision for the whole system's failure story: timeouts (`408 timeout`), queue backpressure (`429 overloaded`), and admission shedding (`503 overloaded`) are all safe to answer with "retry the same request" — overload degrades to *retry later*, never *maybe applied twice*. The SDK encodes this: its retry policy retries 503/429/408/transport errors automatically.
 
 The CLI never auto-generates keys (`--idem` is required): a generated key would defeat the purpose, because a retried CLI invocation would generate a *different* key.
 

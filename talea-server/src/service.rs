@@ -178,6 +178,16 @@ fn map_store_err(e: StoreError) -> ApiError {
     }
 }
 
+/// Metrics label for a store error surfaced from a commit: backpressure
+/// (429 Overloaded) is "overloaded", everything else is a "rejected" commit.
+fn commits_label(e: &ApiError) -> &'static str {
+    if matches!(e, ApiError::Overloaded) {
+        "overloaded"
+    } else {
+        "rejected"
+    }
+}
+
 #[async_trait]
 impl LedgerApi for LedgerService {
     async fn register_asset(&self, draft: AssetDraft) -> ApiResult<()> {
@@ -271,11 +281,7 @@ impl LedgerApi for LedgerService {
             }
             Err(SubmitError::Store(e)) => {
                 let api_err = map_store_err(e);
-                let label = if matches!(api_err, ApiError::Overloaded) {
-                    "overloaded"
-                } else {
-                    "rejected"
-                };
+                let label = commits_label(&api_err);
                 metrics::counter!("talea_commits_total", "result" => label).increment(1);
                 return Err(api_err);
             }
@@ -501,5 +507,16 @@ mod tests {
         // Other Io errors still answer 500.
         let other = StoreError::Io("disk on fire".into());
         assert!(matches!(map_store_err(other), ApiError::Internal { .. }));
+    }
+
+    #[test]
+    fn commits_label_distinguishes_backpressure_from_rejection() {
+        assert_eq!(commits_label(&ApiError::Overloaded), "overloaded");
+        assert_eq!(
+            commits_label(&ApiError::Internal {
+                message: "boom".into()
+            }),
+            "rejected"
+        );
     }
 }
