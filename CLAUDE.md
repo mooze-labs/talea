@@ -54,3 +54,17 @@ cargo run --release -p talea-bench -- post-one-book
 - **Docs are published**: `docs-pages.yml` rsyncs `docs/` to the GitHub Pages site root (https://mooze-labs.github.io/talea/) on every push to `main` that touches `docs/**`. The docs follow Diataxis (`docs/README.md` is the index); `docs/llms.txt` and `docs/AGENTS-INTEGRATION.md` are the LLM-facing entry points.
 - **Performance decisions gate on CI, not local runs**: macOS dev-rig bench numbers are distorted (Docker VM fsync, proxy gaps). `bench.yml` runs a trimmed profile per push to `main` and a full sweep nightly, charting trends at https://mooze-labs.github.io/talea/dev/bench/. Never compare absolute bench numbers across backends — compare each backend against its own baseline. Perf tweaks that only help dev rigs become documented env knobs, never changed production defaults.
 - **Local test flakes**: `as_of` conformance tests can flake locally from VM clock skew (margins are ~20ms) — re-run single-threaded before suspecting code; CI is authoritative. A leftover `talead` on port 8080 makes bench/integration runs fail `Unauthorized` after a false-positive health check — check `lsof -i :8080` first.
+
+## Shipping
+
+`main` is protected: direct pushes are blocked (required PR + required green `ci` check, strict). Everything — code and docs — ships via pull request:
+
+1. From your worktree: `git push -u origin <branch>`, then `gh pr create` (body: Summary bullets + Test Plan).
+2. Dispatch a FRESH subagent (no implementation context) to review the PR using the `review` skill. Findings go on the PR as comments; the verdict is a review comment whose **last line** is exactly `Verdict: APPROVE` or `Verdict: REQUEST-CHANGES`. Formal `gh pr review --approve` is not used — author and reviewer share one GitHub account, and GitHub rejects self-approval.
+3. On REQUEST-CHANGES: fix in the worktree, push, dispatch a fresh re-review subagent. Loop until APPROVE.
+4. Merge only when CI is green AND the latest verdict comment is APPROVE:
+   `gh pr merge <n> --merge --subject "Merge <branch>: <one-line summary>" --delete-branch`
+   If the merge is blocked because `main` moved (strict checks): `gh pr update-branch <n>`, wait for CI; re-review only if the update had conflicts.
+5. Remove the worktree (the local branch goes with it).
+
+Per-task in-session reviews (subagent-driven development) stay as-is; the PR review replaces the in-session final whole-branch review. Protection applies to everyone (`enforce_admins: true` — agents and the human share one admin account, so an admin bypass would void enforcement). Emergency path, human only: temporarily lift protection (`gh api -X DELETE repos/mooze-labs/talea/branches/main/protection`), push, re-apply it.
