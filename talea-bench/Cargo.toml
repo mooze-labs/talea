@@ -2,6 +2,8 @@
 name = "talea-bench"
 version = "0.1.0"
 edition = "2024"
+# Internal bench harness — never published (no registry metadata, path-only deps).
+publish = false
 
 [lib]
 name = "talea_bench"
