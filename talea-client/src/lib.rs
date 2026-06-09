@@ -30,6 +30,7 @@
 //! with backoff and resumes from the last seen sequence, so consumers never
 //! re-implement cursor bookkeeping.
 
+#[cfg(feature = "cli")]
 pub mod cli;
 mod http;
 mod retry;
