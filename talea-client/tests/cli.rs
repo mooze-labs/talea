@@ -1,3 +1,7 @@
+// Exercises the `talea` CLI, which lives behind the `cli` feature. Without
+// this guard, `cargo test -p talea-client --no-default-features` fails to
+// compile the `talea_client::cli` import; with it, the file is empty there.
+#![cfg(feature = "cli")]
 // Test code: a panicking unwrap/expect IS the test failing (clippy.toml
 // exempts #[test] fns; this extends that to integration-test helpers).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
