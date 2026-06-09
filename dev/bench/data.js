@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781003780365,
+  "lastUpdate": 1781003782338,
   "repoUrl": "https://github.com/mooze-labs/talea",
   "entries": {
     "bench-push-bigger": [
@@ -2536,6 +2536,105 @@ window.BENCHMARK_DATA = {
           {
             "name": "reads/log/p99-trial-balance@c8",
             "value": 709,
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "h4vismat@pm.me",
+            "name": "h4vismat",
+            "username": "h4vismat"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4f36294f571686ffd21a2bfecb9095fe1e85392b",
+          "message": "Merge worktree-client-cli-test-guard: gate cli integration test behind cli feature\n\ntest: gate cli integration test behind the cli feature",
+          "timestamp": "2026-06-09T08:06:44-03:00",
+          "tree_id": "06cfc1eb2103f379725e83b602b6b860042c7939",
+          "url": "https://github.com/mooze-labs/talea/commit/4f36294f571686ffd21a2bfecb9095fe1e85392b"
+        },
+        "date": 1781003781680,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "post-one-book/sqlite/p99-post@c8",
+            "value": 8123,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/sqlite/batch-25/p99-post@c8",
+            "value": 119359,
+            "unit": "us"
+          },
+          {
+            "name": "reads/sqlite/p99-balance@c8",
+            "value": 1426,
+            "unit": "us"
+          },
+          {
+            "name": "reads/sqlite/p99-history@c8",
+            "value": 7211,
+            "unit": "us"
+          },
+          {
+            "name": "reads/sqlite/p99-trial-balance@c8",
+            "value": 11031,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/postgres/p99-post@c8",
+            "value": 6207,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/postgres/batch-25/p99-post@c8",
+            "value": 32991,
+            "unit": "us"
+          },
+          {
+            "name": "reads/postgres/p99-balance@c8",
+            "value": 4947,
+            "unit": "us"
+          },
+          {
+            "name": "reads/postgres/p99-history@c8",
+            "value": 7031,
+            "unit": "us"
+          },
+          {
+            "name": "reads/postgres/p99-trial-balance@c8",
+            "value": 11279,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/log/p99-post@c8",
+            "value": 2053,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/log/batch-25/p99-post@c8",
+            "value": 20815,
+            "unit": "us"
+          },
+          {
+            "name": "reads/log/p99-balance@c8",
+            "value": 555,
+            "unit": "us"
+          },
+          {
+            "name": "reads/log/p99-history@c8",
+            "value": 2523,
+            "unit": "us"
+          },
+          {
+            "name": "reads/log/p99-trial-balance@c8",
+            "value": 542,
             "unit": "us"
           }
         ]
