@@ -1,6 +1,6 @@
 [package]
 name = "talea-client"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Typed client SDK and the talea CLI for the talea ledger server: retry-safe operations and auto-resuming event subscriptions"
 license.workspace = true
