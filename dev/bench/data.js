@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781003195320,
+  "lastUpdate": 1781003780365,
   "repoUrl": "https://github.com/mooze-labs/talea",
   "entries": {
     "bench-push-bigger": [
@@ -997,6 +997,75 @@ window.BENCHMARK_DATA = {
           {
             "name": "reads/log/peak-throughput",
             "value": 26978.5,
+            "unit": "ops/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "h4vismat@pm.me",
+            "name": "h4vismat",
+            "username": "h4vismat"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4f36294f571686ffd21a2bfecb9095fe1e85392b",
+          "message": "Merge worktree-client-cli-test-guard: gate cli integration test behind cli feature\n\ntest: gate cli integration test behind the cli feature",
+          "timestamp": "2026-06-09T08:06:44-03:00",
+          "tree_id": "06cfc1eb2103f379725e83b602b6b860042c7939",
+          "url": "https://github.com/mooze-labs/talea/commit/4f36294f571686ffd21a2bfecb9095fe1e85392b"
+        },
+        "date": 1781003779402,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "post-one-book/sqlite/peak-throughput",
+            "value": 1837.3,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/sqlite/batch-25/peak-throughput",
+            "value": 2335,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/sqlite/peak-throughput",
+            "value": 11475.2,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/postgres/peak-throughput",
+            "value": 1712.8,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/postgres/batch-25/peak-throughput",
+            "value": 7917.5,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/postgres/peak-throughput",
+            "value": 3063.8,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/log/peak-throughput",
+            "value": 6184.9,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/log/batch-25/peak-throughput",
+            "value": 17630,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/log/peak-throughput",
+            "value": 33874.3,
             "unit": "ops/s"
           }
         ]
