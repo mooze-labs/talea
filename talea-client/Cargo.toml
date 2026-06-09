@@ -14,14 +14,22 @@ path = "src/lib.rs"
 [[bin]]
 name = "talea"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+# The `talea` CLI. On by default so `cargo build`/`cargo run -p talea-client`
+# build the binary unchanged. Library-only consumers can opt out with
+# `default-features = false` to drop clap and its tree from the build.
+default = ["cli"]
+cli = ["dep:clap", "dep:clap_complete", "dep:clap_mangen"]
 
 [dependencies]
 async-stream = "0.3"
 async-trait = "0.1.89"
 chrono = { version = "0.4.44", features = ["serde"] }
-clap = { version = "4", features = ["derive", "env", "string"] }
-clap_complete = "4"
-clap_mangen = "0.2"
+clap = { version = "4", features = ["derive", "env", "string"], optional = true }
+clap_complete = { version = "4", optional = true }
+clap_mangen = { version = "0.2", optional = true }
 eventsource-stream = "0.2"
 futures = "0.3.32"
 reqwest = { version = "0.13.4", features = ["json", "stream"] }
