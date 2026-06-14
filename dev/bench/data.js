@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781427818981,
+  "lastUpdate": 1781427820488,
   "repoUrl": "https://github.com/mooze-labs/talea",
   "entries": {
     "bench-push-bigger": [
@@ -6173,6 +6173,208 @@ window.BENCHMARK_DATA = {
           {
             "name": "mixed/log/p99-trial-balance@c8",
             "value": 1044,
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "h4vismat",
+            "username": "h4vismat",
+            "email": "h4vismat@pm.me"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "2cac36b81d55bacf258cdb44d4d64928451d51b6",
+          "message": "Merge worktree-client-bump-0-1-1: release talea-client 0.1.1\n\nrelease: talea-client 0.1.1",
+          "timestamp": "2026-06-09T11:18:14Z",
+          "url": "https://github.com/mooze-labs/talea/commit/2cac36b81d55bacf258cdb44d4d64928451d51b6"
+        },
+        "date": 1781427820283,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "post-one-book/sqlite/p99-post@c8",
+            "value": 9159,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/sqlite/batch-25/p99-post@c8",
+            "value": 114943,
+            "unit": "us"
+          },
+          {
+            "name": "post-many-books/sqlite/p99-post@c8",
+            "value": 7383,
+            "unit": "us"
+          },
+          {
+            "name": "reads/sqlite/p99-balance@c8",
+            "value": 1404,
+            "unit": "us"
+          },
+          {
+            "name": "reads/sqlite/p99-history@c8",
+            "value": 8091,
+            "unit": "us"
+          },
+          {
+            "name": "reads/sqlite/p99-trial-balance@c8",
+            "value": 80191,
+            "unit": "us"
+          },
+          {
+            "name": "overload/sqlite/error-rate/raw-503",
+            "value": 0,
+            "unit": "errors/op"
+          },
+          {
+            "name": "overload/sqlite/error-rate/retry-to-success",
+            "value": 0,
+            "unit": "errors/op"
+          },
+          {
+            "name": "mixed/sqlite/p99-balance@c8",
+            "value": 3955,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/sqlite/p99-history@c8",
+            "value": 6935,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/sqlite/p99-post@c8",
+            "value": 134271,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/sqlite/p99-trial-balance@c8",
+            "value": 1088511,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/postgres/p99-post@c8",
+            "value": 6287,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/postgres/batch-25/p99-post@c8",
+            "value": 36415,
+            "unit": "us"
+          },
+          {
+            "name": "post-many-books/postgres/p99-post@c8",
+            "value": 7627,
+            "unit": "us"
+          },
+          {
+            "name": "reads/postgres/p99-balance@c8",
+            "value": 4283,
+            "unit": "us"
+          },
+          {
+            "name": "reads/postgres/p99-history@c8",
+            "value": 7347,
+            "unit": "us"
+          },
+          {
+            "name": "reads/postgres/p99-trial-balance@c8",
+            "value": 64895,
+            "unit": "us"
+          },
+          {
+            "name": "overload/postgres/error-rate/raw-503",
+            "value": 0,
+            "unit": "errors/op"
+          },
+          {
+            "name": "overload/postgres/error-rate/retry-to-success",
+            "value": 0,
+            "unit": "errors/op"
+          },
+          {
+            "name": "mixed/postgres/p99-balance@c8",
+            "value": 32015,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/postgres/p99-history@c8",
+            "value": 34847,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/postgres/p99-post@c8",
+            "value": 21039,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/postgres/p99-trial-balance@c8",
+            "value": 986111,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/log/p99-post@c8",
+            "value": 2285,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/log/batch-25/p99-post@c8",
+            "value": 38047,
+            "unit": "us"
+          },
+          {
+            "name": "post-many-books/log/p99-post@c8",
+            "value": 2447,
+            "unit": "us"
+          },
+          {
+            "name": "reads/log/p99-balance@c8",
+            "value": 620,
+            "unit": "us"
+          },
+          {
+            "name": "reads/log/p99-history@c8",
+            "value": 2929,
+            "unit": "us"
+          },
+          {
+            "name": "reads/log/p99-trial-balance@c8",
+            "value": 610,
+            "unit": "us"
+          },
+          {
+            "name": "overload/log/error-rate/raw-503",
+            "value": 0,
+            "unit": "errors/op"
+          },
+          {
+            "name": "overload/log/error-rate/retry-to-success",
+            "value": 0,
+            "unit": "errors/op"
+          },
+          {
+            "name": "mixed/log/p99-balance@c8",
+            "value": 996,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/log/p99-history@c8",
+            "value": 1841,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/log/p99-post@c8",
+            "value": 2125,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/log/p99-trial-balance@c8",
+            "value": 1039,
             "unit": "us"
           }
         ]
