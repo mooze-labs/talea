@@ -122,7 +122,28 @@ impl PgTaleaStore {
 // --- shared helpers -----------------------------------------------------
 
 fn io_err(e: impl std::error::Error + Send + Sync + 'static) -> StoreError {
-    StoreError::Io(Box::new(e))
+    let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(e);
+    if is_pool_timeout(boxed.as_ref()) {
+        return StoreError::Saturated;
+    }
+    StoreError::Io(boxed)
+}
+
+/// A pool-acquire timeout anywhere in the error's source chain. Stores may
+/// wrap the sqlx error in context, so walk the chain rather than matching
+/// only the top error.
+fn is_pool_timeout(e: &(dyn std::error::Error + 'static)) -> bool {
+    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(cur) = src {
+        if matches!(
+            cur.downcast_ref::<sqlx::Error>(),
+            Some(sqlx::Error::PoolTimedOut)
+        ) {
+            return true;
+        }
+        src = cur.source();
+    }
+    false
 }
 
 /// Raw stored balance is debit-positive; the effective balance is
@@ -1038,5 +1059,44 @@ impl Store for PgTaleaStore {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod saturation_tests {
+    use super::io_err;
+    use talea_core::store::StoreError;
+
+    #[derive(Debug)]
+    struct Wrapped(sqlx::Error);
+    impl std::fmt::Display for Wrapped {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "context: {}", self.0)
+        }
+    }
+    impl std::error::Error for Wrapped {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn pool_timeout_maps_to_saturated() {
+        assert!(matches!(
+            io_err(sqlx::Error::PoolTimedOut),
+            StoreError::Saturated
+        ));
+        assert!(matches!(
+            io_err(Wrapped(sqlx::Error::PoolTimedOut)),
+            StoreError::Saturated
+        ));
+    }
+
+    #[test]
+    fn other_errors_stay_io() {
+        assert!(matches!(
+            io_err(sqlx::Error::RowNotFound),
+            StoreError::Io(_)
+        ));
     }
 }
