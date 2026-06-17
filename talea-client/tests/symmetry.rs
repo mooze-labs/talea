@@ -13,7 +13,7 @@ use std::sync::Arc;
 use sqlx::sqlite::SqlitePoolOptions;
 use talea_client::*;
 use talea_core::types::Direction;
-use talea_server::service::LedgerService;
+use talea_server::LedgerService;
 use talea_store_sqlite::SqliteTaleaStore;
 
 fn posting(account: &str, asset: &str, minor: i64, direction: Direction) -> PostingDraft {

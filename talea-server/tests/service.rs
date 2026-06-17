@@ -7,7 +7,7 @@ use std::sync::Arc;
 use sqlx::sqlite::SqlitePoolOptions;
 use talea_core::api::*;
 use talea_core::types::Direction;
-use talea_server::service::LedgerService;
+use talea_server::LedgerService;
 use talea_store_sqlite::SqliteTaleaStore;
 
 async fn svc() -> LedgerService {
