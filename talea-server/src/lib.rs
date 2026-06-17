@@ -2,5 +2,5 @@ pub mod config;
 pub mod http;
 pub mod metrics;
 pub mod run;
-pub mod service;
-pub mod write_router;
+
+pub use talea_service::{LedgerService, SubmitError, WriteConfig};

@@ -1,0 +1,28 @@
+[package]
+name = "talea-service"
+version = "0.1.0"
+edition = "2024"
+description = "Embeddable in-process LedgerApi implementation for the talea ledger: validation, translation, and per-book group-commit over any Store backend"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = "0.1.89"
+chrono = { version = "0.4.44", features = ["serde"] }
+futures = "0.3.32"
+metrics = "0.24"
+serde_json = "1.0.150"
+talea-core = { path = "../talea-core/", version = "0.1.0" }
+tokio = { version = "1.52.3", features = ["rt", "sync", "time", "macros"] }
+tracing = "0.1"
+uuid = { version = "1.23.2", features = ["v7", "serde"] }
+
+[dev-dependencies]
+talea-store-log = { path = "../talea-store-log/", version = "0.1.0" }
+tokio = { version = "1.52.3", features = ["full", "test-util"] }
+
+[[example]]
+name = "embedded"
+
+[lints]
+workspace = true

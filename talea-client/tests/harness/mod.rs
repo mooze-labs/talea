@@ -12,9 +12,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use sqlx::sqlite::SqlitePoolOptions;
+use talea_server::LedgerService;
 use talea_server::http::auth::AuthConfig;
 use talea_server::http::routes::router;
-use talea_server::service::LedgerService;
 use talea_store_sqlite::SqliteTaleaStore;
 
 /// Spawns the REAL talea-server router over Postgres on an ephemeral port,

@@ -9,8 +9,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use sqlx::sqlite::SqlitePoolOptions;
+use talea_server::LedgerService;
 use talea_server::http::auth::{Access, AuthConfig, BookSet, TokenScope};
-use talea_server::service::LedgerService;
 use talea_store_sqlite::SqliteTaleaStore;
 use tower::ServiceExt;
 
@@ -713,7 +713,7 @@ mod overload {
     use talea_core::events::LedgerEvent;
     use talea_core::store::*;
     use talea_core::types::*;
-    use talea_server::write_router::WriteConfig;
+    use talea_server::WriteConfig;
 
     /// Every commit hangs forever: the committer parks on the first job, the
     /// depth-1 queue fills with the second, the third gets 429.

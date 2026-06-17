@@ -2767,6 +2767,7 @@ dependencies = [
  "sqlx",
  "subtle",
  "talea-core",
+ "talea-service",
  "talea-store-log",
  "talea-store-postgres",
  "talea-store-sqlite",
@@ -2778,6 +2779,22 @@ dependencies = [
  "tracing-subscriber",
  "utoipa",
  "utoipa-swagger-ui",
+ "uuid",
+]
+
+[[package]]
+name = "talea-service"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "metrics",
+ "serde_json",
+ "talea-core",
+ "talea-store-log",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

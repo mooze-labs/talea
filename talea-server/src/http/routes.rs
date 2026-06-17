@@ -22,7 +22,7 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::config::Config;
 use crate::http::auth::{self, AuthConfig};
 use crate::http::handlers;
-use crate::service::LedgerService;
+use talea_service::LedgerService;
 
 #[derive(Clone)]
 pub struct AppState {

@@ -39,9 +39,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use talea_server::LedgerService;
 use talea_server::http::auth::AuthConfig;
 use talea_server::http::routes::router;
-use talea_server::service::LedgerService;
 use talea_store_sqlite::SqliteTaleaStore;
 
 pub async fn spawn_server(max_inflight: usize) -> String {

@@ -7,7 +7,7 @@ use talea_core::store::{Store, StoreError};
 
 use crate::config::Config;
 use crate::http::auth::AuthConfig;
-use crate::service::LedgerService;
+use talea_service::LedgerService;
 
 /// Connect to the store, bind, and serve until ctrl-c.
 pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
@@ -59,7 +59,7 @@ pub async fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 
     let service = Arc::new(LedgerService::with_write_config(
         store,
-        crate::write_router::WriteConfig {
+        talea_service::WriteConfig {
             queue_depth: config.write_queue_depth,
             batch_max: config.write_batch_max,
             ..Default::default()

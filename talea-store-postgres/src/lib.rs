@@ -95,13 +95,7 @@ impl PgTaleaStore {
         }
         let mut db = match self.pool.begin().await {
             Ok(db) => db,
-            Err(e) => {
-                let msg = format!("failed to begin batch transaction: {e}");
-                return txs
-                    .iter()
-                    .map(|_| Err(StoreError::Io(msg.clone().into())))
-                    .collect();
-            }
+            Err(e) => return batch_failure(e, "failed to begin batch transaction", txs.len()),
         };
         let mut results = Vec::with_capacity(txs.len());
         for (i, tx) in txs.iter().enumerate() {
@@ -109,11 +103,7 @@ impl PgTaleaStore {
         }
         if let Err(e) = db.commit().await {
             // nothing became durable: every recorded success is void
-            let msg = format!("batch commit failed: {e}");
-            return txs
-                .iter()
-                .map(|_| Err(StoreError::Io(msg.clone().into())))
-                .collect();
+            return batch_failure(e, "batch commit failed", txs.len());
         }
         results
     }
@@ -122,7 +112,41 @@ impl PgTaleaStore {
 // --- shared helpers -----------------------------------------------------
 
 fn io_err(e: impl std::error::Error + Send + Sync + 'static) -> StoreError {
-    StoreError::Io(Box::new(e))
+    let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(e);
+    if is_pool_timeout(boxed.as_ref()) {
+        return StoreError::Saturated;
+    }
+    StoreError::Io(boxed)
+}
+
+/// A pool-acquire timeout anywhere in the error's source chain. Stores may
+/// wrap the sqlx error in context, so walk the chain rather than matching
+/// only the top error.
+fn is_pool_timeout(e: &(dyn std::error::Error + 'static)) -> bool {
+    let mut src: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(cur) = src {
+        if matches!(
+            cur.downcast_ref::<sqlx::Error>(),
+            Some(sqlx::Error::PoolTimedOut)
+        ) {
+            return true;
+        }
+        src = cur.source();
+    }
+    false
+}
+
+/// Map a batch-level transaction failure (begin/commit) to one StoreError per
+/// draft. A pool-acquire timeout becomes Saturated (retry-safe backpressure,
+/// HTTP 429); anything else keeps the contextual message as Io.
+fn batch_failure(e: sqlx::Error, context: &str, n: usize) -> Vec<Result<Committed, StoreError>> {
+    if is_pool_timeout(&e) {
+        return (0..n).map(|_| Err(StoreError::Saturated)).collect();
+    }
+    let msg = format!("{context}: {e}");
+    (0..n)
+        .map(|_| Err(StoreError::Io(msg.clone().into())))
+        .collect()
 }
 
 /// Raw stored balance is debit-positive; the effective balance is
@@ -1038,5 +1062,58 @@ impl Store for PgTaleaStore {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod saturation_tests {
+    use super::io_err;
+    use talea_core::store::StoreError;
+
+    #[derive(Debug)]
+    struct Wrapped(sqlx::Error);
+    impl std::fmt::Display for Wrapped {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "context: {}", self.0)
+        }
+    }
+    impl std::error::Error for Wrapped {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn pool_timeout_maps_to_saturated() {
+        assert!(matches!(
+            io_err(sqlx::Error::PoolTimedOut),
+            StoreError::Saturated
+        ));
+        assert!(matches!(
+            io_err(Wrapped(sqlx::Error::PoolTimedOut)),
+            StoreError::Saturated
+        ));
+    }
+
+    #[test]
+    fn other_errors_stay_io() {
+        assert!(matches!(
+            io_err(sqlx::Error::RowNotFound),
+            StoreError::Io(_)
+        ));
+    }
+
+    #[test]
+    fn batch_failure_maps_pool_timeout_to_saturated() {
+        let out = super::batch_failure(sqlx::Error::PoolTimedOut, "ctx", 3);
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|r| matches!(r, Err(StoreError::Saturated))));
+    }
+
+    #[test]
+    fn batch_failure_keeps_other_errors_as_io() {
+        let out = super::batch_failure(sqlx::Error::RowNotFound, "ctx", 2);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|r| matches!(r, Err(StoreError::Io(_)))));
     }
 }
