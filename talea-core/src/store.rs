@@ -55,9 +55,21 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn saturated_renders_as_retryable_backpressure() {
+        let msg = StoreError::Saturated.to_string();
+        assert!(
+            msg.contains("saturated"),
+            "Saturated Display should mention saturation, got: {msg}"
+        );
+    }
 }
 
 #[async_trait]
+/// Backends map resource exhaustion (such as a connection-pool acquire
+/// timeout) to [`StoreError::Saturated`]; all other backend failures use
+/// [`StoreError::Io`]. Pool-less backends never produce `Saturated`.
 pub trait Store: Send + Sync {
     /// Register an asset. Idempotent on id: identical def => Ok(());
     /// same id with a different def => AlreadyExists.
@@ -211,6 +223,12 @@ pub enum StoreError {
     AlreadyExists { what: String },
     #[error("invalid book {0:?}: names starting with '_' are reserved")]
     InvalidBook(Book),
+    /// Backend resource exhaustion (e.g. connection-pool acquire timeout).
+    /// The service answers this as retry-safe backpressure (HTTP 429
+    /// Overloaded); idempotency keys make the retry safe. Pool-less backends
+    /// (the embedded log store) never emit it.
+    #[error("backend saturated; retry")]
+    Saturated,
     #[error("storage backend error: {0}")]
     Io(#[source] Box<dyn std::error::Error + Send + Sync>),
 }

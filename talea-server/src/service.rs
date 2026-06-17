@@ -153,6 +153,7 @@ fn map_store_err(e: StoreError) -> ApiError {
         },
         StoreError::AlreadyExists { what } => ApiError::AlreadyExists { what },
         StoreError::InvalidBook(b) => invalid("book", format!("book {:?} is reserved", b.0)),
+        StoreError::Saturated => ApiError::Overloaded,
         StoreError::Io(e) => {
             // A pool-acquire timeout is saturation, not malfunction: answer
             // with the same backpressure contract as a full write queue
