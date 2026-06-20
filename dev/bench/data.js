@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781943330998,
+  "lastUpdate": 1781943332575,
   "repoUrl": "https://github.com/mooze-labs/talea",
   "entries": {
     "bench-push-bigger": [
@@ -8225,6 +8225,208 @@ window.BENCHMARK_DATA = {
           {
             "name": "mixed/log/p99-trial-balance@c8",
             "value": 1012,
+            "unit": "us"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "h4vismat",
+            "username": "h4vismat",
+            "email": "h4vismat@pm.me"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "474a8c2694e4ed5bdc3f1287c027720782cbba4d",
+          "message": "Merge worktree-talea-service-extraction: extract talea-service embeddable ledger engine\n\nExtract LedgerService into talea-service (embeddable ledger engine)",
+          "timestamp": "2026-06-17T07:43:50Z",
+          "url": "https://github.com/mooze-labs/talea/commit/474a8c2694e4ed5bdc3f1287c027720782cbba4d"
+        },
+        "date": 1781943332343,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "post-one-book/sqlite/p99-post@c8",
+            "value": 8223,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/sqlite/batch-25/p99-post@c8",
+            "value": 117631,
+            "unit": "us"
+          },
+          {
+            "name": "post-many-books/sqlite/p99-post@c8",
+            "value": 7691,
+            "unit": "us"
+          },
+          {
+            "name": "reads/sqlite/p99-balance@c8",
+            "value": 1413,
+            "unit": "us"
+          },
+          {
+            "name": "reads/sqlite/p99-history@c8",
+            "value": 7495,
+            "unit": "us"
+          },
+          {
+            "name": "reads/sqlite/p99-trial-balance@c8",
+            "value": 81151,
+            "unit": "us"
+          },
+          {
+            "name": "overload/sqlite/error-rate/raw-503",
+            "value": 0,
+            "unit": "errors/op"
+          },
+          {
+            "name": "overload/sqlite/error-rate/retry-to-success",
+            "value": 0,
+            "unit": "errors/op"
+          },
+          {
+            "name": "mixed/sqlite/p99-balance@c8",
+            "value": 5171,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/sqlite/p99-history@c8",
+            "value": 7291,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/sqlite/p99-post@c8",
+            "value": 131711,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/sqlite/p99-trial-balance@c8",
+            "value": 1119231,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/postgres/p99-post@c8",
+            "value": 5611,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/postgres/batch-25/p99-post@c8",
+            "value": 32959,
+            "unit": "us"
+          },
+          {
+            "name": "post-many-books/postgres/p99-post@c8",
+            "value": 6451,
+            "unit": "us"
+          },
+          {
+            "name": "reads/postgres/p99-balance@c8",
+            "value": 3827,
+            "unit": "us"
+          },
+          {
+            "name": "reads/postgres/p99-history@c8",
+            "value": 6759,
+            "unit": "us"
+          },
+          {
+            "name": "reads/postgres/p99-trial-balance@c8",
+            "value": 63647,
+            "unit": "us"
+          },
+          {
+            "name": "overload/postgres/error-rate/raw-503",
+            "value": 0,
+            "unit": "errors/op"
+          },
+          {
+            "name": "overload/postgres/error-rate/retry-to-success",
+            "value": 0,
+            "unit": "errors/op"
+          },
+          {
+            "name": "mixed/postgres/p99-balance@c8",
+            "value": 42911,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/postgres/p99-history@c8",
+            "value": 34911,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/postgres/p99-post@c8",
+            "value": 21471,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/postgres/p99-trial-balance@c8",
+            "value": 1050623,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/log/p99-post@c8",
+            "value": 1684,
+            "unit": "us"
+          },
+          {
+            "name": "post-one-book/log/batch-25/p99-post@c8",
+            "value": 43903,
+            "unit": "us"
+          },
+          {
+            "name": "post-many-books/log/p99-post@c8",
+            "value": 1840,
+            "unit": "us"
+          },
+          {
+            "name": "reads/log/p99-balance@c8",
+            "value": 588,
+            "unit": "us"
+          },
+          {
+            "name": "reads/log/p99-history@c8",
+            "value": 2941,
+            "unit": "us"
+          },
+          {
+            "name": "reads/log/p99-trial-balance@c8",
+            "value": 569,
+            "unit": "us"
+          },
+          {
+            "name": "overload/log/error-rate/raw-503",
+            "value": 0,
+            "unit": "errors/op"
+          },
+          {
+            "name": "overload/log/error-rate/retry-to-success",
+            "value": 0,
+            "unit": "errors/op"
+          },
+          {
+            "name": "mixed/log/p99-balance@c8",
+            "value": 1067,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/log/p99-history@c8",
+            "value": 1978,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/log/p99-post@c8",
+            "value": 2123,
+            "unit": "us"
+          },
+          {
+            "name": "mixed/log/p99-trial-balance@c8",
+            "value": 1070,
             "unit": "us"
           }
         ]
