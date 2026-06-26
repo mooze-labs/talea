@@ -1,6 +1,6 @@
 # talea
 
-> Multi-currency, double-entry ledger for crypto and fiat operations: event-sourced, append-only, gapless per-book sequences, idempotent writes. REST + SSE server (`talead`) plus a typed Rust SDK and CLI (`talea-client`).
+> Multi-currency, double-entry ledger for crypto and fiat operations: event-sourced, append-only, gapless per-book sequences, idempotent writes. REST + SSE server (`talead`) plus a typed Rust SDK (`talea-client`) and CLI (`talea-cli`).
 
 Any running instance serves its own machine-readable contract: OpenAPI 3 at `/openapi.json`, Swagger UI at `/docs`.
 
