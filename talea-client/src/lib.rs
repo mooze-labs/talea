@@ -1,4 +1,7 @@
-//! Typed client SDK for the talea ledger server, plus the `talea` CLI.
+//! Typed client SDK for the talea ledger server.
+//!
+//! The `talea` command-line client lives in its own `talea-cli` crate, a
+//! thin shim over this SDK.
 //!
 //! [`TaleaClient`] implements the same [`LedgerApi`] trait the server's
 //! in-process service does, so code written against the trait runs
@@ -30,8 +33,6 @@
 //! with backoff and resumes from the last seen sequence, so consumers never
 //! re-implement cursor bookkeeping.
 
-#[cfg(feature = "cli")]
-pub mod cli;
 mod http;
 mod retry;
 mod sse;

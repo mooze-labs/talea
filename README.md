@@ -18,14 +18,14 @@ In another shell:
 ```bash
 export TALEA_TOKEN=$(grep TALEA_API_TOKEN .env | cut -d= -f2)
 
-cargo run -p talea-client --bin talea -- asset register --id USD --class fiat --precision 2 --name "US Dollar"
-cargo run -p talea-client --bin talea -- account open --book demo --path cash   --asset USD --kind asset  --normal-side debit
-cargo run -p talea-client --bin talea -- account open --book demo --path equity --asset USD --kind equity --normal-side credit
+cargo run -p talea-cli -- asset register --id USD --class fiat --precision 2 --name "US Dollar"
+cargo run -p talea-cli -- account open --book demo --path cash   --asset USD --kind asset  --normal-side debit
+cargo run -p talea-cli -- account open --book demo --path equity --asset USD --kind equity --normal-side credit
 
-cargo run -p talea-client --bin talea -- post --book demo --idem seed \
+cargo run -p talea-cli -- post --book demo --idem seed \
     --credit equity:USD:100000 --debit cash:USD:100000
 
-cargo run -p talea-client --bin talea -- balance --book demo --path cash
+cargo run -p talea-cli -- balance --book demo --path cash
 # { "account": "demo:cash", "asset": "USD", "balance": "1000.00", "updated_seq": 3, ... }
 ```
 
@@ -63,7 +63,8 @@ Or browse [`docs/`](docs/README.md). A running instance serves its own interacti
 | `talea-store-conformance` | One backend-agnostic test suite all stores must pass; the contract in executable form |
 | `talea-server` | `LedgerService` (implements `LedgerApi` over any `Store`) + axum REST/SSE transport with bearer auth and admission control |
 | `talead` | Daemon binary: `init` (migrate, token, seed, `.env`) and `serve` |
-| `talea-client` | `TaleaClient` SDK (also implements `LedgerApi`) + the `talea` CLI binary |
+| `talea-client` | `TaleaClient` SDK (also implements `LedgerApi`) |
+| `talea-cli` | The `talea` CLI binary: a thin shim over the `talea-client` SDK |
 | `talea-bench` | Capacity benchmark suite: five load scenarios against a running server, plus `summarize` for CI trend extraction |
 
 The trait symmetry is the point: `LedgerService` (in-process) and `TaleaClient` (remote) implement the same `LedgerApi`, so code written against the trait runs against either. There is a test that proves it.

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-talea: a multi-currency, double-entry ledger (Rust workspace). Event-sourced core, three storage backends, REST + SSE server, typed client SDK. Two binaries: `talead` (daemon: `init` + `serve`) and `talea` (client CLI, in `talea-client`).
+talea: a multi-currency, double-entry ledger (Rust workspace). Event-sourced core, three storage backends, REST + SSE server, typed client SDK. Two binaries: `talead` (daemon: `init` + `serve`) and `talea` (client CLI, in `talea-cli`, a thin shim over the `talea-client` SDK).
 
 ## Commands
 

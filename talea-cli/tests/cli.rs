@@ -1,14 +1,11 @@
-// Exercises the `talea` CLI, which lives behind the `cli` feature. Without
-// this guard, `cargo test -p talea-client --no-default-features` fails to
-// compile the `talea_client::cli` import; with it, the file is empty there.
-#![cfg(feature = "cli")]
+// Exercises the `talea` CLI in-process against the real server router.
 // Test code: a panicking unwrap/expect IS the test failing (clippy.toml
 // exempts #[test] fns; this extends that to integration-test helpers).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod harness;
 
-use talea_client::cli::{AccountCmd, AssetCmd, Cli, Command, execute};
+use talea_cli::cli::{AccountCmd, AssetCmd, Cli, Command, execute};
 
 fn cli(url: &str, command: Command) -> Cli {
     Cli {

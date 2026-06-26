@@ -22,8 +22,7 @@ indicatif = "0.17"
 reqwest = { version = "0.13.4", features = ["json"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-# SDK only — the bench harness never touches the `talea` CLI, so skip its clap tree.
-talea-client = { path = "../talea-client/", default-features = false }
+talea-client = { path = "../talea-client/" }
 talea-core = { path = "../talea-core/" }
 tokio = { version = "1.52.3", features = ["full"] }
 
