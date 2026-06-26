@@ -33,4 +33,4 @@ Loads `.env` if present (real environment variables win), then runs the server f
 | `TALEA_HTTP_BATCH_MAX` | `500` | Max drafts per `POST /v1/transactions/batch` request |
 | `TALEA_LOG_*` | unset | Append-log store tuning (snapshot cadence, idem cap, segment size) — see [`talea-store-log`](../talea-store-log/README.md) |
 
-Talk to it with the `talea` CLI or SDK from [`talea-client`](../talea-client/README.md). See the [workspace README](../README.md) for a full quickstart.
+Talk to it with the [`talea` CLI](../talea-cli/README.md) or the [`talea-client`](../talea-client/README.md) SDK. See the [workspace README](../README.md) for a full quickstart.

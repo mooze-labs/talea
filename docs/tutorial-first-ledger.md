@@ -40,7 +40,7 @@ In the second terminal — export the token, create money's two sides, and move 
 
 ```bash
 export TALEA_TOKEN=$(grep TALEA_API_TOKEN .env | cut -d= -f2)
-alias talea="cargo run -q -p talea-client --bin talea --"
+alias talea="cargo run -q -p talea-cli --"
 
 talea asset register --id USD --class fiat --precision 2 --name "US Dollar"
 talea account open --book demo --path cash   --asset USD --kind asset  --normal-side debit

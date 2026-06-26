@@ -1,28 +1,31 @@
 [package]
-name = "talea-client"
+name = "talea-cli"
 version = "0.1.1"
 edition = "2024"
-description = "Typed client SDK for the talea ledger server: retry-safe operations and auto-resuming event subscriptions"
+description = "The talea command-line client for the talea ledger server: a thin shim over the talea-client SDK"
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
 
 [lib]
-name = "talea_client"
+name = "talea_cli"
 path = "src/lib.rs"
 
+[[bin]]
+name = "talea"
+path = "src/main.rs"
+
 [dependencies]
-async-stream = "0.3"
-async-trait = "0.1.89"
 chrono = { version = "0.4.44", features = ["serde"] }
-eventsource-stream = "0.2"
+clap = { version = "4", features = ["derive", "env", "string"] }
+clap_complete = "4"
+clap_mangen = "0.2"
 futures = "0.3.32"
-reqwest = { version = "0.13.4", features = ["json", "stream"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+talea-client = { path = "../talea-client/" }
 talea-core = { path = "../talea-core/", version = "0.1.0" }
 tokio = { version = "1.52.3", features = ["full"] }
-tracing = "0.1"
 
 [dev-dependencies]
 axum = "0.8.9"

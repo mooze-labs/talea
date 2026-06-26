@@ -49,7 +49,7 @@ export TALEA_TOKEN=$(grep TALEA_API_TOKEN .env | cut -d= -f2)
 curl -i http://127.0.0.1:8080/health
 # HTTP/1.1 200 OK
 # x-talea-backend: log
-cargo run -p talea-client --bin talea -- trial-balance --book demo
+cargo run -p talea-cli -- trial-balance --book demo
 ```
 
 `x-talea-backend: log` confirms you're on the store you think you're on.

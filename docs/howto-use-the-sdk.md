@@ -173,4 +173,5 @@ A `balance` matching what you posted is the round-trip proof.
 
 - [HTTP API reference](reference-http-api.md) — wire shapes behind every method
 - [Architecture & design](explanation-architecture.md) — why retry-with-same-key is always safe
-- [`talea-client` README](../talea-client/README.md) — SDK + CLI summary
+- [`talea-client` README](../talea-client/README.md) — SDK summary
+- [`talea-cli` README](../talea-cli/README.md) — the `talea` command-line client

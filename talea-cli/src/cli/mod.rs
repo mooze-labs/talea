@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use talea_core::api::*;
 
-use crate::{RetryPolicy, TaleaClient};
+use talea_client::{RetryPolicy, TaleaClient};
 
 #[derive(Parser)]
 #[command(name = "talea", about = "talea ledger client", version)]
