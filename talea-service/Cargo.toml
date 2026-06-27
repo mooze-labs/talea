@@ -12,7 +12,7 @@ chrono = { version = "0.4.44", features = ["serde"] }
 futures = "0.3.32"
 metrics = "0.24"
 serde_json = "1.0.150"
-talea-core = { path = "../talea-core/", version = "0.1.0" }
+talea-core = { path = "../talea-core/", version = "0.1.1" }
 tokio = { version = "1.52.3", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1"
 uuid = { version = "1.23.2", features = ["v7", "serde"] }
