@@ -2727,14 +2727,13 @@ dependencies = [
  "talea-client",
  "talea-core",
  "talea-server",
- "talea-store-postgres",
  "talea-store-sqlite",
  "tokio",
 ]
 
 [[package]]
 name = "talea-client"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-stream",
  "async-trait",
