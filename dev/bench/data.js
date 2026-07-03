@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782979035438,
+  "lastUpdate": 1783064958863,
   "repoUrl": "https://github.com/mooze-labs/talea",
   "entries": {
     "bench-push-bigger": [
@@ -6584,6 +6584,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "mixed/log/peak-throughput",
             "value": 14380.533333333333,
+            "unit": "ops/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "h4vismat",
+            "username": "h4vismat",
+            "email": "h4vismat@pm.me"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "28b0ce4446d474ab7c25ce7a6ff4e75f8362ec99",
+          "message": "Merge worktree-talea-core-bump: bump talea-core to 0.1.1 to publish talea-service\n\nrelease: bump talea-core to 0.1.1 to publish talea-service",
+          "timestamp": "2026-06-27T04:19:43Z",
+          "url": "https://github.com/mooze-labs/talea/commit/28b0ce4446d474ab7c25ce7a6ff4e75f8362ec99"
+        },
+        "date": 1783064958493,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "post-one-book/sqlite/peak-throughput",
+            "value": 1748.6,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/sqlite/batch-25/peak-throughput",
+            "value": 1903.3333333333333,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-many-books/sqlite/peak-throughput",
+            "value": 1380.5333333333333,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/sqlite/peak-throughput",
+            "value": 11788.966666666667,
+            "unit": "ops/s"
+          },
+          {
+            "name": "overload/sqlite/peak-throughput",
+            "value": 1729.2,
+            "unit": "ops/s"
+          },
+          {
+            "name": "mixed/sqlite/peak-throughput",
+            "value": 866.6333333333333,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/postgres/peak-throughput",
+            "value": 5037.5,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/postgres/batch-25/peak-throughput",
+            "value": 7667.5,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-many-books/postgres/peak-throughput",
+            "value": 2302.3,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/postgres/peak-throughput",
+            "value": 2730.633333333333,
+            "unit": "ops/s"
+          },
+          {
+            "name": "overload/postgres/peak-throughput",
+            "value": 5464.733333333334,
+            "unit": "ops/s"
+          },
+          {
+            "name": "mixed/postgres/peak-throughput",
+            "value": 539.6333333333333,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/log/peak-throughput",
+            "value": 7895.666666666667,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-one-book/log/batch-25/peak-throughput",
+            "value": 12283.333333333334,
+            "unit": "ops/s"
+          },
+          {
+            "name": "post-many-books/log/peak-throughput",
+            "value": 12147,
+            "unit": "ops/s"
+          },
+          {
+            "name": "reads/log/peak-throughput",
+            "value": 36542.36666666667,
+            "unit": "ops/s"
+          },
+          {
+            "name": "overload/log/peak-throughput",
+            "value": 7448.733333333334,
+            "unit": "ops/s"
+          },
+          {
+            "name": "mixed/log/peak-throughput",
+            "value": 12542.9,
             "unit": "ops/s"
           }
         ]
